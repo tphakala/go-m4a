@@ -1,0 +1,34 @@
+# Binaries and build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/dist/
+/bin/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+*.prof
+cpu.out
+mem.out
+
+# Fuzz corpus cache (keep seed corpora under testdata/, ignore the generated cache)
+testdata/fuzz/
+
+# Scratch media generated during interop testing (checked-in goldens live under testdata/)
+/scratch/
+*.tmp.m4a
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Private planning / design documents (not part of the published library)
+docs/superpowers/
+docs/box-layout.md
