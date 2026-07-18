@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 
+	aac "github.com/tphakala/go-aac"
 	aacpcm "github.com/tphakala/go-aac/pcm"
 	m4a "github.com/tphakala/go-m4a"
 )
@@ -69,14 +70,17 @@ func EncodeInterleaved(w io.WriteSeeker, cfg aacpcm.Config, pcm []byte) error {
 		return err
 	}
 
-	// EncoderDelay left 0 selects m4a.DefaultEncoderDelay (1024); MediaLength
+	// EncoderDelay comes straight from the codec (aac.EncoderDelay, go-aac issue
+	// #27) rather than go-m4a's default literal, so the edit-list priming trim
+	// tracks go-aac automatically if the codec's framing ever changes. MediaLength
 	// pins the edit-list segment to the exact source length so trailing padding
 	// is excluded too.
 	wr, err := m4a.NewWriter(w, m4a.WriterConfig{
-		SampleRate:  cfg.SampleRate,
-		Channels:    cfg.Channels,
-		ASC:         asc,
-		MediaLength: int64(samplesPerChannel),
+		SampleRate:   cfg.SampleRate,
+		Channels:     cfg.Channels,
+		ASC:          asc,
+		EncoderDelay: aac.EncoderDelay,
+		MediaLength:  int64(samplesPerChannel),
 	})
 	if err != nil {
 		return err
