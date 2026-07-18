@@ -1,0 +1,66 @@
+# Linting standard shared with github.com/tphakala/go-flac and go-aac, trimmed
+# to what go-m4a needs: the go-aac-specific depguard fmath boundary and the
+# gocritic ruleguard rules/*.go wiring are dropped (go-m4a has no such internal
+# numeric fence), the common linter set is kept.
+version: "2"
+output:
+  sort-order:
+    - linter
+    - severity
+    - file
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - dupl
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - iface
+    - ineffassign
+    - misspell
+    - nilerr
+    - nilnil
+    - predeclared
+    - prealloc
+    - revive
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - wastedassign
+  disable:
+    - unused
+  settings:
+    gocognit:
+      min-complexity: 50
+    gocritic:
+      disabled-checks:
+        - commentFormatting
+        - commentedOutCode
+      enabled-tags:
+        - style
+        - diagnostic
+        - performance
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+        - name: exported
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+    exhaustive:
+      default-signifies-exhaustive: true
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+  new: false
