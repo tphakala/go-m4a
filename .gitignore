@@ -32,3 +32,6 @@ testdata/fuzz/
 # Private planning / design documents (not part of the published library)
 docs/superpowers/
 docs/box-layout.md
+
+# Serena tool cache
+.serena/
