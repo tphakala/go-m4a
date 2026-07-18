@@ -4,6 +4,7 @@ package aacm4a
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -13,8 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
+	m4a "github.com/tphakala/go-m4a"
 )
 
 // memWriteSeeker is an in-memory io.WriteSeeker: it grows a byte slice on write
@@ -236,9 +239,9 @@ func TestInteropDecode(t *testing.T) {
 		delay      int64
 		wantBytes  int64
 	}{
-		{"ffmpeg_mono48k.m4a", 48000, 1, 30, 1024, 61440},
+		{"ffmpeg_mono48k.m4a", 48000, 1, 30, m4a.DefaultEncoderDelay, 61440},
 		{"afconvert_mono48k.m4a", 48000, 1, 31, 0, 63488},
-		{"ffmpeg_stereo44k.m4a", 44100, 2, 27, 1024, 110592},
+		{"ffmpeg_stereo44k.m4a", 44100, 2, 27, m4a.DefaultEncoderDelay, 110592},
 		{"afconvert_stereo44k.m4a", 44100, 2, 28, 0, 114688},
 	}
 	for _, tc := range cases {
@@ -301,10 +304,14 @@ func TestFFprobeValidates(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	out, err := exec.Command(ffprobe, "-v", "error", "-show_streams",
-		"-print_format", "json", path).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// CombinedOutput captures stderr alongside stdout so a nonzero exit is
+	// diagnosable; "-v error" keeps stderr empty on success, leaving pure JSON.
+	out, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-show_streams",
+		"-print_format", "json", path).CombinedOutput()
 	if err != nil {
-		t.Fatalf("ffprobe: %v", err)
+		t.Fatalf("ffprobe: %v\n%s", err, out)
 	}
 
 	var probe struct {

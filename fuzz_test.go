@@ -68,7 +68,13 @@ func FuzzReader(f *testing.F) {
 
 		r, err := NewReader(bytes.NewReader(data))
 		if err != nil {
-			return // a rejected input is a valid outcome
+			// A rejected input is a valid outcome, but the rejection must carry a
+			// typed sentinel, exactly as the ReadFrame/RawStream errors below are
+			// checked. A bare or mistyped error from NewReader is a contract break.
+			if !isReaderSentinel(err) {
+				t.Errorf("NewReader error = %v, want ErrCorrupt/ErrUnsupported/io.EOF", err)
+			}
+			return
 		}
 
 		_ = r.Info()

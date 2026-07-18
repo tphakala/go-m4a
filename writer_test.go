@@ -4,6 +4,7 @@ package m4a
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // ascMono48k is a valid AAC-LC AudioSpecificConfig for 48000 Hz mono
@@ -572,12 +574,22 @@ func TestFFprobeInterop(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	out, err := exec.Command(ffprobe,
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Parse stdout as JSON but capture stderr in its own buffer: under
+	// -count_packets ffprobe's AAC decoder logs benign diagnostics (the synthetic
+	// access units are not real AAC frames) to stderr, which a CombinedOutput
+	// would splice into the JSON and break the parse. The captured stderr still
+	// surfaces in any failure message.
+	cmd := exec.CommandContext(ctx, ffprobe,
 		"-v", "error",
 		"-show_format", "-show_streams", "-show_packets", "-count_packets",
-		"-print_format", "json", path).Output()
+		"-print_format", "json", path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("ffprobe failed: %v\n%s", err, out)
+		t.Fatalf("ffprobe failed: %v\n%s", err, stderr.Bytes())
 	}
 
 	var probe struct {

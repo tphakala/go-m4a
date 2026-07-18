@@ -193,8 +193,10 @@ func (w *Writer) WriteFrame(au []byte) error {
 // Close finalizes the file: it patches the streamed mdat largesize, seeks past
 // the payload, and writes the moov metadata (mvhd, trak with tkhd, optional
 // edts/elst, and mdia down to the sample tables). It reports an error if no
-// frames were written or a write fails. Close is not repeatable: a second call
-// returns ErrClosed.
+// frames were written or a write fails. After a successful Close a second call
+// returns ErrClosed. A Close that fails on a transient Seek or Write may be
+// retried (WriteFrame stays rejected in between); a Close after a failed
+// WriteFrame returns that latched error and writes nothing.
 func (w *Writer) Close() error {
 	if w.finalized {
 		return ErrClosed // already finalized; a second Close is a no-op error

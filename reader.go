@@ -196,12 +196,13 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 // allocation is bounded by the real input.
 func readSection(r io.ReadSeeker, off, n int64) ([]byte, error) {
 	if n < 0 {
-		return nil, fmt.Errorf("negative length %d", n)
+		return nil, fmt.Errorf("negative length %d: %w", n, ErrCorrupt)
 	}
 	if n > maxInt {
 		// A >2 GiB box on a 32-bit build would panic make() or truncate; reject
-		// it as corrupt rather than crash.
-		return nil, fmt.Errorf("section length %d exceeds addressable memory", n)
+		// it as corrupt rather than crash. Wrap ErrCorrupt so a caller
+		// classifying with errors.Is catches it like any other malformation.
+		return nil, fmt.Errorf("section length %d exceeds addressable memory: %w", n, ErrCorrupt)
 	}
 	if _, err := r.Seek(off, io.SeekStart); err != nil {
 		return nil, err
