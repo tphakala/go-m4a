@@ -92,7 +92,10 @@ for {
 
 `Reader.RawStream()` returns an `io.Reader` that frames each access unit exactly
 as go-aac's `pcm.WithRawStream` expects, so the two libraries plug together with
-no glue.
+no glue, allocation-free per frame. For callers that want the bytes directly
+without the `io.Reader` framing, `Reader.ReadFrameInto(dst)` fills a reused
+buffer instead of allocating one per frame like `ReadFrame` does (it returns the
+required length with `io.ErrShortBuffer` if `dst` is too small).
 
 ### aacm4a: the go-aac bridge
 

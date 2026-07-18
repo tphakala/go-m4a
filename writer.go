@@ -267,7 +267,12 @@ func (w *Writer) buildMoov() []byte {
 
 	// stbl: sample description, timing, and location tables. The single chunk
 	// starts at payloadStart, which is well within uint32, so stco always fits.
-	var stbl []byte
+	// Pre-size the buffer to the known final length so the stsz entry list
+	// (4 bytes per sample, the dominant term) does not trigger a chain of
+	// growslice reallocations. The len(w.asc)+256 term generously covers the
+	// fixed stsd/mp4a/esds/stts/stsc/stco overhead. This only sets capacity; the
+	// appended bytes, and thus the output file, are unchanged.
+	stbl := make([]byte, 0, 4*len(w.sizes)+len(w.asc)+256)
 	stbl = box.AppendStsd(stbl, w.channels, w.sampleRate, w.asc)
 	stbl = box.AppendStts(stbl, frameCount, samplesPerFrame)
 	stbl = box.AppendStsc(stbl, 1, frameCount, 1)

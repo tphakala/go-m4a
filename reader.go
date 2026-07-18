@@ -735,6 +735,27 @@ func (rd *Reader) ReadFrame() ([]byte, error) {
 	return buf, nil
 }
 
+// ReadFrameInto reads the next access unit into dst and returns its length,
+// advancing the cursor. It is the zero-allocation form of ReadFrame for callers
+// that reuse a buffer across frames. If dst is too small to hold the frame,
+// ReadFrameInto reads nothing, does not advance, and returns the required length
+// with io.ErrShortBuffer, so the caller can grow dst and call again. It returns
+// io.EOF after the last access unit, and a wrapped ErrCorrupt for a frame whose
+// extent falls outside the stream or a short read.
+func (rd *Reader) ReadFrameInto(dst []byte) (int, error) {
+	size, err := rd.nextFrameSize()
+	if err != nil {
+		return 0, err
+	}
+	if len(dst) < int(size) {
+		return int(size), io.ErrShortBuffer
+	}
+	if err := rd.readFrameInto(dst, size); err != nil {
+		return 0, err
+	}
+	return int(size), nil
+}
+
 // nextFrameSize validates and returns the size of the next access unit without
 // advancing the cursor. It returns io.EOF at the end of the track, and a
 // wrapped ErrCorrupt for a zero-length frame or one whose extent falls outside
