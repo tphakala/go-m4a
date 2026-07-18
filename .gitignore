@@ -16,8 +16,9 @@ coverage.html
 cpu.out
 mem.out
 
-# Fuzz corpus cache (keep seed corpora under testdata/, ignore the generated cache)
-testdata/fuzz/
+# Go's generated fuzz corpus cache lives in the build cache (GOCACHE), not in
+# the repo. The seed corpus and any discovered crashers under testdata/fuzz/ are
+# committed regression data, so they are deliberately NOT ignored here.
 
 # Scratch media generated during interop testing (checked-in goldens live under testdata/)
 /scratch/
