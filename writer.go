@@ -34,6 +34,20 @@ const samplesPerFrame = 1024
 // in the first five bits of an AudioSpecificConfig.
 const audioObjectTypeAACLC = 2
 
+// maxAudioSampleEntryRate is the largest sample rate the mp4a AudioSampleEntry
+// samplerate field can represent. It is a 16.16 fixed-point value, so the
+// integer rate must fit 16 bits; a higher rate would silently wrap when shifted
+// into the field. The supported 44100 and 48000 Hz (and 64000) are well within
+// it; 88200 and 96000 are not, so they are rejected rather than written wrong.
+const maxAudioSampleEntryRate = 0xFFFF
+
+// maxFrames caps the number of access units per file so the moov sample tables
+// and their enclosing box sizes cannot overflow the 32-bit box size field. At
+// this bound the stsz box alone is about 2 GiB, well under the 4 GiB ceiling,
+// and it corresponds to roughly 149 hours of 48 kHz audio, far beyond any real
+// clip. Reaching it returns an error instead of silently corrupting the file.
+const maxFrames = 1 << 29
+
 // samplingFrequencyTable maps an AudioSpecificConfig samplingFrequencyIndex to a
 // sample rate in Hz (ISO/IEC 14496-3 Table 1.16). Index 15 (explicit rate) is
 // out of v1 scope and simply falls off the end of the table.
@@ -68,8 +82,10 @@ type WriterConfig struct {
 	// every decoded sample after the priming.
 	MediaLength int64
 
-	// Brand overrides the ftyp major brand (default "M4A "). The compatible
-	// brands always include "M4A ", "mp42", and "isom".
+	// Brand overrides the ftyp major brand (default "M4A "). When set it must be
+	// exactly four bytes (space-padded, for example "mp42"); NewWriter rejects
+	// any other length. The compatible brands always include "M4A ", "mp42", and
+	// "isom".
 	Brand string
 }
 
@@ -96,8 +112,15 @@ type Writer struct {
 	payloadStart  int64
 	totalPayload  int64
 
-	sizes  []uint32 // per-access-unit byte lengths, in write order (for stsz)
-	closed bool
+	sizes []uint32 // per-access-unit byte lengths, in write order (for stsz)
+
+	// State machine. writeErr latches a failed WriteFrame so the sample table
+	// can never disagree with the bytes on disk; closed is set once Close is
+	// called (rejecting further WriteFrame); finalized is set only after moov is
+	// written, so a Close whose finalize step fails transiently can be retried.
+	writeErr  error
+	closed    bool
+	finalized bool
 }
 
 // NewWriter validates cfg against its ASC, then writes the ftyp box and the
@@ -143,14 +166,24 @@ func NewWriter(w io.WriteSeeker, cfg WriterConfig) (*Writer, error) {
 // its size for the stsz table. It rejects a nil or empty access unit, and any
 // call after Close, with an error.
 func (w *Writer) WriteFrame(au []byte) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
 	if w.closed {
 		return ErrClosed
 	}
 	if len(au) == 0 {
 		return fmt.Errorf("go-m4a: WriteFrame: empty access unit")
 	}
+	if len(w.sizes) >= maxFrames {
+		return fmt.Errorf("go-m4a: WriteFrame: frame count would exceed the limit of %d", maxFrames)
+	}
 	if _, err := w.w.Write(au); err != nil {
-		return fmt.Errorf("go-m4a: write frame: %w", err)
+		// A partial or failed write leaves the mdat payload out of sync with the
+		// recorded sizes. Latch the error so no later WriteFrame or Close can
+		// build a sample table that disagrees with the bytes on disk.
+		w.writeErr = fmt.Errorf("go-m4a: write frame: %w", err)
+		return w.writeErr
 	}
 	w.sizes = append(w.sizes, uint32(len(au)))
 	w.totalPayload += int64(len(au))
@@ -163,9 +196,16 @@ func (w *Writer) WriteFrame(au []byte) error {
 // frames were written or a write fails. Close is not repeatable: a second call
 // returns ErrClosed.
 func (w *Writer) Close() error {
-	if w.closed {
-		return ErrClosed
+	if w.finalized {
+		return ErrClosed // already finalized; a second Close is a no-op error
 	}
+	if w.writeErr != nil {
+		return w.writeErr // a prior WriteFrame failed; the file is incomplete
+	}
+	// Mark closed so any further WriteFrame is rejected, even if a transient
+	// finalize failure below leaves the file unfinished. finalized is set only
+	// on success, so the caller may retry Close after a transient Seek/Write
+	// error without WriteFrame being able to append in between.
 	w.closed = true
 	if len(w.sizes) == 0 {
 		return fmt.Errorf("go-m4a: Close: no frames written")
@@ -188,6 +228,7 @@ func (w *Writer) Close() error {
 	if _, err := w.w.Write(w.buildMoov()); err != nil {
 		return fmt.Errorf("go-m4a: write moov: %w", err)
 	}
+	w.finalized = true
 	return nil
 }
 
@@ -273,8 +314,17 @@ func validateConfig(cfg WriterConfig) error {
 	if cfg.EncoderDelay < NoEdit {
 		return fmt.Errorf("go-m4a: encoder delay %d is invalid, want >= %d", cfg.EncoderDelay, NoEdit)
 	}
+	if cfg.Brand != "" && len(cfg.Brand) != 4 {
+		return fmt.Errorf("go-m4a: brand %q must be exactly 4 bytes", cfg.Brand)
+	}
 	if !rateSupported(cfg.SampleRate) {
 		return fmt.Errorf("go-m4a: unsupported sample rate %d Hz", cfg.SampleRate)
+	}
+	if cfg.SampleRate > maxAudioSampleEntryRate {
+		// The mp4a AudioSampleEntry samplerate is a 16.16 field, so a rate above
+		// 65535 Hz cannot be represented and would be written wrong. 88200 and
+		// 96000 Hz are the affected AAC rates; reject rather than corrupt.
+		return fmt.Errorf("go-m4a: sample rate %d Hz exceeds the mp4a samplerate field maximum of %d Hz", cfg.SampleRate, maxAudioSampleEntryRate)
 	}
 
 	aot, sfi, chanConfig := parseASC(cfg.ASC)

@@ -115,8 +115,11 @@ dec, info, err := aacm4a.NewDecoder(f) // *aacpcm.Decoder, m4a.Info, error
 _, err = io.Copy(pcmOut, dec)
 ```
 
-`NewDecoder` emits every decoded sample, including the leading priming; trim
-`info.EncoderDelay` leading samples per channel for sample-accurate output.
+The go-aac decoder is not edit-list aware: `NewDecoder` emits every decoded
+sample, including both the leading priming and the trailing final-frame padding.
+For sample-accurate output, skip `info.EncoderDelay` leading samples per channel,
+then keep only `info.Duration`-worth of samples (`Duration * SampleRate` per
+channel) and discard the rest.
 
 ## Gapless playback and the edit list
 

@@ -198,6 +198,11 @@ func readSection(r io.ReadSeeker, off, n int64) ([]byte, error) {
 	if n < 0 {
 		return nil, fmt.Errorf("negative length %d", n)
 	}
+	if n > maxInt {
+		// A >2 GiB box on a 32-bit build would panic make() or truncate; reject
+		// it as corrupt rather than crash.
+		return nil, fmt.Errorf("section length %d exceeds addressable memory", n)
+	}
 	if _, err := r.Seek(off, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -381,7 +386,7 @@ func parseStbl(stbl []byte, tr *track) error {
 func parseStsd(stsd []byte, tr *track) error {
 	// stsd body: version/flags(4) + entry_count(4), then the sample entries.
 	if len(stsd) < 8 {
-		return fmt.Errorf("stsd too short: %d bytes", len(stsd))
+		return fmt.Errorf("go-m4a: stsd too short: %d bytes: %w", len(stsd), ErrCorrupt)
 	}
 	entries := stsd[8:]
 	h, err := box.ParseHeader(entries)
@@ -389,7 +394,7 @@ func parseStsd(stsd []byte, tr *track) error {
 		return err
 	}
 	if h.ToEnd || h.Total < h.HeaderLen || h.Total > int64(len(entries)) {
-		return fmt.Errorf("stsd sample entry runs past box")
+		return fmt.Errorf("go-m4a: stsd sample entry runs past box: %w", ErrCorrupt)
 	}
 	tr.codec = h.Type
 	tr.haveSE = true
@@ -447,6 +452,20 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 		return err
 	}
 
+	// Cross-check the stts total against the stsz sample count. A spec-compliant
+	// file agrees; a mismatch signals corruption. stts may be absent in an
+	// otherwise-readable file, so this only checks when the box was present.
+	if tr.stts != nil {
+		sttsSamples, _, serr := box.ParseStts(tr.stts)
+		if serr != nil {
+			return wrapParse(serr)
+		}
+		if sttsSamples != uint64(rd.sampleCount) {
+			return fmt.Errorf("go-m4a: stts sample count %d disagrees with stsz %d: %w",
+				sttsSamples, rd.sampleCount, ErrCorrupt)
+		}
+	}
+
 	// Copy the ASC so the Reader is independent of the moov buffer.
 	rd.info.ASC = append([]byte(nil), tr.asc...)
 	rd.info.FrameCount = rd.sampleCount
@@ -475,6 +494,11 @@ func (rd *Reader) buildGeometry(tr *track) error {
 	if constSize != 0 && int64(count)*int64(constSize) > rd.streamLen {
 		return fmt.Errorf("go-m4a: stsz constant %d x count %d exceeds stream %d: %w",
 			constSize, count, rd.streamLen, ErrCorrupt)
+	}
+	if int64(count) > maxInt {
+		// On a 32-bit build int(count) for count >= 2^31 would go negative and
+		// silently truncate the sample count; reject it as corrupt.
+		return fmt.Errorf("go-m4a: stsz sample count %d exceeds addressable memory: %w", count, ErrCorrupt)
 	}
 	rd.constSize = constSize
 	rd.sizes = sizes
@@ -549,15 +573,30 @@ func expandStsc(entries []box.StscEntry, numChunks, sampleCount int) ([]int64, e
 		prevFirst = e.FirstChunk
 		last := uint32(numChunks) // this run extends to the final chunk...
 		if i+1 < len(entries) {
-			last = entries[i+1].FirstChunk - 1 // ...or up to the next run's first chunk
+			// ...or up to the next run's first chunk. The next entry's
+			// FirstChunk is used here, one iteration before its own turn at the
+			// top-of-loop validation, so validate it now: an unchecked value of
+			// 0 underflows to 0xFFFFFFFF, and any value past numChunks makes the
+			// fill loop below write out of bounds.
+			next := entries[i+1].FirstChunk
+			if next <= e.FirstChunk || next > uint32(numChunks) {
+				return nil, fmt.Errorf("go-m4a: stsc first_chunk %d out of order or range: %w", next, ErrCorrupt)
+			}
+			last = next - 1
 		}
 		runChunks := int64(last) - int64(e.FirstChunk) + 1
-		samples := runChunks * int64(e.SamplesPerChunk)
-		if samples > int64(sampleCount)-total {
+		// runChunks is now bounded by numChunks, but SamplesPerChunk is an
+		// unbounded uint32, so compute the product overflow-safely: compare
+		// runChunks against remaining/spc rather than forming runChunks*spc,
+		// which could overflow int64 on a hostile table.
+		spc := int64(e.SamplesPerChunk)
+		remaining := int64(sampleCount) - total
+		if spc > 0 && runChunks > remaining/spc {
 			return nil, fmt.Errorf("go-m4a: stsc samples exceed sample_count %d: %w", sampleCount, ErrCorrupt)
 		}
+		samples := runChunks * spc
 		for c := e.FirstChunk; c <= last; c++ {
-			perChunk[c-1] = int64(e.SamplesPerChunk)
+			perChunk[c-1] = spc
 		}
 		total += samples
 	}
@@ -684,30 +723,61 @@ func (rd *Reader) ASC() []byte {
 // cursor. It returns io.EOF after the last access unit. A frame whose computed
 // extent falls outside the stream, or a short read, is a wrapped ErrCorrupt.
 func (rd *Reader) ReadFrame() ([]byte, error) {
-	if rd.nextSample >= rd.sampleCount {
-		return nil, io.EOF
-	}
-	size := rd.sizeOf(rd.nextSample)
-	off := rd.curOffset
-	if size == 0 {
-		return nil, fmt.Errorf("go-m4a: frame %d has zero length: %w", rd.nextSample, ErrCorrupt)
-	}
-	if off < 0 || off+int64(size) > rd.streamLen {
-		return nil, fmt.Errorf("go-m4a: frame %d at [%d,%d) outside stream %d: %w",
-			rd.nextSample, off, off+int64(size), rd.streamLen, ErrCorrupt)
-	}
-	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("go-m4a: seek frame %d: %w", rd.nextSample, err)
+	size, err := rd.nextFrameSize()
+	if err != nil {
+		return nil, err
 	}
 	buf := make([]byte, size)
-	if _, err := io.ReadFull(rd.r, buf); err != nil {
-		// Bounds were checked above, so a short read here is a truncated or
-		// misbehaving stream. Fold in the message as text rather than wrapping
-		// the error, so a stray io.EOF cannot masquerade as a clean end of frames.
-		return nil, fmt.Errorf("go-m4a: read frame %d: %s: %w", rd.nextSample, err.Error(), ErrCorrupt)
+	if err := rd.readFrameInto(buf, size); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+// nextFrameSize validates and returns the size of the next access unit without
+// advancing the cursor. It returns io.EOF at the end of the track, and a
+// wrapped ErrCorrupt for a zero-length frame or one whose extent falls outside
+// the stream. The size is bounded against streamLen, so a caller may allocate a
+// buffer of that size safely (on a 32-bit build a >2 GiB frame is rejected by
+// the maxInt guard before any allocation).
+func (rd *Reader) nextFrameSize() (uint32, error) {
+	if rd.nextSample >= rd.sampleCount {
+		return 0, io.EOF
+	}
+	size := rd.sizeOf(rd.nextSample)
+	if size == 0 {
+		return 0, fmt.Errorf("go-m4a: frame %d has zero length: %w", rd.nextSample, ErrCorrupt)
+	}
+	off := rd.curOffset
+	if off < 0 || off+int64(size) > rd.streamLen {
+		return 0, fmt.Errorf("go-m4a: frame %d at [%d,%d) outside stream %d: %w",
+			rd.nextSample, off, off+int64(size), rd.streamLen, ErrCorrupt)
+	}
+	if int64(size) > maxInt {
+		return 0, fmt.Errorf("go-m4a: frame %d of %d bytes exceeds addressable memory: %w",
+			rd.nextSample, size, ErrCorrupt)
+	}
+	return size, nil
+}
+
+// readFrameInto seeks to the current frame, reads exactly size bytes into
+// dst[:size], and advances the cursor. dst must have length at least size (the
+// caller sizes it from nextFrameSize). Splitting the read from allocation lets
+// RawStream reuse one buffer across frames instead of allocating per frame.
+func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
+	off := rd.curOffset
+	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
+		return fmt.Errorf("go-m4a: seek frame %d: %w", rd.nextSample, err)
+	}
+	if _, err := io.ReadFull(rd.r, dst[:size]); err != nil {
+		// Bounds were checked in nextFrameSize, so a short read here is a
+		// truncated or misbehaving stream. Fold in the message as text rather
+		// than wrapping the error, so a stray io.EOF cannot masquerade as a
+		// clean end of frames.
+		return fmt.Errorf("go-m4a: read frame %d: %s: %w", rd.nextSample, err.Error(), ErrCorrupt)
 	}
 	rd.advance(size)
-	return buf, nil
+	return nil
 }
 
 // advance moves the running cursor past the just-read sample, stepping to the
@@ -737,35 +807,48 @@ func (rd *Reader) RawStream() io.Reader {
 	return &rawReader{rd: rd}
 }
 
-// rawReader adapts sequential ReadFrame calls into a length-prefixed byte
-// stream, buffering one framed access unit at a time.
+// rawReader adapts sequential frames into a length-prefixed byte stream,
+// buffering one framed access unit at a time. It reuses a single scratch buffer
+// across frames (grown to the largest frame seen), so the streaming decode path
+// allocates nothing per frame after warm-up rather than the two heap buffers a
+// ReadFrame-then-copy adapter would.
 type rawReader struct {
-	rd  *Reader
-	buf []byte
-	err error
+	rd      *Reader
+	scratch []byte // reused: 2-byte big-endian length prefix followed by the access unit
+	buf     []byte // unread window into scratch
+	err     error
 }
 
 // Read fills p from the buffered frame, fetching and framing the next access
-// unit when the buffer drains. It surfaces io.EOF at the end of the stream and
-// caches a terminal error so later calls stay consistent.
+// unit directly into the reused scratch buffer when the window drains. It
+// surfaces io.EOF at the end of the stream and caches a terminal error so later
+// calls stay consistent.
 func (rr *rawReader) Read(p []byte) (int, error) {
 	for len(rr.buf) == 0 {
 		if rr.err != nil {
 			return 0, rr.err
 		}
-		au, err := rr.rd.ReadFrame()
+		size, err := rr.rd.nextFrameSize()
 		if err != nil {
 			rr.err = err
 			return 0, err
 		}
-		if len(au) > 0xffff {
-			rr.err = fmt.Errorf("go-m4a: access unit %d bytes exceeds 65535: %w", len(au), ErrUnsupported)
+		if size > 0xffff {
+			rr.err = fmt.Errorf("go-m4a: access unit %d bytes exceeds 65535: %w", size, ErrUnsupported)
 			return 0, rr.err
 		}
-		framed := make([]byte, 2+len(au))
-		binary.BigEndian.PutUint16(framed, uint16(len(au)))
-		copy(framed[2:], au)
-		rr.buf = framed
+		need := int(size) + 2
+		if cap(rr.scratch) < need {
+			rr.scratch = make([]byte, need)
+		} else {
+			rr.scratch = rr.scratch[:need]
+		}
+		binary.BigEndian.PutUint16(rr.scratch, uint16(size))
+		if err := rr.rd.readFrameInto(rr.scratch[2:need], size); err != nil {
+			rr.err = err
+			return 0, err
+		}
+		rr.buf = rr.scratch[:need]
 	}
 	n := copy(p, rr.buf)
 	rr.buf = rr.buf[n:]
@@ -790,3 +873,10 @@ func wrapParse(err error) error {
 // for MPEG-4 Audio (ISO/IEC 14496-3), which covers AAC. The container derives
 // AAC-LC specifics from the ASC rather than this registration byte.
 const objectTypeMP4Audio = 0x40
+
+// maxInt is the largest value the platform int can hold: math.MaxInt64 on a
+// 64-bit build, math.MaxInt32 on a 32-bit one. A count or length parsed from a
+// file as a 32-bit field is bounded against it before any make() or int
+// conversion, so a hostile value cannot truncate to a negative int or panic
+// make() on a 32-bit target (BirdNET-Go ships on 32-bit ARM).
+const maxInt = int64(^uint(0) >> 1)

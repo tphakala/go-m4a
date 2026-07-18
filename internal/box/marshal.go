@@ -371,8 +371,11 @@ func AppendStco(dst []byte, offsets []uint32) []byte {
 	return dst
 }
 
-// AppendCo64 appends the co64 (64-bit chunk offset) FullBox, used when a chunk
-// offset does not fit uint32.
+// AppendCo64 appends the co64 (64-bit chunk offset) FullBox, the 64-bit
+// counterpart to AppendStco. The writer never emits it, because its single
+// chunk offset always fits uint32; it is kept for symmetry with ParseCo64 so
+// the marshaler and parser cover the same box set, and it backs the reader's
+// co64 round-trip test.
 func AppendCo64(dst []byte, offsets []uint64) []byte {
 	size := uint32(12 + 4 + 8*len(offsets)) // header + entry_count + entries
 	dst = AppendFullBoxHeader(dst, size, fourCCCo64, 0, 0)

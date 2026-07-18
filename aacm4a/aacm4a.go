@@ -56,7 +56,12 @@ func EncodeInterleaved(w io.WriteSeeker, cfg aacpcm.Config, pcm []byte) error {
 	if err := aacpcm.EncodeInterleaved(&adts, cfg, pcm); err != nil {
 		return err
 	}
-	// cfg is valid past this point, so stride is positive and this is safe.
+	// aacpcm.EncodeInterleaved validated cfg above, so stride is positive here.
+	// Guard explicitly anyway so the division can never panic if go-aac's
+	// validation ever stops rejecting a zero channel count or sub-byte depth.
+	if stride <= 0 {
+		return fmt.Errorf("go-m4a/aacm4a: invalid stride for %d channels at %d-bit PCM", cfg.Channels, cfg.BitDepth)
+	}
 	samplesPerChannel := len(pcm) / stride
 
 	asc, err := audioSpecificConfig(cfg.SampleRate, cfg.Channels)
@@ -136,10 +141,13 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 
 // NewDecoder opens an MP4/M4A file and returns a go-aac decoder that streams
 // interleaved little-endian S16 PCM, together with the container Info
-// (SampleRate, Channels, FrameCount, EncoderDelay, Duration). The decoder emits
-// every decoded sample including the leading priming; callers wanting
-// sample-accurate output trim Info.EncoderDelay leading samples per channel
-// before consuming the stream.
+// (SampleRate, Channels, FrameCount, EncoderDelay, Duration). The go-aac decoder
+// is not edit-list aware: it emits every decoded sample (FrameCount*1024 per
+// channel), including both the leading priming and the trailing final-frame
+// padding. For sample-accurate output, skip Info.EncoderDelay leading samples
+// per channel, then keep only as many samples per channel as Info.Duration
+// represents (Duration*SampleRate), discarding the trailing padding the edit
+// list excludes.
 func NewDecoder(r io.ReadSeeker) (*aacpcm.Decoder, m4a.Info, error) {
 	rd, err := m4a.NewReader(r)
 	if err != nil {

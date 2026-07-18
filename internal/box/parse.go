@@ -73,23 +73,29 @@ func ParseHeader(b []byte) (Header, error) {
 // Every child advances the cursor by at least eight bytes, so a hostile table
 // cannot spin: ParseHeader rejects any smaller size.
 func WalkChildren(payload []byte, fn func(typ FourCC, body []byte) error) error {
-	for off := 0; off < len(payload); {
+	// All arithmetic is int64 and every bound is compared against
+	// int64(len(payload)) before any slice. A largesize can be as large as
+	// 1<<62, so narrowing to int (32-bit on a 386/arm build) before the bound
+	// check would truncate a hostile size and defeat the guard, slicing out of
+	// range. The int conversion happens only after the bound is proven.
+	n := int64(len(payload))
+	for off := int64(0); off < n; {
 		h, err := ParseHeader(payload[off:])
 		if err != nil {
 			return err
 		}
 		total := h.Total
 		if h.ToEnd {
-			total = int64(len(payload) - off)
+			total = n - off
 		}
-		if total < h.HeaderLen || off+int(total) > len(payload) {
+		if total < h.HeaderLen || off+total > n {
 			return fmt.Errorf("child box %q runs past parent: %w", h.Type, errParse)
 		}
-		body := payload[off+int(h.HeaderLen) : off+int(total)]
+		body := payload[off+h.HeaderLen : off+total]
 		if err := fn(h.Type, body); err != nil {
 			return err
 		}
-		off += int(total)
+		off += total
 	}
 	return nil
 }
@@ -331,8 +337,11 @@ func ParseCo64(payload []byte) ([]uint64, error) {
 
 // ParseStts decodes the stts (decoding time to sample) FullBox body and returns
 // the total sample count sum(sample_count) and the total media duration
-// sum(sample_count * sample_delta). Both sums use 64-bit accumulators so a large
-// table cannot overflow. The entry count is bounded by the body length.
+// sum(sample_count * sample_delta), both as uint64. The sample-count sum is the
+// authoritative value (the reader cross-checks it against stsz); the duration
+// sum is advisory, since a single sample_count * sample_delta term can already
+// reach ~2^64 and wrap on a pathological table. The entry count is bounded by
+// the body length before the loop, so the allocation stays input-proportional.
 func ParseStts(payload []byte) (sampleCount, duration uint64, err error) {
 	if len(payload) < 8 {
 		return 0, 0, fmt.Errorf("stts: %d bytes: %w", len(payload), errParse)
