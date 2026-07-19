@@ -247,6 +247,50 @@ func ParseAudioSampleEntry(payload []byte) (channels uint16, sampleRate uint32, 
 	return channels, sampleRate, childOffset, nil
 }
 
+// ParseDops decodes the OpusSpecificBox (dOps) body carried by an Opus sample
+// entry, per the Encapsulation of Opus in ISOBMFF. It reads the fixed fields:
+// Version(1) OutputChannelCount(1) PreSkip(2) InputSampleRate(4) OutputGain(2)
+// ChannelMappingFamily(1). A non-zero mapping family is followed by a channel
+// mapping table, which the reader does not need for frame extraction and ignores.
+// It rejects a version other than 0.
+func ParseDops(payload []byte) (channels uint8, preSkip uint16, inputSampleRate uint32, err error) {
+	const fixed = 11
+	if len(payload) < fixed {
+		return 0, 0, 0, fmt.Errorf("dOps: %d bytes, need %d: %w", len(payload), fixed, errParse)
+	}
+	if payload[0] != 0 {
+		return 0, 0, 0, fmt.Errorf("dOps version %d unsupported: %w", payload[0], errParse)
+	}
+	channels = payload[1]
+	preSkip = binary.BigEndian.Uint16(payload[2:])
+	inputSampleRate = binary.BigEndian.Uint32(payload[4:])
+	return channels, preSkip, inputSampleRate, nil
+}
+
+// ParseDfla extracts the raw STREAMINFO metadata block body from a FLACSpecificBox
+// (dfLa) body, per the Encapsulation of FLAC in ISOBMFF. Layout: a FullBox
+// version/flags(4), then one or more FLAC metadata blocks (a 1-byte last-flag+type,
+// a 24-bit length, then the body). The first block must be STREAMINFO (type 0). The
+// returned slice aliases payload; the caller copies it.
+func ParseDfla(payload []byte) (streamInfo []byte, err error) {
+	if len(payload) < 4+4 {
+		return nil, fmt.Errorf("dfLa: %d bytes, need version/flags and a block header: %w", len(payload), errParse)
+	}
+	// Skip the FullBox version and 24-bit flags, then read the first metadata block
+	// header: bit 7 is the last-block flag, bits 0..6 the block type.
+	hdr := payload[4:]
+	blockType := hdr[0] & 0x7f
+	length := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
+	if blockType != 0 {
+		return nil, fmt.Errorf("dfLa first metadata block type %d is not STREAMINFO: %w", blockType, errParse)
+	}
+	body := hdr[4:]
+	if length > len(body) {
+		return nil, fmt.Errorf("dfLa STREAMINFO length %d overruns %d bytes: %w", length, len(body), errParse)
+	}
+	return body[:length], nil
+}
+
 // StscEntry is one run of the sample-to-chunk table: every chunk numbered at or
 // after FirstChunk (until the next entry's FirstChunk) holds SamplesPerChunk
 // samples described by SampleDescriptionIndex.
