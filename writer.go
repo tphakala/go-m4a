@@ -25,6 +25,18 @@ const DefaultEncoderDelay = 1024
 // entirely: the writer emits no edts/elst and presents every decoded sample.
 const NoEdit = -1
 
+// DefaultOpusPreSkip is the pre-skip an Opus encoder emits before the first real
+// sample, in samples at the 48 kHz Opus timescale. It is go-opus's measured value
+// (Encoder.PreSkip) and the value used when a CodecOpus WriterConfig leaves
+// OpusPreSkip at zero.
+const DefaultOpusPreSkip = 312
+
+// opusTimescale is the media (and, here, movie) timescale for an Opus track. The
+// Encapsulation of Opus in ISOBMFF fixes it at 48000 regardless of the original
+// input rate, so a CodecOpus writer requires SampleRate == 48000 and every sample
+// duration is counted in 48 kHz samples.
+const opusTimescale = 48000
+
 // samplesPerFrame is the fixed AAC-LC output length of one access unit, in
 // samples per channel. Every AU decodes to exactly this many samples, so the
 // stts table is a single (FrameCount, 1024) run.
@@ -59,17 +71,40 @@ var samplingFrequencyTable = [...]int{
 // WriterConfig configures a Writer. SampleRate and Channels must agree with ASC;
 // NewWriter validates them against it and refuses a mismatch.
 type WriterConfig struct {
-	// SampleRate is the audio sample rate in Hz (for example 48000). Required,
-	// and it must match the rate encoded in ASC.
+	// Codec selects the audio codec. The zero value is CodecAACLC, so a config
+	// that sets only ASC keeps muxing AAC-LC. For CodecOpus set OpusPreSkip and
+	// OpusInputSampleRate (and SampleRate must be 48000); for CodecFLAC set
+	// STREAMINFO.
+	Codec Codec
+
+	// SampleRate is the audio sample rate in Hz (for example 48000). Required. For
+	// AAC-LC it must match the rate encoded in ASC; for Opus it must be 48000 (the
+	// fixed Opus container timescale).
 	SampleRate int
 
-	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and it
-	// must match the channel configuration encoded in ASC.
+	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
+	// AAC-LC it must match the channel configuration encoded in ASC.
 	Channels int
 
-	// ASC is the MPEG-4 AudioSpecificConfig (two bytes for AAC-LC). Required.
-	// The writer copies the bytes verbatim into the esds DecoderSpecificInfo.
+	// ASC is the MPEG-4 AudioSpecificConfig (two bytes for AAC-LC). Required for
+	// CodecAACLC; ignored otherwise. The writer copies the bytes verbatim into the
+	// esds DecoderSpecificInfo.
 	ASC []byte
+
+	// OpusPreSkip is the Opus pre-skip in samples at 48 kHz (go-opus's
+	// Encoder.PreSkip). It fills the dOps PreSkip field and the edit-list media
+	// time. Used only for CodecOpus; zero selects DefaultOpusPreSkip.
+	OpusPreSkip int
+
+	// OpusInputSampleRate is the original source sample rate recorded in the dOps
+	// InputSampleRate field (informational; Opus always decodes at 48 kHz). Used
+	// only for CodecOpus; zero selects SampleRate.
+	OpusInputSampleRate int
+
+	// STREAMINFO is the 34-byte FLAC STREAMINFO metadata block, the payload of the
+	// dfLa box (from go-flac's pcm.FrameEncoder.StreamInfoBytes). Required for
+	// CodecFLAC; ignored otherwise.
+	STREAMINFO []byte
 
 	// EncoderDelay is the number of leading priming samples to trim with an edit
 	// list. Zero uses DefaultEncoderDelay (1024); NoEdit writes no edit list at
@@ -98,12 +133,29 @@ type Writer struct {
 	w io.WriteSeeker
 
 	// Normalized configuration, captured at NewWriter so a later mutation of the
-	// caller's WriterConfig or ASC slice cannot change the output.
-	sampleRate   uint32
-	channels     uint16
-	asc          []byte
-	encoderDelay int
-	mediaLength  int64
+	// caller's WriterConfig or byte slices cannot change the output.
+	codec         Codec
+	sampleRate    uint32
+	channels      uint16
+	asc           []byte // AAC-LC AudioSpecificConfig
+	streamInfo    []byte // FLAC STREAMINFO (dfLa payload)
+	opusPreSkip   uint16
+	opusInputRate uint32
+	encoderDelay  int
+	mediaLength   int64
+
+	// timescale is the media and movie timescale: SampleRate for AAC and FLAC,
+	// 48000 for Opus. defaultDelay is the codec's priming trim when EncoderDelay is
+	// left at zero. defaultDuration is the per-sample duration WriteFrame records
+	// for a fixed-duration codec (1024 for AAC-LC); it is zero for Opus and FLAC,
+	// whose callers must use WriteFrameDuration.
+	timescale       uint32
+	defaultDelay    int
+	defaultDuration uint32
+
+	// durations holds each access unit's decode duration in the media timescale,
+	// in write order, for the stts table.
+	durations []uint32
 
 	// Byte bookkeeping. mdatBoxOffset is where the mdat box header starts;
 	// payloadStart is where the first access unit begins; totalPayload is the
@@ -150,22 +202,60 @@ func NewWriter(w io.WriteSeeker, cfg WriterConfig) (*Writer, error) {
 		return nil, fmt.Errorf("go-m4a: write mdat header: %w", err)
 	}
 
-	return &Writer{
+	wr := &Writer{
 		w:             w,
+		codec:         cfg.Codec,
 		sampleRate:    uint32(cfg.SampleRate),
 		channels:      uint16(cfg.Channels),
-		asc:           append([]byte(nil), cfg.ASC...),
 		encoderDelay:  cfg.EncoderDelay,
 		mediaLength:   cfg.MediaLength,
+		timescale:     uint32(cfg.SampleRate),
 		mdatBoxOffset: int64(len(ftyp)),
 		payloadStart:  int64(len(ftyp) + box.MdatHeaderSize),
-	}, nil
+	}
+	switch cfg.Codec {
+	case CodecAACLC:
+		wr.asc = append([]byte(nil), cfg.ASC...)
+		wr.defaultDelay = DefaultEncoderDelay // 1024
+		wr.defaultDuration = samplesPerFrame  // every AAC-LC AU is 1024 samples
+	case CodecOpus:
+		// The Opus timescale is fixed at 48000; validateConfig enforced SampleRate.
+		wr.opusPreSkip = uint16(cfg.OpusPreSkip)
+		if wr.opusPreSkip == 0 {
+			wr.opusPreSkip = DefaultOpusPreSkip
+		}
+		wr.opusInputRate = uint32(cfg.OpusInputSampleRate)
+		if wr.opusInputRate == 0 {
+			wr.opusInputRate = uint32(cfg.SampleRate)
+		}
+		wr.defaultDelay = int(wr.opusPreSkip)
+		// Opus packet durations vary (the final packet may be short), so callers
+		// supply each with WriteFrameDuration; defaultDuration stays 0.
+	case CodecFLAC:
+		wr.streamInfo = append([]byte(nil), cfg.STREAMINFO...)
+		wr.defaultDelay = 0 // FLAC has no encoder priming
+		// FLAC block sizes vary (the final frame is short); callers supply each
+		// with WriteFrameDuration; defaultDuration stays 0.
+	}
+	return wr, nil
 }
 
-// WriteFrame appends one raw AAC-LC access unit to the mdat payload and records
-// its size for the stsz table. It rejects a nil or empty access unit, and any
-// call after Close, with an error.
+// WriteFrame appends one access unit to the mdat payload using the codec's fixed
+// per-sample duration. It works for AAC-LC, whose every AU is 1024 samples. For
+// Opus and FLAC, whose frames vary in duration, it returns an error directing the
+// caller to WriteFrameDuration. It rejects a nil or empty access unit, and any
+// call after Close.
 func (w *Writer) WriteFrame(au []byte) error {
+	return w.WriteFrameDuration(au, w.defaultDuration)
+}
+
+// WriteFrameDuration appends one access unit to the mdat payload and records its
+// size for the stsz table and sampleDuration (in the media timescale) for the stts
+// table. sampleDuration is the number of samples per channel the access unit
+// decodes to: 1024 for an AAC-LC AU, the packet's 48 kHz sample count for Opus, or
+// the block size for FLAC. It rejects a nil or empty access unit, a zero duration,
+// and any call after Close.
+func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 	if w.writeErr != nil {
 		return w.writeErr
 	}
@@ -174,6 +264,9 @@ func (w *Writer) WriteFrame(au []byte) error {
 	}
 	if len(au) == 0 {
 		return fmt.Errorf("go-m4a: WriteFrame: empty access unit")
+	}
+	if sampleDuration == 0 {
+		return fmt.Errorf("go-m4a: WriteFrame: zero sample duration; codec %s requires an explicit duration via WriteFrameDuration", w.codec)
 	}
 	if len(w.sizes) >= maxFrames {
 		return fmt.Errorf("go-m4a: WriteFrame: frame count would exceed the limit of %d", maxFrames)
@@ -186,6 +279,7 @@ func (w *Writer) WriteFrame(au []byte) error {
 		return w.writeErr
 	}
 	w.sizes = append(w.sizes, uint32(len(au)))
+	w.durations = append(w.durations, sampleDuration)
 	w.totalPayload += int64(len(au))
 	return nil
 }
@@ -234,12 +328,13 @@ func (w *Writer) Close() error {
 	return nil
 }
 
-// buildMoov assembles the complete moov box from the accumulated sample sizes
-// and the resolved edit-list parameters. Movie and media timescales both equal
-// the sample rate, so the elst media_time and segment_duration share one unit.
+// buildMoov assembles the complete moov box from the accumulated sample sizes,
+// the per-sample durations, and the resolved edit-list parameters. Movie and media
+// timescales both equal w.timescale (the sample rate, which is 48000 for Opus), so
+// the elst media_time and segment_duration share one unit.
 func (w *Writer) buildMoov() []byte {
 	frameCount := uint32(len(w.sizes))
-	mediaDuration := uint64(frameCount) * samplesPerFrame
+	mediaDuration := w.totalDuration()
 
 	editList := w.encoderDelay != NoEdit
 	presentationDuration := mediaDuration
@@ -248,7 +343,7 @@ func (w *Writer) buildMoov() []byte {
 	if editList {
 		delay := w.encoderDelay
 		if delay == 0 {
-			delay = DefaultEncoderDelay
+			delay = w.defaultDelay
 		}
 		mediaTime = int64(delay)
 		if w.mediaLength > 0 {
@@ -272,9 +367,9 @@ func (w *Writer) buildMoov() []byte {
 	// growslice reallocations. The len(w.asc)+256 term generously covers the
 	// fixed stsd/mp4a/esds/stts/stsc/stco overhead. This only sets capacity; the
 	// appended bytes, and thus the output file, are unchanged.
-	stbl := make([]byte, 0, 4*len(w.sizes)+len(w.asc)+256)
-	stbl = box.AppendStsd(stbl, w.channels, w.sampleRate, w.asc)
-	stbl = box.AppendStts(stbl, frameCount, samplesPerFrame)
+	stbl := make([]byte, 0, 4*len(w.sizes)+len(w.streamInfo)+256)
+	stbl = box.AppendStsdEntry(stbl, w.sampleEntry())
+	stbl = box.AppendSttsRuns(stbl, w.sttsRuns())
 	stbl = box.AppendStsc(stbl, 1, frameCount, 1)
 	stbl = box.AppendStsz(stbl, w.sizes)
 	stbl = box.AppendStco(stbl, []uint32{uint32(w.payloadStart)})
@@ -287,7 +382,7 @@ func (w *Writer) buildMoov() []byte {
 
 	// mdia: media header, sound handler, media information.
 	var mdia []byte
-	mdia = box.AppendMdhd(mdia, w.sampleRate, mediaDuration)
+	mdia = box.AppendMdhd(mdia, w.timescale, mediaDuration)
 	mdia = box.AppendHdlr(mdia, box.NewFourCC("soun"), "SoundHandler")
 	mdia = box.AppendMinf(mdia, minf)
 
@@ -300,18 +395,55 @@ func (w *Writer) buildMoov() []byte {
 	trak = box.AppendMdia(trak, mdia)
 
 	// moov: movie header then the single track.
-	moov := box.AppendMvhd(nil, w.sampleRate, presentationDuration)
+	moov := box.AppendMvhd(nil, w.timescale, presentationDuration)
 	moov = box.AppendTrak(moov, trak)
 	return box.AppendMoov(nil, moov)
+}
+
+// totalDuration is the sum of every access unit's decode duration, in the media
+// timescale.
+func (w *Writer) totalDuration() uint64 {
+	var d uint64
+	for _, x := range w.durations {
+		d += uint64(x)
+	}
+	return d
+}
+
+// sttsRuns run-length-encodes the per-sample durations into stts entries. AAC-LC
+// collapses to a single (frameCount, 1024) run; Opus and FLAC produce a run of the
+// nominal duration plus a short final run.
+func (w *Writer) sttsRuns() []box.SttsRun {
+	var runs []box.SttsRun
+	for _, d := range w.durations {
+		if n := len(runs); n > 0 && runs[n-1].Delta == d {
+			runs[n-1].Count++
+			continue
+		}
+		runs = append(runs, box.SttsRun{Count: 1, Delta: d})
+	}
+	return runs
+}
+
+// sampleEntry builds the codec-specific stsd sample entry: mp4a+esds (AAC-LC),
+// Opus+dOps, or fLaC+dfLa.
+func (w *Writer) sampleEntry() []byte {
+	switch w.codec {
+	case CodecOpus:
+		dops := box.AppendDops(nil, uint8(w.channels), w.opusPreSkip, w.opusInputRate)
+		return box.AppendOpusEntry(nil, w.channels, w.sampleRate, dops)
+	case CodecFLAC:
+		dfla := box.AppendDfla(nil, w.streamInfo)
+		return box.AppendFlacEntry(nil, w.channels, w.sampleRate, dfla)
+	default:
+		return box.AppendMp4a(nil, w.channels, w.sampleRate, w.asc)
+	}
 }
 
 // validateConfig checks every field of cfg and cross-checks SampleRate and
 // Channels against the AudioSpecificConfig. All messages are prefixed
 // "go-m4a: " to match the package error convention.
 func validateConfig(cfg WriterConfig) error {
-	if len(cfg.ASC) < 2 {
-		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
-	}
 	if cfg.Channels < 1 || cfg.Channels > 2 {
 		return fmt.Errorf("go-m4a: channels %d out of range, want 1 or 2", cfg.Channels)
 	}
@@ -324,16 +456,37 @@ func validateConfig(cfg WriterConfig) error {
 	if cfg.Brand != "" && len(cfg.Brand) != 4 {
 		return fmt.Errorf("go-m4a: brand %q must be exactly 4 bytes", cfg.Brand)
 	}
+	if cfg.SampleRate <= 0 {
+		return fmt.Errorf("go-m4a: sample rate %d Hz is not positive", cfg.SampleRate)
+	}
+	if cfg.SampleRate > maxAudioSampleEntryRate {
+		// The AudioSampleEntry samplerate is a 16.16 field, so a rate above 65535 Hz
+		// cannot be represented and would be written wrong. 88200 and 96000 Hz are
+		// the affected AAC rates; reject rather than corrupt.
+		return fmt.Errorf("go-m4a: sample rate %d Hz exceeds the samplerate field maximum of %d Hz", cfg.SampleRate, maxAudioSampleEntryRate)
+	}
+
+	switch cfg.Codec {
+	case CodecAACLC:
+		return validateAACConfig(cfg)
+	case CodecOpus:
+		return validateOpusConfig(cfg)
+	case CodecFLAC:
+		return validateFLACConfig(cfg)
+	default:
+		return fmt.Errorf("go-m4a: unknown codec %d", cfg.Codec)
+	}
+}
+
+// validateAACConfig cross-checks the AAC-LC AudioSpecificConfig against SampleRate
+// and Channels.
+func validateAACConfig(cfg WriterConfig) error {
+	if len(cfg.ASC) < 2 {
+		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
+	}
 	if !rateSupported(cfg.SampleRate) {
 		return fmt.Errorf("go-m4a: unsupported sample rate %d Hz", cfg.SampleRate)
 	}
-	if cfg.SampleRate > maxAudioSampleEntryRate {
-		// The mp4a AudioSampleEntry samplerate is a 16.16 field, so a rate above
-		// 65535 Hz cannot be represented and would be written wrong. 88200 and
-		// 96000 Hz are the affected AAC rates; reject rather than corrupt.
-		return fmt.Errorf("go-m4a: sample rate %d Hz exceeds the mp4a samplerate field maximum of %d Hz", cfg.SampleRate, maxAudioSampleEntryRate)
-	}
-
 	aot, sfi, chanConfig := parseASC(cfg.ASC)
 	if aot != audioObjectTypeAACLC {
 		return fmt.Errorf("go-m4a: ASC audio object type %d is not AAC-LC (%d)", aot, audioObjectTypeAACLC)
@@ -346,6 +499,31 @@ func validateConfig(cfg WriterConfig) error {
 	}
 	if int(chanConfig) != cfg.Channels {
 		return fmt.Errorf("go-m4a: channels %d does not match ASC channel configuration %d", cfg.Channels, chanConfig)
+	}
+	return nil
+}
+
+// validateOpusConfig checks the Opus-specific fields. The Opus encapsulation fixes
+// the container timescale at 48000, so SampleRate must be 48000.
+func validateOpusConfig(cfg WriterConfig) error {
+	if cfg.SampleRate != opusTimescale {
+		return fmt.Errorf("go-m4a: Opus requires SampleRate %d, got %d", opusTimescale, cfg.SampleRate)
+	}
+	if cfg.OpusPreSkip < 0 {
+		return fmt.Errorf("go-m4a: Opus pre-skip %d is negative", cfg.OpusPreSkip)
+	}
+	if cfg.OpusInputSampleRate < 0 {
+		return fmt.Errorf("go-m4a: Opus input sample rate %d is negative", cfg.OpusInputSampleRate)
+	}
+	return nil
+}
+
+// validateFLACConfig checks that the STREAMINFO metadata block is present and the
+// expected 34 bytes.
+func validateFLACConfig(cfg WriterConfig) error {
+	const streamInfoLen = 34
+	if len(cfg.STREAMINFO) != streamInfoLen {
+		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d", len(cfg.STREAMINFO), streamInfoLen)
 	}
 	return nil
 }

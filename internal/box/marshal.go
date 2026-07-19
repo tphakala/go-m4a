@@ -296,13 +296,15 @@ func appendDescriptor(dst []byte, tag byte, payload []byte) []byte {
 	return append(dst, payload...)
 }
 
-// AppendMp4a appends the mp4a AudioSampleEntry: the 28 bytes of fixed
-// AudioSampleEntry fields (channelcount, samplesize 16, samplerate as a 16.16
-// value of SampleRate) followed by the esds child carrying asc.
-func AppendMp4a(dst []byte, channels uint16, sampleRate uint32, asc []byte) []byte {
-	esds := AppendEsds(nil, asc)
-	size := uint32(8 + 28 + len(esds))
-	dst = AppendBoxHeader(dst, size, fourCCMp4a)
+// appendAudioSampleEntry appends the AudioSampleEntry shared by the mp4a, Opus,
+// and fLaC sample entries: the box header for typ, then the 28 bytes of fixed
+// fields (channelcount, samplesize 16, samplerate as a 16.16 value of SampleRate),
+// then the codec-specific child box (esds, dOps, or dfLa). The samplerate 16.16
+// field is valid for rates <= 65535 Hz, which covers 44100/48000 and the 48000 Hz
+// Opus timescale.
+func appendAudioSampleEntry(dst []byte, typ FourCC, channels uint16, sampleRate uint32, child []byte) []byte {
+	size := uint32(8 + 28 + len(child))
+	dst = AppendBoxHeader(dst, size, typ)
 	dst = append(dst, 0, 0, 0, 0, 0, 0)  // reserved[6]
 	dst = appendU16(dst, 1)              // data_reference_index
 	dst = appendU32(dst, 0)              // reserved[0]
@@ -312,26 +314,93 @@ func AppendMp4a(dst []byte, channels uint16, sampleRate uint32, asc []byte) []by
 	dst = appendI16(dst, 0)              // pre_defined
 	dst = appendI16(dst, 0)              // reserved
 	dst = appendU32(dst, sampleRate<<16) // samplerate (16.16)
-	return append(dst, esds...)
+	return append(dst, child...)
 }
 
-// AppendStsd appends the stsd (sample description) FullBox holding one mp4a
-// entry for the AAC-LC track.
-func AppendStsd(dst []byte, channels uint16, sampleRate uint32, asc []byte) []byte {
-	mp4a := AppendMp4a(nil, channels, sampleRate, asc)
-	size := uint32(12 + 4 + len(mp4a)) // header + entry_count + mp4a
+// AppendMp4a appends the mp4a AudioSampleEntry followed by the esds child carrying
+// asc.
+func AppendMp4a(dst []byte, channels uint16, sampleRate uint32, asc []byte) []byte {
+	return appendAudioSampleEntry(dst, fourCCMp4a, channels, sampleRate, AppendEsds(nil, asc))
+}
+
+// AppendDops appends the OpusSpecificBox (dOps), per the Encapsulation of Opus in
+// ISOBMFF: Version(1)=0, OutputChannelCount(1), PreSkip(2), InputSampleRate(4),
+// OutputGain(2)=0, ChannelMappingFamily(1)=0. Mono and stereo use mapping family
+// 0, so no channel mapping table follows.
+func AppendDops(dst []byte, channels uint8, preSkip uint16, inputSampleRate uint32) []byte {
+	dst = AppendBoxHeader(dst, 8+11, fourCCDops)
+	dst = append(dst, 0)          // Version
+	dst = append(dst, channels)   // OutputChannelCount
+	dst = appendU16(dst, preSkip) // PreSkip (48 kHz samples)
+	dst = appendU32(dst, inputSampleRate)
+	dst = appendU16(dst, 0) // OutputGain (Q7.8) = 0
+	dst = append(dst, 0)    // ChannelMappingFamily = 0
+	return dst
+}
+
+// AppendOpusEntry appends the Opus AudioSampleEntry with its dOps child. sampleRate
+// is the container rate, which the Opus encapsulation fixes at 48000.
+func AppendOpusEntry(dst []byte, channels uint16, sampleRate uint32, dops []byte) []byte {
+	return appendAudioSampleEntry(dst, fourCCOpus, channels, sampleRate, dops)
+}
+
+// AppendDfla appends the FLACSpecificBox (dfLa), per the Encapsulation of FLAC in
+// ISOBMFF: a FullBox (version 0, flags 0) then the STREAMINFO metadata block, a
+// 1-byte last-flag|type header (0x80 | 0), a 24-bit length, and the streamInfo
+// body (34 bytes).
+func AppendDfla(dst []byte, streamInfo []byte) []byte {
+	size := uint32(12 + 4 + len(streamInfo)) // FullBox header + block header + body
+	dst = AppendFullBoxHeader(dst, size, fourCCDfla, 0, 0)
+	dst = append(dst, 0x80) // last-metadata-block flag | block type 0 (STREAMINFO)
+	dst = appendU24(dst, uint32(len(streamInfo)))
+	return append(dst, streamInfo...)
+}
+
+// AppendFlacEntry appends the fLaC AudioSampleEntry with its dfLa child.
+func AppendFlacEntry(dst []byte, channels uint16, sampleRate uint32, dfla []byte) []byte {
+	return appendAudioSampleEntry(dst, fourCCFlac, channels, sampleRate, dfla)
+}
+
+// AppendStsdEntry appends the stsd (sample description) FullBox holding one
+// pre-built sample entry (mp4a, Opus, or fLaC), so the writer chooses the codec
+// entry and this box stays codec-agnostic.
+func AppendStsdEntry(dst []byte, entry []byte) []byte {
+	size := uint32(12 + 4 + len(entry)) // header + entry_count + entry
 	dst = AppendFullBoxHeader(dst, size, fourCCStsd, 0, 0)
 	dst = appendU32(dst, 1) // entry_count
-	return append(dst, mp4a...)
+	return append(dst, entry...)
 }
 
-// AppendStts appends the stts (decoding time to sample) FullBox with a single
-// run: sampleCount samples each of duration sampleDelta.
+// AppendStsd appends the stsd FullBox holding one mp4a entry for an AAC-LC track.
+func AppendStsd(dst []byte, channels uint16, sampleRate uint32, asc []byte) []byte {
+	return AppendStsdEntry(dst, AppendMp4a(nil, channels, sampleRate, asc))
+}
+
+// SttsRun is one run of the stts (decoding time to sample) table: Count
+// consecutive samples each of duration Delta in the media timescale.
+type SttsRun struct {
+	Count uint32
+	Delta uint32
+}
+
+// AppendStts appends the stts FullBox with a single run: sampleCount samples each
+// of duration sampleDelta. It is the fixed-duration case (AAC-LC, every AU 1024
+// samples) of AppendSttsRuns.
 func AppendStts(dst []byte, sampleCount, sampleDelta uint32) []byte {
-	dst = AppendFullBoxHeader(dst, 24, fourCCStts, 0, 0)
-	dst = appendU32(dst, 1) // entry_count
-	dst = appendU32(dst, sampleCount)
-	dst = appendU32(dst, sampleDelta)
+	return AppendSttsRuns(dst, []SttsRun{{Count: sampleCount, Delta: sampleDelta}})
+}
+
+// AppendSttsRuns appends the stts FullBox from run-length-encoded per-sample
+// durations, for codecs (Opus, FLAC) whose frames do not all decode to the same
+// number of samples, so the final frame's shorter duration needs its own run.
+func AppendSttsRuns(dst []byte, runs []SttsRun) []byte {
+	size := uint32(12 + 4 + 8*len(runs)) // FullBox header + entry_count + entries
+	dst = AppendFullBoxHeader(dst, size, fourCCStts, 0, 0)
+	dst = appendU32(dst, uint32(len(runs))) // entry_count
+	for _, r := range runs {
+		dst = appendU32(dst, r.Count)
+		dst = appendU32(dst, r.Delta)
+	}
 	return dst
 }
 
