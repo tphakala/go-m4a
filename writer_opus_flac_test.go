@@ -204,6 +204,31 @@ func TestFFprobeOpus(t *testing.T) {
 	t.Logf("ffprobe: codec_name=%s sample_rate=%s channels=%d", s.CodecName, s.SampleRate, s.Channels)
 }
 
+// TestWriterCodecConfigValidation drives NewWriter into each codec-specific
+// validation error the generalized validateConfig added.
+func TestWriterCodecConfigValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  WriterConfig
+	}{
+		{"opus wrong rate", WriterConfig{Codec: CodecOpus, SampleRate: 44100, Channels: 1}},
+		{"opus negative preskip", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: -1}},
+		{"opus preskip overflows u16", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 70000}},
+		{"opus input rate negative", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusInputSampleRate: -1}},
+		{"flac missing streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1}},
+		{"flac short streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: make([]byte, 20)}},
+		{"unknown codec", WriterConfig{Codec: Codec(99), SampleRate: 48000, Channels: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf memWS
+			if _, err := NewWriter(&buf, tc.cfg); err == nil {
+				t.Errorf("NewWriter(%+v) returned nil error, want a validation error", tc.cfg)
+			}
+		})
+	}
+}
+
 func assertFramesRoundTrip(t *testing.T, r *Reader, want [][]byte) {
 	t.Helper()
 	got := collectFrames(t, r)

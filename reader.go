@@ -12,9 +12,10 @@ import (
 	"github.com/tphakala/go-m4a/internal/box"
 )
 
-// Info summarizes an MP4/M4A file's single AAC-LC audio track, populated by
-// NewReader from the moov metadata. It is codec-agnostic beyond AAC: the fields
-// come straight from the file's own sample tables, esds, and edit list.
+// Info summarizes an MP4/M4A file's single audio track (AAC-LC, Opus, or FLAC),
+// populated by NewReader from the moov metadata. The fields come straight from the
+// file's own sample tables, the codec-specific box (esds, dOps, or dfLa), and the
+// edit list; Codec reports which codec, and CodecConfig carries its configuration.
 type Info struct {
 	// SampleRate is the audio sample rate in Hz, derived from the ASC and, when
 	// the ASC does not carry an explicit rate, the mp4a AudioSampleEntry.
@@ -54,8 +55,8 @@ type Info struct {
 	Brand string
 }
 
-// Reader demuxes a non-fragmented MP4/M4A file into its AAC-LC access units.
-// NewReader parses the moov metadata up front; ReadFrame then returns each
+// Reader demuxes a non-fragmented MP4/M4A file (AAC-LC, Opus, or FLAC) into its
+// access units. NewReader parses the moov metadata up front; ReadFrame then returns each
 // access unit in order by seeking to its computed (offset, size). The reader is
 // not safe for concurrent use, and ReadFrame, RawStream, and their shared cursor
 // advance together.
@@ -120,11 +121,12 @@ var (
 
 // NewReader reads and parses the moov metadata from r and returns a Reader
 // positioned at the first access unit. It locates moov whether it precedes or
-// follows mdat, selects the first "soun" track carrying an mp4a AAC-LC sample
-// entry, and builds the sample geometry from the stsc/stsz/stco tables. It
-// returns a wrapped ErrCorrupt for malformed input and a wrapped ErrUnsupported
-// for well-formed input outside the v1 scope (fragmented files, no AAC-LC audio
-// track, a non-mp4a codec, or a non-AAC object type).
+// follows mdat, selects the first "soun" track carrying a supported sample entry
+// (mp4a AAC-LC, Opus, or fLaC), and builds the sample geometry from the
+// stsc/stsz/stco tables. It returns a wrapped ErrCorrupt for malformed input and a
+// wrapped ErrUnsupported for well-formed input outside scope (fragmented files, no
+// supported audio track, an unsupported codec, or an AAC object type that is not
+// MPEG-4 Audio).
 func NewReader(r io.ReadSeeker) (*Reader, error) {
 	if r == nil {
 		return nil, fmt.Errorf("go-m4a: nil reader")
@@ -376,7 +378,7 @@ func parseMdia(mdia []byte, tr *track) error {
 	})
 }
 
-// parseStbl collects the sample-table boxes and the mp4a sample entry from an
+// parseStbl collects the sample-table boxes and the codec sample entry from an
 // stbl box. It does not yet validate cross-table consistency; applyTrack does.
 func parseStbl(stbl []byte, tr *track) error {
 	return box.WalkChildren(stbl, func(typ box.FourCC, body []byte) error {
@@ -555,10 +557,13 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 	rd.info.FrameCount = rd.sampleCount
 	rd.info.SampleRate, rd.info.Channels = resolveFormat(tr)
 
-	if tr.hasElst {
-		if tr.elstMedia >= 0 {
-			rd.info.EncoderDelay = tr.elstMedia
-		}
+	if tr.hasElst && tr.elstMedia >= 0 {
+		rd.info.EncoderDelay = tr.elstMedia
+	} else if tr.codec == fourccOpus && tr.opusPreSkip > 0 {
+		// No edit list: fall back to the dOps PreSkip, the canonical Opus priming
+		// signal per the Encapsulation of Opus in ISOBMFF (RFC 7845). A file this
+		// package writes always carries the elst, so this covers foreign Opus files.
+		rd.info.EncoderDelay = int64(tr.opusPreSkip)
 	}
 	rd.info.Duration = presentationDuration(tr, movieTS, movieDur)
 	return nil

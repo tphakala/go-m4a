@@ -86,20 +86,17 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 	frame := make([]int16, frameLen)
 	pkt := make([]byte, 1276) // holds any single VBR Opus packet
 	for off := 0; off < total; off += frameSamplesPerChannel {
-		// Fill this frame's interleaved samples into the reused int16 buffer,
-		// zero-padding a short final frame and the trailing flush frames so every
-		// packet is a full 20 ms.
-		for i := range frame {
-			frame[i] = 0
-		}
-		remaining := samplesPerChannel - off
-		if remaining < 0 {
-			remaining = 0
-		}
+		// Fill this frame's interleaved samples into the reused int16 buffer. A full
+		// 20 ms frame (the common case) overwrites the whole buffer, so only a short
+		// final frame and the trailing flush frames need the tail zeroed for padding.
+		remaining := max(samplesPerChannel-off, 0)
 		n := min(frameSamplesPerChannel, remaining) * cfg.Channels
 		base := off * stride
 		for i := 0; i < n; i++ {
 			frame[i] = int16(binary.LittleEndian.Uint16(pcm[base+2*i:]))
+		}
+		for i := n; i < len(frame); i++ {
+			frame[i] = 0
 		}
 		m, err := enc.Encode(frame, pkt)
 		if err != nil {

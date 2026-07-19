@@ -27,6 +27,40 @@ func TestAppendDopsMatchesFFmpeg(t *testing.T) {
 	}
 }
 
+// TestParseDopsMalformed feeds ParseDops hostile bytes: it must return an error,
+// never panic, since the reader hands it untrusted input.
+func TestParseDopsMalformed(t *testing.T) {
+	badVersion := make([]byte, 11)
+	badVersion[0] = 1 // version != 0
+	cases := map[string][]byte{
+		"empty":       {},
+		"one short":   make([]byte, 10), // one under the 11-byte minimum
+		"bad version": badVersion,
+	}
+	for name, in := range cases {
+		if _, _, _, err := ParseDops(in); err == nil {
+			t.Errorf("%s (%d bytes): ParseDops returned nil error, want a parse error", name, len(in))
+		}
+	}
+}
+
+// TestParseDflaMalformed feeds ParseDfla hostile bytes: it must return an error,
+// never panic (in particular the 24-bit length must be bounds-checked).
+func TestParseDflaMalformed(t *testing.T) {
+	cases := map[string][]byte{
+		"empty":           {},
+		"too short":       make([]byte, 7),                      // under version/flags(4)+block header(4)
+		"not streaminfo":  {0, 0, 0, 0, 0x81, 0, 0, 34},         // block type 1, not STREAMINFO(0)
+		"length overruns": {0, 0, 0, 0, 0x80, 0, 0, 34},         // claims 34 bytes, zero present
+		"huge length":     {0, 0, 0, 0, 0x80, 0xff, 0xff, 0xff}, // 24-bit length far past the buffer
+	}
+	for name, in := range cases {
+		if _, err := ParseDfla(in); err == nil {
+			t.Errorf("%s (%d bytes): ParseDfla returned nil error, want a parse error", name, len(in))
+		}
+	}
+}
+
 func TestAppendDflaRoundTrip(t *testing.T) {
 	// A synthetic 34-byte STREAMINFO body (contents opaque to the container).
 	si := make([]byte, StreamInfoBodyLen)

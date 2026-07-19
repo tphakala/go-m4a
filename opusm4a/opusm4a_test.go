@@ -100,6 +100,12 @@ func TestOpusRoundTrip(t *testing.T) {
 			if info.EncoderDelay != 312 {
 				t.Errorf("EncoderDelay = %d, want 312", info.EncoderDelay)
 			}
+			// The encoder emits ceil((content + pre-skip) / 960) full 20 ms packets:
+			// enough to flush every content sample past the pre-skip delay.
+			wantFrames := (samplesPerCh + int(info.EncoderDelay) + frameSamplesPerChannel - 1) / frameSamplesPerChannel
+			if info.FrameCount != wantFrames {
+				t.Errorf("FrameCount = %d, want %d", info.FrameCount, wantFrames)
+			}
 
 			// Opus is lossy, so trim the pre-skip priming and compare signal energy
 			// rather than bytes. The decode has EncoderDelay leading priming samples
