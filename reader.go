@@ -12,9 +12,10 @@ import (
 	"github.com/tphakala/go-m4a/internal/box"
 )
 
-// Info summarizes an MP4/M4A file's single AAC-LC audio track, populated by
-// NewReader from the moov metadata. It is codec-agnostic beyond AAC: the fields
-// come straight from the file's own sample tables, esds, and edit list.
+// Info summarizes an MP4/M4A file's single audio track (AAC-LC, Opus, or FLAC),
+// populated by NewReader from the moov metadata. The fields come straight from the
+// file's own sample tables, the codec-specific box (esds, dOps, or dfLa), and the
+// edit list; Codec reports which codec, and CodecConfig carries its configuration.
 type Info struct {
 	// SampleRate is the audio sample rate in Hz, derived from the ASC and, when
 	// the ASC does not carry an explicit rate, the mp4a AudioSampleEntry.
@@ -23,9 +24,21 @@ type Info struct {
 	// Channels is the channel count, normally 1 (mono) or 2 (stereo).
 	Channels int
 
+	// Codec identifies the audio codec of the selected track: CodecAACLC,
+	// CodecOpus, or CodecFLAC.
+	Codec Codec
+
 	// ASC is the MPEG-4 AudioSpecificConfig from the esds DecoderSpecificInfo,
-	// suitable for go-aac's pcm.WithRawStream. Info returns a fresh copy.
+	// suitable for go-aac's pcm.WithRawStream. It is set only for AAC-LC; it is nil
+	// for Opus and FLAC. Info returns a fresh copy.
 	ASC []byte
+
+	// CodecConfig is the codec-specific configuration recovered from the sample
+	// entry: the AudioSpecificConfig for AAC-LC (same bytes as ASC), the
+	// OpusSpecificBox (dOps) body for Opus, or the FLAC STREAMINFO metadata block
+	// for FLAC. It is what a codec bridge passes to its decoder. Info returns a
+	// fresh copy.
+	CodecConfig []byte
 
 	// FrameCount is the number of access units (MP4 "samples") in the track.
 	FrameCount int
@@ -42,8 +55,8 @@ type Info struct {
 	Brand string
 }
 
-// Reader demuxes a non-fragmented MP4/M4A file into its AAC-LC access units.
-// NewReader parses the moov metadata up front; ReadFrame then returns each
+// Reader demuxes a non-fragmented MP4/M4A file (AAC-LC, Opus, or FLAC) into its
+// access units. NewReader parses the moov metadata up front; ReadFrame then returns each
 // access unit in order by seeking to its computed (offset, size). The reader is
 // not safe for concurrent use, and ReadFrame, RawStream, and their shared cursor
 // advance together.
@@ -93,6 +106,10 @@ var (
 	fourccEsds = box.NewFourCC("esds")
 
 	fourccMp4a = box.NewFourCC("mp4a")
+	fourccOpus = box.NewFourCC("Opus")
+	fourccFlac = box.NewFourCC("fLaC")
+	fourccDops = box.NewFourCC("dOps")
+	fourccDfla = box.NewFourCC("dfLa")
 	fourccSoun = box.NewFourCC("soun")
 
 	fourccFtyp = box.NewFourCC("ftyp")
@@ -104,11 +121,12 @@ var (
 
 // NewReader reads and parses the moov metadata from r and returns a Reader
 // positioned at the first access unit. It locates moov whether it precedes or
-// follows mdat, selects the first "soun" track carrying an mp4a AAC-LC sample
-// entry, and builds the sample geometry from the stsc/stsz/stco tables. It
-// returns a wrapped ErrCorrupt for malformed input and a wrapped ErrUnsupported
-// for well-formed input outside the v1 scope (fragmented files, no AAC-LC audio
-// track, a non-mp4a codec, or a non-AAC object type).
+// follows mdat, selects the first "soun" track carrying a supported sample entry
+// (mp4a AAC-LC, Opus, or fLaC), and builds the sample geometry from the
+// stsc/stsz/stco tables. It returns a wrapped ErrCorrupt for malformed input and a
+// wrapped ErrUnsupported for well-formed input outside scope (fragmented files, no
+// supported audio track, an unsupported codec, or an AAC object type that is not
+// MPEG-4 Audio).
 func NewReader(r io.ReadSeeker) (*Reader, error) {
 	if r == nil {
 		return nil, fmt.Errorf("go-m4a: nil reader")
@@ -221,8 +239,10 @@ type track struct {
 	codec   box.FourCC // first stsd sample-entry type
 	haveSE  bool       // a first sample entry was parsed
 
-	asc          []byte
-	objectType   byte
+	asc          []byte // AAC-LC AudioSpecificConfig (esds); nil for Opus/FLAC
+	objectType   byte   // AAC-LC esds objectTypeIndication
+	codecConfig  []byte // codec-specific config: ASC (AAC), dOps body (Opus), STREAMINFO (FLAC)
+	opusPreSkip  uint16 // Opus dOps PreSkip, the pre-skip analog of the AAC encoder delay
 	seChannels   uint16
 	seSampleRate uint32
 
@@ -270,7 +290,7 @@ func (rd *Reader) parseMoov(moov []byte) error {
 			}
 			if tr.handler == fourccSoun {
 				sawSoun = true
-				if tr.codec == fourccMp4a {
+				if isSupportedCodec(tr.codec) {
 					chosen = tr
 				}
 			}
@@ -282,9 +302,9 @@ func (rd *Reader) parseMoov(moov []byte) error {
 	}
 	if chosen == nil {
 		if sawSoun {
-			return fmt.Errorf("go-m4a: audio track codec is not mp4a AAC-LC: %w", ErrUnsupported)
+			return fmt.Errorf("go-m4a: audio track codec is not mp4a, Opus, or fLaC: %w", ErrUnsupported)
 		}
-		return fmt.Errorf("go-m4a: no AAC-LC audio track: %w", ErrUnsupported)
+		return fmt.Errorf("go-m4a: no supported audio track: %w", ErrUnsupported)
 	}
 
 	if err := rd.applyTrack(chosen, movieTS, movieDur); err != nil {
@@ -358,7 +378,7 @@ func parseMdia(mdia []byte, tr *track) error {
 	})
 }
 
-// parseStbl collects the sample-table boxes and the mp4a sample entry from an
+// parseStbl collects the sample-table boxes and the codec sample entry from an
 // stbl box. It does not yet validate cross-table consistency; applyTrack does.
 func parseStbl(stbl []byte, tr *track) error {
 	return box.WalkChildren(stbl, func(typ box.FourCC, body []byte) error {
@@ -382,8 +402,15 @@ func parseStbl(stbl []byte, tr *track) error {
 	})
 }
 
-// parseStsd reads the first sample entry from an stsd box, recording its codec
-// and, when it is mp4a, the AudioSampleEntry fields and the esds ASC.
+// isSupportedCodec reports whether the sample-entry fourCC is one this reader can
+// demux: mp4a (AAC-LC), Opus, or fLaC.
+func isSupportedCodec(codec box.FourCC) bool {
+	return codec == fourccMp4a || codec == fourccOpus || codec == fourccFlac
+}
+
+// parseStsd reads the first sample entry from an stsd box, recording its codec,
+// the shared AudioSampleEntry fields, and the codec-specific configuration box:
+// esds (AAC-LC), dOps (Opus), or dfLa (FLAC).
 func parseStsd(stsd []byte, tr *track) error {
 	// stsd body: version/flags(4) + entry_count(4), then the sample entries.
 	if len(stsd) < 8 {
@@ -399,10 +426,12 @@ func parseStsd(stsd []byte, tr *track) error {
 	}
 	tr.codec = h.Type
 	tr.haveSE = true
-	if h.Type != fourccMp4a {
-		return nil // a non-mp4a codec; track selection rejects it later
+	if !isSupportedCodec(h.Type) {
+		return nil // an unsupported codec; track selection rejects it later
 	}
 
+	// Every supported codec uses the same AudioSampleEntry fixed fields; only the
+	// codec-specific child box differs.
 	se := entries[h.HeaderLen:h.Total]
 	ch, rate, childOff, err := box.ParseAudioSampleEntry(se)
 	if err != nil {
@@ -410,31 +439,83 @@ func parseStsd(stsd []byte, tr *track) error {
 	}
 	tr.seChannels = ch
 	tr.seSampleRate = rate
+	children := se[childOff:]
 
-	// Find the esds child among the sample entry's children (afconvert follows
-	// esds with a sibling box, so scan rather than assume position).
-	return box.WalkChildren(se[childOff:], func(t box.FourCC, b []byte) error {
-		if t != fourccEsds {
+	switch h.Type {
+	case fourccMp4a:
+		// Find the esds child (afconvert follows esds with a sibling box, so scan
+		// rather than assume position).
+		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
+			if t != fourccEsds {
+				return nil
+			}
+			asc, objType, perr := box.ParseEsds(b)
+			if perr != nil {
+				return perr
+			}
+			tr.asc = asc
+			tr.codecConfig = asc
+			tr.objectType = objType
 			return nil
-		}
-		asc, objType, perr := box.ParseEsds(b)
-		if perr != nil {
-			return perr
-		}
-		tr.asc = asc
-		tr.objectType = objType
-		return nil
-	})
+		})
+	case fourccOpus:
+		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
+			if t != fourccDops {
+				return nil
+			}
+			chs, preSkip, _, perr := box.ParseDops(b)
+			if perr != nil {
+				return perr
+			}
+			tr.opusPreSkip = preSkip
+			tr.codecConfig = b // the dOps body
+			if chs != 0 {
+				tr.seChannels = uint16(chs) // dOps OutputChannelCount is authoritative
+			}
+			return nil
+		})
+	case fourccFlac:
+		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
+			if t != fourccDfla {
+				return nil
+			}
+			si, perr := box.ParseDfla(b)
+			if perr != nil {
+				return perr
+			}
+			tr.codecConfig = si // the STREAMINFO metadata block
+			return nil
+		})
+	}
+	return nil
 }
 
 // applyTrack validates the selected track's tables, fills Info, and builds the
 // sample geometry (per-sample sizes plus per-chunk sample counts and offsets).
 func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
-	if tr.asc == nil {
-		return fmt.Errorf("go-m4a: mp4a track has no esds AudioSpecificConfig: %w", ErrCorrupt)
-	}
-	if tr.objectType != objectTypeMP4Audio {
-		return fmt.Errorf("go-m4a: object type %#x is not AAC: %w", tr.objectType, ErrUnsupported)
+	// Codec-specific configuration must be present and, for AAC, the object type
+	// must be MPEG-4 Audio. The sample geometry below is codec-agnostic.
+	switch tr.codec {
+	case fourccMp4a:
+		if tr.asc == nil {
+			return fmt.Errorf("go-m4a: mp4a track has no esds AudioSpecificConfig: %w", ErrCorrupt)
+		}
+		if tr.objectType != objectTypeMP4Audio {
+			return fmt.Errorf("go-m4a: object type %#x is not AAC: %w", tr.objectType, ErrUnsupported)
+		}
+		rd.info.Codec = CodecAACLC
+	case fourccOpus:
+		if tr.codecConfig == nil {
+			return fmt.Errorf("go-m4a: Opus track has no dOps OpusSpecificBox: %w", ErrCorrupt)
+		}
+		rd.info.Codec = CodecOpus
+	case fourccFlac:
+		if tr.codecConfig == nil {
+			return fmt.Errorf("go-m4a: fLaC track has no dfLa STREAMINFO: %w", ErrCorrupt)
+		}
+		rd.info.Codec = CodecFLAC
+	default:
+		return fmt.Errorf("go-m4a: unsupported codec %q: %w", tr.codec, ErrUnsupported)
 	}
 	if tr.seen.stz2 && !tr.seen.stsz {
 		return fmt.Errorf("go-m4a: stz2 sample sizes are unsupported: %w", ErrUnsupported)
@@ -467,15 +548,22 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 		}
 	}
 
-	// Copy the ASC so the Reader is independent of the moov buffer.
-	rd.info.ASC = append([]byte(nil), tr.asc...)
+	// Copy the codec config (and the ASC for AAC) so the Reader is independent of
+	// the moov buffer. tr.asc is nil for Opus and FLAC, so ASC stays nil there.
+	if tr.asc != nil {
+		rd.info.ASC = append([]byte(nil), tr.asc...)
+	}
+	rd.info.CodecConfig = append([]byte(nil), tr.codecConfig...)
 	rd.info.FrameCount = rd.sampleCount
 	rd.info.SampleRate, rd.info.Channels = resolveFormat(tr)
 
-	if tr.hasElst {
-		if tr.elstMedia >= 0 {
-			rd.info.EncoderDelay = tr.elstMedia
-		}
+	if tr.hasElst && tr.elstMedia >= 0 {
+		rd.info.EncoderDelay = tr.elstMedia
+	} else if tr.codec == fourccOpus && tr.opusPreSkip > 0 {
+		// No edit list: fall back to the dOps PreSkip, the canonical Opus priming
+		// signal per the Encapsulation of Opus in ISOBMFF (RFC 7845). A file this
+		// package writes always carries the elst, so this covers foreign Opus files.
+		rd.info.EncoderDelay = int64(tr.opusPreSkip)
 	}
 	rd.info.Duration = presentationDuration(tr, movieTS, movieDur)
 	return nil
@@ -642,7 +730,9 @@ func (rd *Reader) validateOffsets() error {
 func resolveFormat(tr *track) (sampleRate, channels int) {
 	sampleRate = int(tr.seSampleRate)
 	channels = int(tr.seChannels)
-	if len(tr.asc) >= 2 {
+	switch {
+	case tr.codec == fourccMp4a && len(tr.asc) >= 2:
+		// For AAC the ASC is more authoritative than the AudioSampleEntry.
 		_, sfi, chanCfg := parseASC(tr.asc)
 		if int(sfi) < len(samplingFrequencyTable) {
 			sampleRate = samplingFrequencyTable[sfi]
@@ -650,7 +740,14 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		if chanCfg >= 1 && chanCfg <= 2 {
 			channels = int(chanCfg)
 		}
+	case tr.codec == fourccOpus:
+		// Opus always decodes at 48 kHz, and the encapsulation fixes the sample
+		// entry samplerate at 48000, so report that regardless of a foreign or
+		// malformed file's samplerate field. The dOps OutputChannelCount already
+		// set tr.seChannels.
+		sampleRate = opusTimescale
 	}
+	// FLAC has no ASC: the sample entry samplerate and channel count are authoritative.
 	return sampleRate, channels
 }
 
@@ -711,6 +808,7 @@ func (rd *Reader) resetCursor() {
 func (rd *Reader) Info() Info {
 	out := rd.info
 	out.ASC = append([]byte(nil), rd.info.ASC...)
+	out.CodecConfig = append([]byte(nil), rd.info.CodecConfig...)
 	return out
 }
 

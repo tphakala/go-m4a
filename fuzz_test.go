@@ -47,9 +47,18 @@ func writerSeed() (data []byte, ok bool) {
 // real reader bug.
 func FuzzReader(f *testing.F) {
 	// Seed with the interop fixtures. A missing or unreadable fixture is skipped,
-	// not fatal, so the fuzzer still runs in a trimmed checkout.
+	// not fatal, so the fuzzer still runs in a trimmed checkout. Both the AAC-LC
+	// fixtures and the Opus/FLAC fixtures are seeded so the fuzzer reaches the dOps
+	// and dfLa parsers, which mutating an AAC seed would essentially never construct.
+	seedNames := make([]string, 0, len(interopFiles)+len(opusFlacFixtures))
 	for _, tc := range interopFiles {
-		path := filepath.Join("testdata", "interop", tc.name)
+		seedNames = append(seedNames, tc.name)
+	}
+	for _, tc := range opusFlacFixtures {
+		seedNames = append(seedNames, tc.name)
+	}
+	for _, name := range seedNames {
+		path := filepath.Join("testdata", "interop", name)
 		if b, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed test fixture path
 			f.Add(b)
 		}
