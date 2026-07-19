@@ -109,8 +109,9 @@ type WriterConfig struct {
 	STREAMINFO []byte
 
 	// EncoderDelay is the number of leading priming samples to trim with an edit
-	// list. Zero uses DefaultEncoderDelay (1024); NoEdit writes no edit list at
-	// all; a positive value trims exactly that many samples.
+	// list. Zero uses the codec's default priming (DefaultEncoderDelay, 1024, for
+	// AAC-LC; the resolved OpusPreSkip, default 312, for Opus; 0 for FLAC); NoEdit
+	// writes no edit list at all; a positive value trims exactly that many samples.
 	EncoderDelay int
 
 	// MediaLength, when greater than zero, is the number of PCM samples per
