@@ -329,9 +329,8 @@ func AppendMp4a(dst []byte, channels uint16, sampleRate uint32, asc []byte) []by
 // 0, so no channel mapping table follows.
 func AppendDops(dst []byte, channels uint8, preSkip uint16, inputSampleRate uint32) []byte {
 	dst = AppendBoxHeader(dst, 8+11, fourCCDops)
-	dst = append(dst, 0)          // Version
-	dst = append(dst, channels)   // OutputChannelCount
-	dst = appendU16(dst, preSkip) // PreSkip (48 kHz samples)
+	dst = append(dst, 0, channels) // Version, OutputChannelCount
+	dst = appendU16(dst, preSkip)  // PreSkip (48 kHz samples)
 	dst = appendU32(dst, inputSampleRate)
 	dst = appendU16(dst, 0) // OutputGain (Q7.8) = 0
 	dst = append(dst, 0)    // ChannelMappingFamily = 0
@@ -348,7 +347,7 @@ func AppendOpusEntry(dst []byte, channels uint16, sampleRate uint32, dops []byte
 // ISOBMFF: a FullBox (version 0, flags 0) then the STREAMINFO metadata block, a
 // 1-byte last-flag|type header (0x80 | 0), a 24-bit length, and the streamInfo
 // body (34 bytes).
-func AppendDfla(dst []byte, streamInfo []byte) []byte {
+func AppendDfla(dst, streamInfo []byte) []byte {
 	size := uint32(12 + 4 + len(streamInfo)) // FullBox header + block header + body
 	dst = AppendFullBoxHeader(dst, size, fourCCDfla, 0, 0)
 	dst = append(dst, 0x80) // last-metadata-block flag | block type 0 (STREAMINFO)
@@ -364,7 +363,7 @@ func AppendFlacEntry(dst []byte, channels uint16, sampleRate uint32, dfla []byte
 // AppendStsdEntry appends the stsd (sample description) FullBox holding one
 // pre-built sample entry (mp4a, Opus, or fLaC), so the writer chooses the codec
 // entry and this box stays codec-agnostic.
-func AppendStsdEntry(dst []byte, entry []byte) []byte {
+func AppendStsdEntry(dst, entry []byte) []byte {
 	size := uint32(12 + 4 + len(entry)) // header + entry_count + entry
 	dst = AppendFullBoxHeader(dst, size, fourCCStsd, 0, 0)
 	dst = appendU32(dst, 1) // entry_count

@@ -48,6 +48,12 @@ linters:
         - style
         - diagnostic
         - performance
+      settings:
+        hugeParam:
+          # WriterConfig is 120 bytes and is passed by value by API convention
+          # (NewWriter and its validators), so raise the default 80-byte threshold
+          # to two cache lines rather than force a pointer through the public API.
+          sizeThreshold: 128
     revive:
       rules:
         - name: unused-parameter
