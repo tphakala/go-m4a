@@ -730,10 +730,9 @@ func (rd *Reader) validateOffsets() error {
 func resolveFormat(tr *track) (sampleRate, channels int) {
 	sampleRate = int(tr.seSampleRate)
 	channels = int(tr.seChannels)
-	// For AAC the ASC is more authoritative than the AudioSampleEntry. For Opus and
-	// FLAC there is no ASC: the sample entry (samplerate 48000 for Opus, the real
-	// rate for FLAC) and the dOps channel count already give the right values.
-	if tr.codec == fourccMp4a && len(tr.asc) >= 2 {
+	switch {
+	case tr.codec == fourccMp4a && len(tr.asc) >= 2:
+		// For AAC the ASC is more authoritative than the AudioSampleEntry.
 		_, sfi, chanCfg := parseASC(tr.asc)
 		if int(sfi) < len(samplingFrequencyTable) {
 			sampleRate = samplingFrequencyTable[sfi]
@@ -741,7 +740,14 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		if chanCfg >= 1 && chanCfg <= 2 {
 			channels = int(chanCfg)
 		}
+	case tr.codec == fourccOpus:
+		// Opus always decodes at 48 kHz, and the encapsulation fixes the sample
+		// entry samplerate at 48000, so report that regardless of a foreign or
+		// malformed file's samplerate field. The dOps OutputChannelCount already
+		// set tr.seChannels.
+		sampleRate = opusTimescale
 	}
+	// FLAC has no ASC: the sample entry samplerate and channel count are authoritative.
 	return sampleRate, channels
 }
 

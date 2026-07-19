@@ -101,3 +101,26 @@ func TestFLACRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestFLACEncodeErrors covers the config guards that must reject bad input before
+// go-flac sees it.
+func TestFLACEncodeErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		pcm  []byte
+	}{
+		{"bad channels", Config{SampleRate: 44100, Channels: 3, BitDepth: 16}, make([]byte, 12)},
+		// A non-byte-aligned bit depth would compute the wrong stride and mis-parse.
+		{"non-byte-aligned bit depth", Config{SampleRate: 44100, Channels: 1, BitDepth: 20}, make([]byte, 12)},
+		{"partial trailing sample", Config{SampleRate: 44100, Channels: 2, BitDepth: 16}, make([]byte, 6)}, // stride 4, 6 bytes
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf memWS
+			if err := EncodeInterleaved(&buf, tc.cfg, tc.pcm); err == nil {
+				t.Errorf("EncodeInterleaved(%+v) returned nil error, want a validation error", tc.cfg)
+			}
+		})
+	}
+}

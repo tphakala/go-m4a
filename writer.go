@@ -255,6 +255,11 @@ func NewWriter(w io.WriteSeeker, cfg WriterConfig) (*Writer, error) {
 // caller to WriteFrameDuration. It rejects a nil or empty access unit, and any
 // call after Close.
 func (w *Writer) WriteFrame(au []byte) error {
+	if w.defaultDuration == 0 {
+		// Opus and FLAC frames vary in duration, so there is no fixed value
+		// WriteFrame can supply; the caller must use WriteFrameDuration.
+		return fmt.Errorf("go-m4a: WriteFrame: %s frames vary in duration; use WriteFrameDuration", w.codec)
+	}
 	return w.WriteFrameDuration(au, w.defaultDuration)
 }
 
@@ -272,10 +277,10 @@ func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 		return ErrClosed
 	}
 	if len(au) == 0 {
-		return fmt.Errorf("go-m4a: WriteFrame: empty access unit")
+		return fmt.Errorf("go-m4a: WriteFrameDuration: empty access unit")
 	}
 	if sampleDuration == 0 {
-		return fmt.Errorf("go-m4a: WriteFrame: %s frames need a positive sample duration via WriteFrameDuration (WriteFrame supplies it automatically only for fixed-duration AAC-LC)", w.codec)
+		return fmt.Errorf("go-m4a: WriteFrameDuration: sample duration must be positive")
 	}
 	if len(w.sizes) >= maxFrames {
 		return fmt.Errorf("go-m4a: WriteFrame: frame count would exceed the limit of %d", maxFrames)

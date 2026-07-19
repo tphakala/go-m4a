@@ -47,12 +47,16 @@ func TestParseDopsMalformed(t *testing.T) {
 // TestParseDflaMalformed feeds ParseDfla hostile bytes: it must return an error,
 // never panic (in particular the 24-bit length must be bounds-checked).
 func TestParseDflaMalformed(t *testing.T) {
+	// A well-formed dfLa header whose STREAMINFO block claims 20 bytes (not the
+	// fixed 34) with 20 bytes present: fits the buffer but is the wrong length.
+	wrongLen := append([]byte{0, 0, 0, 0, 0x80, 0, 0, 20}, make([]byte, 20)...)
 	cases := map[string][]byte{
 		"empty":           {},
 		"too short":       make([]byte, 7),                      // under version/flags(4)+block header(4)
 		"not streaminfo":  {0, 0, 0, 0, 0x81, 0, 0, 34},         // block type 1, not STREAMINFO(0)
 		"length overruns": {0, 0, 0, 0, 0x80, 0, 0, 34},         // claims 34 bytes, zero present
 		"huge length":     {0, 0, 0, 0, 0x80, 0xff, 0xff, 0xff}, // 24-bit length far past the buffer
+		"wrong length":    wrongLen,                             // 20 bytes present but STREAMINFO is fixed 34
 	}
 	for name, in := range cases {
 		if _, err := ParseDfla(in); err == nil {

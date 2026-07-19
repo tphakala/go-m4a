@@ -284,12 +284,22 @@ func ParseDfla(payload []byte) (streamInfo []byte, err error) {
 	if blockType != 0 {
 		return nil, fmt.Errorf("dfLa first metadata block type %d is not STREAMINFO: %w", blockType, errParse)
 	}
+	// The FLAC STREAMINFO metadata block is a fixed 34 bytes; a dfLa carrying any
+	// other length is malformed, and a decoder built from it (via DecodeStreamInfo)
+	// would reject it anyway.
+	if length != streamInfoBodyLen {
+		return nil, fmt.Errorf("dfLa STREAMINFO length %d, want %d: %w", length, streamInfoBodyLen, errParse)
+	}
 	body := hdr[4:]
-	if length > len(body) {
+	if len(body) < length {
 		return nil, fmt.Errorf("dfLa STREAMINFO length %d overruns %d bytes: %w", length, len(body), errParse)
 	}
 	return body[:length], nil
 }
+
+// streamInfoBodyLen is the fixed byte length of a FLAC STREAMINFO metadata block
+// body, the payload a dfLa box carries.
+const streamInfoBodyLen = 34
 
 // StscEntry is one run of the sample-to-chunk table: every chunk numbered at or
 // after FirstChunk (until the next entry's FirstChunk) holds SamplesPerChunk

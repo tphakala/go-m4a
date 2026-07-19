@@ -35,10 +35,13 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 	if cfg.Channels < 1 || cfg.Channels > 2 {
 		return fmt.Errorf("go-m4a/flacm4a: channels %d out of range, want 1 or 2", cfg.Channels)
 	}
-	stride := cfg.Channels * (cfg.BitDepth / 8)
-	if stride <= 0 {
-		return fmt.Errorf("go-m4a/flacm4a: invalid bit depth %d", cfg.BitDepth)
+	// Require a byte-aligned bit depth so the interleaved-PCM stride is exact; a
+	// non-byte-aligned depth (for example 20) would divide to the wrong stride and
+	// mis-parse the buffer before go-flac ever saw the config.
+	if cfg.BitDepth != 16 && cfg.BitDepth != 24 {
+		return fmt.Errorf("go-m4a/flacm4a: bit depth %d unsupported, want 16 or 24", cfg.BitDepth)
 	}
+	stride := cfg.Channels * (cfg.BitDepth / 8)
 	if len(pcm)%stride != 0 {
 		return fmt.Errorf("go-m4a/flacm4a: PCM length %d is not a whole number of %d-byte interleaved samples", len(pcm), stride)
 	}
