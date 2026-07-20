@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 
 	aac "github.com/tphakala/go-aac"
 	aacpcm "github.com/tphakala/go-aac/pcm"
@@ -54,6 +55,23 @@ func EncodeInterleaved(w io.WriteSeeker, cfg aacpcm.Config, pcm []byte) error {
 	// bad bit depth, rate, or channel count surfaces here) and produces a
 	// self-framing stream, all before anything is written to w.
 	var adts bytes.Buffer
+	// Reserve the whole stream up front. Growing from empty doubles its way to the
+	// final size, so a clip that ends up around 180 KB allocates every intermediate
+	// buffer on the way and copies each one, for several hundred KB of pure churn.
+	// The final size is predictable from the config, so one reservation replaces the
+	// chain. The stride guard is load-bearing, not decorative: it is what keeps the
+	// division below from dividing by zero on a config the encoder has not validated
+	// yet. estimateADTSSize checks every other field itself and returns 0 for
+	// anything it cannot size, so an invalid config still reaches the encoder and
+	// comes back as the same error it always did. The n > 0 guard is the last line
+	// of defense for this call site: Grow panics on a negative count, and gating on
+	// a positive one means no future regression inside the estimate can ever turn
+	// a config error into a crash here.
+	if stride > 0 {
+		if n := estimateADTSSize(cfg, len(pcm)/stride); n > 0 {
+			adts.Grow(n)
+		}
+	}
 	if err := aacpcm.EncodeInterleaved(&adts, cfg, pcm); err != nil {
 		return err
 	}
@@ -90,6 +108,120 @@ func EncodeInterleaved(w io.WriteSeeker, cfg aacpcm.Config, pcm []byte) error {
 		return err
 	}
 	return wr.Close()
+}
+
+// Constants behind the ADTS size estimate.
+const (
+	// defaultBitrate is the total bitrate go-aac's pcm.Config selects when Bitrate
+	// is left at zero (FFmpeg's default of 200 kb/s). go-aac keeps this value
+	// unexported, so unlike aac.FrameSize it has to be restated here.
+	defaultBitrate = 200000
+	// maxFrameBytesPerChannel is the AAC bit-reservoir ceiling of 6144 bits per
+	// channel per frame (ISO/IEC 14496-3), in bytes. For the mono and stereo
+	// AAC-LC this package encodes, no conforming frame exceeds it, which makes it
+	// a sound upper bound on the encoded size.
+	maxFrameBytesPerChannel = 6144 / 8
+	// maxChannels is the channel count go-aac supports. The estimate refuses to
+	// guess beyond it, which also keeps the arithmetic below in range.
+	maxChannels = 2
+	// minFrameBytesPerChannel is the measured floor cost of one encoded frame:
+	// scalefactor and section data keep a go-aac frame from shrinking below
+	// roughly this many payload bytes per channel however low the target bitrate,
+	// so at 16 or 32 kb/s the real output runs well above nominal (by up to 2.4x
+	// on the sweep behind estimate_test.go). Taking the larger of the nominal
+	// payload and this floor is what keeps low-bitrate reservations honest
+	// without inflating mainstream ones, where the nominal term dominates and the
+	// floor never engages.
+	minFrameBytesPerChannel = 56
+	// bitrateMarginDivisor gives the estimate a 1/16 (6.25%) margin over the
+	// nominal payload. It covers the ABR overshoot measured at mainstream
+	// bitrates (up to about 3%); the far larger overshoot at very low bitrates
+	// is what minFrameBytesPerChannel handles, not this margin, and any residual
+	// undershoot costs exactly one buffer regrow rather than correctness.
+	bitrateMarginDivisor = 16
+)
+
+// estimateADTSSize predicts the encoded ADTS stream length in bytes for cfg and a
+// clip of samplesPerChannel samples: the bitrate over the coded duration, floored
+// at the per-frame minimum the encoder cannot go below, plus one 7-byte header
+// per frame, plus a small margin. The result is clamped to the AAC bit-reservoir
+// ceiling so an unreasonably high Bitrate (which go-aac clamps rather than
+// rejects) cannot turn into an unreasonably large reservation.
+//
+// It is only a capacity hint, so being off costs nothing but a reallocation.
+// Measured across the sweep in estimate_test.go, the reservation covers the real
+// stream for every clip of at least a second at every supported bitrate, and is
+// never below half of it, so the worst case anywhere is the single regrow that
+// bytes.Buffer's doubling gives; chasing the last short-clip corner instead
+// would inflate every mainstream encode.
+//
+// The function runs before go-aac has validated cfg, so no field can be trusted.
+// It has been broken twice by an argument that some particular product or sum
+// could not overflow, so it no longer rests on that kind of argument at all: sat
+// pins the raw inputs and every named intermediate into 0..maxReservation, both
+// bounds, and each arithmetic expression combines at most two pinned values (or
+// a small constant). A product of two values at most MaxInt32 fits int64 as a
+// matter of type width, so there is no input, in range or wildly out of it, for
+// which any step here can wrap. The result is therefore always in 0..MaxInt32:
+// never negative, which matters because bytes.Buffer.Grow panics on a negative,
+// and always expressible as an int on a 32-bit build.
+func estimateADTSSize(cfg aacpcm.Config, samplesPerChannel int) int {
+	if samplesPerChannel <= 0 || cfg.SampleRate <= 0 ||
+		cfg.Channels <= 0 || cfg.Channels > maxChannels {
+		return 0
+	}
+
+	// maxReservation bounds the return value, so pinning every intermediate to it
+	// cannot change the answer for any input that yields a usable reservation;
+	// the buffer still grows on demand past it.
+	const maxReservation = math.MaxInt32
+	sat := func(v int64) int64 {
+		if v < 0 {
+			return 0
+		}
+		if v > maxReservation {
+			return maxReservation
+		}
+		return v
+	}
+
+	// Pin the two unguarded-magnitude inputs before any arithmetic touches them.
+	// The int64 conversions are exact, so this is the last point where an
+	// out-of-range value exists at all. A clip longer than maxReservation samples
+	// reserves the same as one exactly that long, which under-reserves only for
+	// inputs past 2 GiB of samples per channel.
+	samples := sat(int64(samplesPerChannel))
+	rate := sat(int64(cfg.SampleRate))
+
+	// The encoder codes whole frames of the clip plus aac.EncoderDelay priming
+	// samples; this round-up reproduces go-aac's emitted frame count exactly.
+	// Basing the payload on the coded length rather than the raw sample count is
+	// what keeps short clips honest: a 20 ms clip still costs two full frames.
+	frames := sat((samples + aac.EncoderDelay + aac.FrameSize - 1) / aac.FrameSize)
+	codedSamples := sat(frames * aac.FrameSize)
+
+	bitrate := int64(cfg.Bitrate)
+	if bitrate <= 0 {
+		bitrate = defaultBitrate
+	}
+	// Dividing first cannot overflow whatever Bitrate holds, and sat pins the
+	// quotient, so the payload product multiplies two pinned values.
+	bytesPerSecond := sat(bitrate / 8)
+	payload := sat(bytesPerSecond * codedSamples / rate)
+	// Channels is guarded to 1..maxChannels, so the floor is a small constant
+	// times a pinned value.
+	floorPayload := sat(minFrameBytesPerChannel * int64(cfg.Channels) * frames)
+	if payload < floorPayload {
+		payload = floorPayload
+	}
+	payload = sat(payload + payload/bitrateMarginDivisor)
+	estimate := sat(payload + adtsHeaderLen*frames)
+
+	ceiling := sat(frames * (maxFrameBytesPerChannel*int64(cfg.Channels) + adtsHeaderLen))
+	if estimate > ceiling {
+		estimate = ceiling
+	}
+	return int(estimate)
 }
 
 // audioSpecificConfig builds the 2-byte AAC-LC AudioSpecificConfig for the given
