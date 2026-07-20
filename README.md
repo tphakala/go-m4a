@@ -45,7 +45,14 @@ and its codec-specific box differ.
   34-byte STREAMINFO in `dfLa`; no edit list (FLAC has no priming). Reads
   ffmpeg-produced files and round-trips bit-exact (lossless) through go-flac.
 
-Parsing is bounds-checked throughout and never panics on malformed input.
+Parsing is bounds-checked throughout and never panics on malformed input. A
+`flacm4a` decode also bounds the buffer it reserves up front, so a file that
+declares an implausible length cannot make the decoder allocate proportionally to
+the claim; longer genuine streams are fully supported and simply grow past the
+bound. The bound is a ceiling rather than a guarantee of proportionality, though:
+a small crafted file can still reach it, and it bounds the reservation rather
+than the decode, so the PCM a heavily compressed stream returns can still be many
+times the size of the file.
 
 There is also a **fragmented (CMAF) writer** for live HLS or DASH: `InitSegment`
 builds the `ftyp`/`moov` initialization segment and a `FragmentWriter` appends

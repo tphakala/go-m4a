@@ -19,6 +19,69 @@ import (
 	m4a "github.com/tphakala/go-m4a"
 )
 
+// encoderBlockSize mirrors the fixed block size go-flac's FrameEncoder emits
+// (pcm.encoderBlockSize, which is unexported so it cannot be read from here).
+// Only the final block of a stream is shorter. No output depends on the value:
+// it sizes the frame slice and nothing else, so drift upstream costs regrows
+// rather than correctness. TestFrameReservationCoversEncoder pins it against
+// what go-flac actually emits so that drift surfaces as a failure here instead
+// of as a silent slowdown.
+const encoderBlockSize = 4096
+
+// maxFLACBlockSize is the largest number of samples one FLAC frame can hold.
+// RFC 9639 section 9.1.1 codes an escaped block size as a 16-bit field holding
+// blocksize-1, and section 9.1.6 forbids the value 65535 there (a block of
+// 65536) because STREAMINFO's own 16-bit field could not represent it. It bounds
+// a whole track only because the MP4 mapping lines frames up with access units
+// one to one: "a FLAC sample is exactly one FLAC frame" (Xiph, Encapsulation of
+// FLAC in ISO Base Media File Format, sections 3.2 and 3.3.3).
+//
+// go-flac does not enforce the prohibition (internal/frame/header.go reads the
+// 16 bits and adds one, with no check against STREAMINFO), so a non-conforming
+// file can decode 65536-sample blocks. That direction is harmless here: it makes
+// the bound one sample per frame too low, which costs a regrow, never a
+// correctness or a safety problem.
+const maxFLACBlockSize = 65535
+
+// maxPCMReservation is the ceiling on what DecodeInterleaved will reserve up
+// front. It bounds the RESERVATION only, not the decode: the frame loop appends
+// whatever the file decodes to, so this constant is not a limit on how much
+// memory a malicious file can make the decoder produce. See the note on
+// DecodeInterleaved.
+//
+// The bounds pcmReservation derives from the container narrow the honest cases,
+// but they cannot make the reservation safe on their own, because FLAC's
+// compression ratio has no lower limit: a constant subframe encodes 65535
+// samples in a handful of bytes, so a crafted file buys the largest permitted
+// block for almost nothing: an access unit carrying one costs on the order of
+// fifty bytes plus its sample-table entry, and thirty-three of them reach this
+// ceiling, so a file of a couple of kilobytes still gets there.
+//
+// 64 MiB is about six minutes of 48 kHz stereo 16-bit. The value is a deliberate
+// trade and was measured rather than guessed. Lowering it to 8 MiB was tried and
+// reverted: it bounds a crafted file to 8 MiB instead of 64 MiB, which is a weak
+// gain given that both are transient and freed and that the unbounded decode
+// dwarfs either, and it costs every honest clip past 43 seconds its exact
+// reservation. Measured on a three-minute stereo clip, that gave up essentially
+// all of the benefit, allocating about three and a half times what this ceiling
+// does. Honest files are what this constant is tuned for.
+const maxPCMReservation = 64 << 20
+
+// maxRetainedSlack is the floor below which DecodeInterleaved never bothers
+// copying the returned slice down to size. It is not the whole rule and not the
+// worst case: shouldTrim also requires the slack to be disproportionate, so what
+// can actually be handed back is max(maxRetainedSlack, length/2), which for a
+// buffer near the ceiling is over 20 MiB.
+//
+// That is a deliberate trade rather than an oversight. Recovering half a buffer
+// costs copying all of it, so trimming a 38 MB result to reclaim 19 MB is not
+// obviously worth doing, whereas the case this exists for, a file that declared
+// orders of magnitude more audio than it carried, clears any such threshold
+// easily. The cost is that a moderately over-declared file, a truncated
+// recording being the realistic one, keeps proportional slack. See shouldTrim
+// for why the proportional test cannot simply be dropped.
+const maxRetainedSlack = 64 << 10
+
 // Config configures FLAC encoding. SampleRate is the audio rate in Hz; Channels is
 // 1 or 2; BitDepth is 16 or 24; CompressionLevel is 0 (fastest) to 8 (smallest).
 type Config struct {
@@ -64,7 +127,13 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 		data      []byte
 		blockSize int
 	}
-	var frames []frame
+	// Reserve the frame slice up front rather than growing it from nil and copying
+	// every intermediate, the same chain #8 removed from aacm4a. The count is
+	// predictable because samplesPerChannel is already known and go-flac emits
+	// fixed-size blocks. This is only a capacity hint: a wrong count costs regrows,
+	// never correctness. It is also the smaller of the two allocations in this
+	// loop; the bytes.Clone per frame below dominates, and is left alone here.
+	frames := make([]frame, 0, frameReservation(samplesPerChannel))
 	err = fe.EncodeInterleaved(pcm, func(fr []byte, blockSize int) error {
 		frames = append(frames, frame{data: bytes.Clone(fr), blockSize: blockSize})
 		return nil
@@ -96,6 +165,14 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // DecodeInterleaved opens a FLAC .mp4 and decodes it to interleaved little-endian
 // PCM, returning the PCM together with the container Info. FLAC is lossless, so the
 // PCM is bit-identical to what EncodeInterleaved was given.
+//
+// The buffer is sized up front from what the file declares, bounded by what the
+// container corroborates and by a fixed ceiling, so a file claiming an implausible
+// length cannot make the decoder reserve for the claim. Streams longer than the
+// ceiling are fully supported and simply grow past it. Note that this bounds the
+// reservation and not the decode: the returned PCM is as large as the audio in the
+// file actually decodes to, which for a heavily compressed stream can be many
+// times the file size.
 func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 	rd, err := m4a.NewReader(r)
 	if err != nil {
@@ -111,7 +188,17 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 		return nil, info, fmt.Errorf("go-m4a/flacm4a: new frame decoder: %w", err)
 	}
 
-	var out []byte
+	// Reserve the whole decoded stream up front rather than letting append grow it
+	// a frame at a time: once a clip runs to hundreds of frames the growth chain
+	// copies roughly four times the final size (measured; the ratio approaches 5
+	// asymptotically but is well below it at real clip lengths, and is zero for a
+	// clip of a single block). pcmReservation trusts neither the declared length
+	// nor the container alone, and bounds one against the other.
+	// The decode itself follows STREAMINFO, since that is what the decoder was
+	// built from; the container's channel count only narrows the buffer estimate,
+	// and a short estimate costs regrows rather than correctness.
+	si := fd.StreamInfo()
+	out := make([]byte, 0, pcmReservation(si.TotalSamples, info.FrameCount, si.Channels, info.Channels, si.BitDepth))
 	for {
 		au, err := rd.ReadFrame()
 		if errors.Is(err, io.EOF) {
@@ -126,5 +213,116 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 		}
 		out = append(out, pcm...)
 	}
+	// Hand back a right-sized copy when the reservation ran well ahead of the audio
+	// that actually decoded. A returned slice pins its entire backing array, so a
+	// file that overstates its length would otherwise leave the caller holding that
+	// reservation for as long as it keeps the PCM.
+	if shouldTrim(len(out), cap(out)) {
+		out = bytes.Clone(out)
+	}
 	return out, info, nil
+}
+
+// shouldTrim reports whether a decoded buffer of the given length and capacity
+// is carrying enough dead capacity to be worth copying down to size.
+//
+// Both tests are load-bearing. The absolute one ignores small overshoot, which is
+// not worth a copy. The proportional one keeps the trim off honest files, and it
+// is the whole reason this is a function rather than one condition inline: a
+// buffer that reached its length through append carries up to a quarter of that
+// length as growth headroom, so an absolute threshold alone fires on essentially
+// every stream past a megabyte and charges it a full extra copy. Measured on a
+// 9-minute clip, that copy cost about 104 MB, and it fell hardest on streams
+// declaring an unknown length, where the reservation never engages at all so the
+// copy buys nothing whatsoever.
+//
+// The divisor is half rather than a quarter deliberately. Growth headroom runs to
+// about a quarter of the length, so a quarter is exactly on the boundary and was
+// measured still firing on an honest 30-second unknown-length stream. What the
+// trim is for is the disproportionate case, where a file declared far more audio
+// than it carried and the slack dwarfs the audio instead of being a fraction of
+// it; that case clears any of these divisors by orders of magnitude.
+func shouldTrim(length, capacity int) bool {
+	slack := capacity - length
+	return slack > maxRetainedSlack && slack > length/2
+}
+
+// frameReservation returns the number of FLAC frames that samplesPerChannel
+// samples encode to, for use as a slice capacity. The round-up is a remainder
+// test rather than the usual (n + blockSize - 1) / blockSize because that form
+// is overflow-free whatever it is handed, so the function stays safe if a future
+// caller reaches it with a larger value than today's does. Today's cannot
+// overflow either form: samplesPerChannel is len(pcm) divided by a stride of at
+// least 2, so it never exceeds half the int range.
+func frameReservation(samplesPerChannel int) int {
+	if samplesPerChannel <= 0 {
+		return 0
+	}
+	n := samplesPerChannel / encoderBlockSize
+	if samplesPerChannel%encoderBlockSize != 0 {
+		n++
+	}
+	return n
+}
+
+// pcmReservation returns the byte capacity to reserve for a decoded stream,
+// given what the file's STREAMINFO declares (totalSamples, channels, bitDepth)
+// and how many access units the container actually holds (frameCount).
+//
+// STREAMINFO is a self-description, so the declared length is believed only up
+// to what the container can corroborate: frameCount comes from the sample table
+// the reader has already validated against the real file length, and one access
+// unit is one FLAC frame of at most maxFLACBlockSize samples. A truncated file,
+// which declares its original length while carrying part of the audio, is
+// brought back to roughly what it holds by that bound alone.
+//
+// Be clear about what this does not do. The bound is weak against a file built
+// to defeat it, because the per-access-unit budget (maxFLACBlockSize samples at
+// the widest permitted stride) is around two megabytes while an access unit
+// costs the attacker about a byte, so a few dozen of them still reach any
+// generous ceiling. maxPCMReservation is what actually bounds the damage, and
+// the reasoning for its size lives there. This function narrows the honest
+// cases; it does not make a hostile one safe.
+//
+// Overflow safety is by construction, not by argument: every operand is pinned
+// to a bound before it is multiplied and the running total is pinned again after.
+// At the current ceiling the largest product is frameCount against
+// maxFLACBlockSize, just under 2^42, and the other two reach exactly 2^29 and
+// 2^28; all are far inside uint64, and the result is pinned to maxPCMReservation
+// before the int conversion, so it fits a 32-bit int too. bytesPerSample needs no
+// separate clamp, since (min(bitDepth, 32) + 7) / 8 is at most 4 by its own
+// arithmetic. These figures scale with maxPCMReservation, so they are worth
+// recomputing rather than trusting if that constant ever moves again.
+//
+// A declared count of zero means unknown, which STREAMINFO is allowed to say, and
+// a file with no frames decodes to nothing. Either way the reservation is zero
+// and the buffer simply grows as it did before.
+func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bitDepth int) int {
+	// FLAC caps a stream at 8 channels and 32 bits per sample.
+	const (
+		maxFLACChannels = 8
+		maxFLACBitDepth = 32
+	)
+	if totalSamples == 0 || frameCount <= 0 || siChannels <= 0 || bitDepth <= 0 {
+		return 0
+	}
+	// The channel count is stated twice, by STREAMINFO and by the container's
+	// sample entry, and the mapping requires them to agree, so take the smaller: a
+	// file that inflates one to widen the reservation has to inflate both. Only a
+	// positive sample-entry count counts as a statement, though. Nothing validates
+	// that field, and a muxer that leaves it zero is saying nothing rather than
+	// saying none; letting a zero win the comparison would disable the reservation
+	// outright and hand the decode back the growth chain this exists to remove.
+	channels := siChannels
+	if seChannels > 0 && seChannels < channels {
+		channels = seChannels
+	}
+
+	samples := min(totalSamples, maxPCMReservation)
+	samples = min(samples, min(uint64(frameCount), maxPCMReservation)*maxFLACBlockSize)
+
+	bytesPerSample := (min(bitDepth, maxFLACBitDepth) + 7) / 8
+	n := min(samples*uint64(min(channels, maxFLACChannels)), maxPCMReservation)
+	n = min(n*uint64(bytesPerSample), maxPCMReservation)
+	return int(n)
 }
