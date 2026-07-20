@@ -237,9 +237,11 @@ func BenchmarkBuildMoov(b *testing.B) {
 		sizes[i] = uint32(len(f))
 	}
 	w := &Writer{
-		sampleRate:   48000,
-		channels:     1,
-		asc:          ascMono48k,
+		trackMeta: trackMeta{
+			sampleRate: 48000,
+			channels:   1,
+			asc:        ascMono48k,
+		},
 		payloadStart: 100,
 		sizes:        sizes,
 	}

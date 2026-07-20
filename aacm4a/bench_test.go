@@ -5,6 +5,7 @@ package aacm4a
 import (
 	"testing"
 
+	aacpcm "github.com/tphakala/go-aac/pcm"
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -74,5 +75,22 @@ func muxADTSOnce(b *testing.B, ws *memWriteSeeker, cfg m4a.WriterConfig, adts []
 	}
 	if err := wr.Close(); err != nil {
 		b.Fatal(err)
+	}
+}
+
+// BenchmarkEncodeInterleaved measures the whole PCM-to-m4a path for the clip
+// shape issue #8 profiled: 15 s mono 48 kHz at 96 kbps. The interesting number is
+// B/op, which the ADTS buffer reservation reduces by removing the growth chain.
+func BenchmarkEncodeInterleaved(b *testing.B) {
+	const sampleRate, channels, seconds = 48000, 1, 15
+	cfg := aacpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels, Bitrate: 96000}
+	pcm := chirpS16(sampleRate*seconds, channels, sampleRate)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(pcm)))
+	for b.Loop() {
+		var ws memWriteSeeker
+		if err := EncodeInterleaved(&ws, cfg, pcm); err != nil {
+			b.Fatalf("EncodeInterleaved: %v", err)
+		}
 	}
 }

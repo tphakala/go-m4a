@@ -635,7 +635,7 @@ func TestTopLevelBoxOrder(t *testing.T) {
 		t.Fatalf("first box = %q, want ftyp", got)
 	}
 	_, ftypSize := boxBodyAndSize(t, data, "ftyp")
-	if got := string(data[int(ftypSize)+4 : int(ftypSize)+8]); got != "mdat" {
+	if got := string(data[int(ftypSize)+4 : int(ftypSize)+8]); got != typeMdat {
 		t.Fatalf("second box = %q, want mdat", got)
 	}
 	if !bytes.Contains(data, []byte("moov")) {

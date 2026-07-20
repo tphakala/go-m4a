@@ -4,7 +4,7 @@ package box
 
 import "math"
 
-// Fixed field values shared by several boxes, from docs/box-layout.md.
+// Fixed field values shared by several boxes.
 const (
 	rateUnity   = 0x00010000 // mvhd rate, 16.16 fixed point 1.0
 	volumeFull  = 0x0100     // full audio volume, 8.8 fixed point 1.0
@@ -70,11 +70,19 @@ func AppendMdatLargeSize(dst []byte, largesize uint64) []byte {
 }
 
 // AppendFtyp appends the ftyp box: major_brand, minor_version, then the
-// compatible brands. Per the contract the writer passes major "M4A ", minor 0,
-// and compatible {"M4A ", "mp42", "isom"}.
+// compatible brands, all supplied by the caller. The two writers declare
+// different sets: the non-fragmented one "M4A " with {"M4A ", "mp42", "isom"},
+// and the fragmented init segment "cmfc" with {"cmfc", "iso6", "isom"}.
 func AppendFtyp(dst []byte, majorBrand FourCC, minorVersion uint32, compatibleBrands ...FourCC) []byte {
+	return appendBrandBox(dst, fourCCFtyp, majorBrand, minorVersion, compatibleBrands...)
+}
+
+// appendBrandBox appends a brand-declaring box (ftyp or its media-segment
+// counterpart styp, which share a layout): major_brand, minor_version, then the
+// compatible brands.
+func appendBrandBox(dst []byte, typ, majorBrand FourCC, minorVersion uint32, compatibleBrands ...FourCC) []byte {
 	size := uint32(8 + 8 + 4*len(compatibleBrands))
-	dst = AppendBoxHeader(dst, size, fourCCFtyp)
+	dst = AppendBoxHeader(dst, size, typ)
 	dst = append(dst, majorBrand[:]...)
 	dst = appendU32(dst, minorVersion)
 	for _, b := range compatibleBrands {
@@ -404,14 +412,14 @@ func AppendSttsRuns(dst []byte, runs []SttsRun) []byte {
 }
 
 // AppendStsc appends the stsc (sample to chunk) FullBox with a single entry
-// mapping every sample into one chunk.
+// mapping every sample into one chunk. It is the single-entry case of
+// AppendStscEntries.
 func AppendStsc(dst []byte, firstChunk, samplesPerChunk, sampleDescriptionIndex uint32) []byte {
-	dst = AppendFullBoxHeader(dst, 28, fourCCStsc, 0, 0)
-	dst = appendU32(dst, 1) // entry_count
-	dst = appendU32(dst, firstChunk)
-	dst = appendU32(dst, samplesPerChunk)
-	dst = appendU32(dst, sampleDescriptionIndex)
-	return dst
+	return AppendStscEntries(dst, []StscEntry{{
+		FirstChunk:             firstChunk,
+		SamplesPerChunk:        samplesPerChunk,
+		SampleDescriptionIndex: sampleDescriptionIndex,
+	}})
 }
 
 // AppendStsz appends the stsz (sample size) FullBox with sample_size 0 and one

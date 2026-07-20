@@ -4,8 +4,9 @@
 // 14496-12) byte primitives and typed marshalers that the go-m4a writer emits.
 // Everything is big-endian and append-style: each writer takes a destination
 // slice and returns it extended, allocation-free when dst has spare capacity,
-// mirroring strconv.AppendInt and go-aac's AppendADTSHeader. The byte layout
-// follows docs/box-layout.md exactly; that document is the contract.
+// mirroring strconv.AppendInt and go-aac's AppendADTSHeader. Each marshaler's own
+// doc comment states the field layout it writes, with the ISO/IEC 14496-12 clause
+// where the layout is not obvious; the tests pin the exact bytes.
 package box
 
 import "encoding/binary"

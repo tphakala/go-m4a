@@ -32,6 +32,14 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      # The interop tests decode this writer's output with a third-party demuxer,
+      # which is the only check that a real player agrees with the container we
+      # emit. They skip when ffmpeg is absent, so without an explicit install the
+      # suite would report success having never run them.
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Download dependencies
         run: go mod download
 
@@ -129,3 +137,8 @@ jobs:
       # testdata/fuzz as a regression seed.
       - name: Fuzz reader
         run: go test -run='^$' -fuzz=FuzzReader -fuzztime=30s .
+      # The segment writer computes trun's data_offset rather than copying it, so
+      # a layout mistake shows up as silently wrong output instead of an error.
+      # This target asserts the offset resolves to the mdat payload every time.
+      - name: Fuzz fragment writer
+        run: go test -run='^$' -fuzz=FuzzFragmentWriter -fuzztime=30s .
