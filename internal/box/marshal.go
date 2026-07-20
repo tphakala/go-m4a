@@ -70,8 +70,9 @@ func AppendMdatLargeSize(dst []byte, largesize uint64) []byte {
 }
 
 // AppendFtyp appends the ftyp box: major_brand, minor_version, then the
-// compatible brands. Per the contract the writer passes major "M4A ", minor 0,
-// and compatible {"M4A ", "mp42", "isom"}.
+// compatible brands, all supplied by the caller. The two writers declare
+// different sets: the non-fragmented one "M4A " with {"M4A ", "mp42", "isom"},
+// and the fragmented init segment "cmfc" with {"cmfc", "iso6", "isom"}.
 func AppendFtyp(dst []byte, majorBrand FourCC, minorVersion uint32, compatibleBrands ...FourCC) []byte {
 	return appendBrandBox(dst, fourCCFtyp, majorBrand, minorVersion, compatibleBrands...)
 }
