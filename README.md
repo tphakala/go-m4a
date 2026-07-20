@@ -47,11 +47,19 @@ and its codec-specific box differ.
 
 Parsing is bounds-checked throughout and never panics on malformed input.
 
-Scope: non-fragmented MP4, a single audio track, mono or stereo, 44.1/48 kHz (Opus
-is always 48 kHz). Out of scope (the reader returns a typed `ErrUnsupported`, never
-crashes): fragmented MP4, video or multiple audio tracks, other codecs, HE-AAC,
-surround, and writing metadata tags. See the open issues for the tracked
-extensions (non-48 kHz Opus input, high sample rates, more than two channels).
+There is also a **fragmented (CMAF) writer** for live HLS or DASH: `InitSegment`
+builds the `ftyp`/`moov` initialization segment and a `FragmentWriter` appends
+`styp`/`moof`/`mdat` media segments. It never seeks, so it can write straight into
+a byte slice or a socket, and it reuses its buffers, so a steady-state segment
+allocates nothing. It is codec-generic like the rest of the writer. See
+[Fragmented output for HLS](#fragmented-output-for-hls).
+
+Scope: a single audio track, mono or stereo, 44.1/48 kHz (Opus is always 48 kHz).
+Fragmented MP4 is write-only: the reader is for plain files and returns a typed
+`ErrUnsupported` for fragmented input. Also out of scope (again `ErrUnsupported`,
+never a crash): video or multiple audio tracks, other codecs, HE-AAC, surround,
+and writing metadata tags. See the open issues for the tracked extensions
+(non-48 kHz Opus input, high sample rates, more than two channels).
 
 ## Install
 
@@ -167,6 +175,55 @@ including the Opus pre-skip priming and the trailing padding, so trim
 `info.EncoderDelay` leading samples then keep `info.Duration`-worth for
 sample-accurate output. `flacm4a` needs no trimming (FLAC has no priming).
 
+### Fragmented output for HLS
+
+`Writer` produces `ftyp | mdat | moov` and needs an `io.WriteSeeker`, because the
+`mdat` size is patched at `Close`. A live HLS or DASH stream cannot seek, so it uses
+the fragmented path instead: one initialization segment, then a media segment every
+couple of seconds, each appended to a buffer the caller owns.
+
+```go
+cfg := m4a.WriterConfig{SampleRate: 48000, Channels: 1, ASC: asc}
+
+// Built once, served as the playlist's EXT-X-MAP target.
+initSeg, err := m4a.InitSegment(cfg)
+if err != nil {
+    return err
+}
+publishInit(initSeg)
+
+fw, err := m4a.NewFragmentWriter(cfg)
+if err != nil {
+    return err
+}
+
+var segment []byte // reused across segments
+for _, au := range accessUnits {
+    if err := fw.WriteFrame(au); err != nil { // copies au, so reuse it freely
+        return err
+    }
+    // Cut on an access-unit boundary once the target duration is reached.
+    if fw.PendingDuration() >= 2*48000 {
+        extinf := float64(fw.PendingDuration()) / 48000 // seconds, for the playlist
+        segment, err = fw.AppendSegment(segment[:0])
+        if err != nil {
+            return err
+        }
+        publish(segment, extinf)
+    }
+}
+```
+
+`WriteFrame` copies each access unit into an internal buffer, so an encoder may keep
+reusing one scratch slice. Both that buffer and the segment assembly are retained
+across segments: once they have grown, a segment allocates nothing at all. Opus and
+FLAC use `WriteFrameDuration` here too, and a segment whose frames do not share a
+duration automatically carries per-sample durations.
+
+The segments use 64-bit `tfdt` decode times, because a 32-bit one at 48 kHz wraps
+after about 24.8 hours of continuous streaming. `Reset` rebinds a writer to a new
+stream while keeping its buffers, for pooling across sessions.
+
 ## Gapless playback and the edit list
 
 A lossy encoder emits priming before the first real sample and pads the final
@@ -176,6 +233,22 @@ go-m4a writes an `elst` edit list whose `media_time` skips the priming and whose
 padding, so a compliant player presents exactly the original audio. The reader
 surfaces the edit list as `Info.EncoderDelay` and `Info.Duration`. FLAC is lossless
 and has no priming, so no edit list is written.
+
+The fragmented writer trims the priming the same way, with `segment_duration` 0,
+the open-ended form used by fragmented-MP4 packagers for a stream whose length is
+not yet known (`MediaLength` has no meaning there and is rejected). A codec with no
+priming gets no edit list on the fragmented path, so FLAC never carries one there.
+The non-fragmented `Writer` still writes one unless the caller passes `NoEdit`,
+which is what `flacm4a` does.
+
+This was verified rather than assumed. `TestFragmentedEditListTrimsPriming` writes
+the same access units with and without the edit list and decodes both with ffmpeg,
+asserting the difference is exactly the 1024 priming samples; the same comparison
+in hls.js on Chromium reports media durations 0.021332 s apart, which is that same
+frame. Worth knowing, because ffmpeg's HLS fMP4 packager emits an edit list that
+trims nothing (`media_time` 0) and its `-movflags +empty_moov` path emits none at
+all, so players differ in how much they exercise this. Set `EncoderDelay:
+m4a.NoEdit` to opt out and accept the priming as a constant offset of about 21 ms.
 
 ## License
 

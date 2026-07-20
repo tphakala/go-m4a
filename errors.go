@@ -14,9 +14,11 @@ var (
 	// an inconsistent sample table.
 	ErrCorrupt = errors.New("go-m4a: corrupt container")
 
-	// ErrUnsupported indicates a well-formed MP4 that falls outside the v1
-	// scope: fragmented input, no AAC-LC audio track, a non-mp4a codec, or an
-	// object type other than AAC-LC.
+	// ErrUnsupported indicates a well-formed MP4 that falls outside the reader's
+	// scope: fragmented input, no audio track, a codec other than AAC-LC, Opus or
+	// FLAC, or an esds object type that is not AAC. Fragmented input is the
+	// asymmetric case: this package writes it (InitSegment, FragmentWriter) but
+	// deliberately does not read it back.
 	ErrUnsupported = errors.New("go-m4a: unsupported container")
 
 	// ErrClosed is returned by WriteFrame and Close once the Writer has been

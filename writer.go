@@ -3,10 +3,18 @@
 // Package m4a muxes AAC-LC, Opus, or FLAC access units into an MP4/M4A container
 // and demuxes them back out. It is the container half that codecs like go-aac
 // deliberately leave to an external muxer: an edit list (elst) trims the encoder
-// priming so the written file is sample-accurate and gapless. The public surface is
-// stdlib-only; the codec bridges (aacm4a, opusm4a, flacm4a) are optional
-// subpackages. The ISO-BMFF byte mechanics live in the internal/box package, whose
-// layout is fixed by docs/box-layout.md.
+// priming so the written file is sample-accurate and gapless.
+//
+// There are two writers. Writer produces a plain ftyp|mdat|moov file and needs an
+// io.WriteSeeker, because the mdat size is patched at Close. InitSegment and
+// FragmentWriter produce fragmented (CMAF) output for live HLS or DASH: they only
+// ever append, so they can write to a byte slice or a socket. Reading is
+// non-fragmented only, so the package writes a shape Reader deliberately rejects
+// with ErrUnsupported.
+//
+// The public surface is stdlib-only; the codec bridges (aacm4a, opusm4a, flacm4a)
+// are optional subpackages. The ISO-BMFF byte mechanics live in the internal/box
+// package.
 package m4a
 
 import (
@@ -70,8 +78,11 @@ var samplingFrequencyTable = [...]int{
 	22050, 16000, 12000, 11025, 8000, 7350,
 }
 
-// WriterConfig configures a Writer. SampleRate and Channels must agree with ASC;
-// NewWriter validates them against it and refuses a mismatch.
+// WriterConfig configures a Writer, and also the fragmented writers InitSegment
+// and NewFragmentWriter. SampleRate and Channels must agree with ASC; the
+// constructors validate them against it and refuse a mismatch. Two fields mean
+// something different on the fragmented path, noted on the fields themselves:
+// MediaLength is rejected there, and Brand has a different default.
 type WriterConfig struct {
 	// Codec selects the audio codec. The zero value is CodecAACLC, so a config
 	// that sets only ASC keeps muxing AAC-LC. For CodecOpus set OpusPreSkip and
@@ -117,13 +128,18 @@ type WriterConfig struct {
 	// MediaLength, when greater than zero, is the number of PCM samples per
 	// channel the source contained. It sets the edit-list segment duration
 	// exactly, so trailing final-frame padding is also excluded. Zero presents
-	// every decoded sample after the priming.
+	// every decoded sample after the priming. A live fragmented stream has no
+	// known total length, so InitSegment and NewFragmentWriter reject any non-zero
+	// value rather than ignore it.
 	MediaLength int64
 
-	// Brand overrides the ftyp major brand (default "M4A "). When set it must be
-	// exactly four bytes (space-padded, for example "mp42"); NewWriter rejects
-	// any other length. The compatible brands always include "M4A ", "mp42", and
-	// "isom".
+	// Brand overrides the ftyp major brand. When set it must be exactly four bytes
+	// (space-padded, for example "mp42"); the constructors reject any other
+	// length. NewWriter defaults it to "M4A " and always lists "M4A ", "mp42" and
+	// "isom" as compatible brands. InitSegment defaults it to "cmfc" and lists
+	// "cmfc", "iso6" and "isom" instead, so overriding it there moves the CMAF
+	// declaration out of the major-brand position, though it stays in the
+	// compatible-brand list; it never affects a media segment's styp.
 	Brand string
 }
 
@@ -136,26 +152,11 @@ type WriterConfig struct {
 type Writer struct {
 	w io.WriteSeeker
 
-	// Normalized configuration, captured at NewWriter so a later mutation of the
-	// caller's WriterConfig or byte slices cannot change the output.
-	codec         Codec
-	sampleRate    uint32
-	channels      uint16
-	asc           []byte // AAC-LC AudioSpecificConfig
-	streamInfo    []byte // FLAC STREAMINFO (dfLa payload)
-	opusPreSkip   uint16
-	opusInputRate uint32
-	encoderDelay  int
-	mediaLength   int64
+	// Normalized codec configuration, shared with FragmentWriter.
+	trackMeta
 
-	// timescale is the media and movie timescale: SampleRate for AAC and FLAC,
-	// 48000 for Opus. defaultDelay is the codec's priming trim when EncoderDelay is
-	// left at zero. defaultDuration is the per-sample duration WriteFrame records
-	// for a fixed-duration codec (1024 for AAC-LC); it is zero for Opus and FLAC,
-	// whose callers must use WriteFrameDuration.
-	timescale       uint32
-	defaultDelay    int
-	defaultDuration uint32
+	encoderDelay int
+	mediaLength  int64
 
 	// stts bookkeeping. While every access unit shares one decode duration (AAC-LC,
 	// and Opus with fixed-size packets), only sampleDelta is kept and durations stays
@@ -212,42 +213,74 @@ func NewWriter(w io.WriteSeeker, cfg WriterConfig) (*Writer, error) {
 		return nil, fmt.Errorf("go-m4a: write mdat header: %w", err)
 	}
 
-	wr := &Writer{
+	return &Writer{
 		w:             w,
-		codec:         cfg.Codec,
-		sampleRate:    uint32(cfg.SampleRate),
-		channels:      uint16(cfg.Channels),
+		trackMeta:     newTrackMeta(cfg),
 		encoderDelay:  cfg.EncoderDelay,
 		mediaLength:   cfg.MediaLength,
-		timescale:     uint32(cfg.SampleRate),
 		mdatBoxOffset: int64(len(ftyp)),
 		payloadStart:  int64(len(ftyp) + box.MdatHeaderSize),
+	}, nil
+}
+
+// trackMeta is the normalized, codec-specific configuration of the single audio
+// track, captured from a WriterConfig so a later mutation of the caller's config
+// or byte slices cannot change the output. Both Writer and FragmentWriter embed
+// it, so the sample entry and the codec's priming defaults are built one way for
+// the non-fragmented and fragmented paths alike.
+type trackMeta struct {
+	codec         Codec
+	sampleRate    uint32
+	channels      uint16
+	asc           []byte // AAC-LC AudioSpecificConfig
+	streamInfo    []byte // FLAC STREAMINFO (dfLa payload)
+	opusPreSkip   uint16
+	opusInputRate uint32
+
+	// timescale is the media and movie timescale: SampleRate for AAC and FLAC,
+	// 48000 for Opus. defaultDelay is the codec's priming trim when EncoderDelay is
+	// left at zero. defaultDuration is the per-sample duration WriteFrame records
+	// for a fixed-duration codec (1024 for AAC-LC); it is zero for Opus and FLAC,
+	// whose callers must use WriteFrameDuration.
+	timescale       uint32
+	defaultDelay    int
+	defaultDuration uint32
+}
+
+// newTrackMeta normalizes cfg for its codec. cfg must already have passed
+// validateConfig, which guarantees the narrowing conversions here cannot wrap.
+func newTrackMeta(cfg WriterConfig) trackMeta {
+	m := trackMeta{
+		codec:      cfg.Codec,
+		sampleRate: uint32(cfg.SampleRate),
+		channels:   uint16(cfg.Channels),
+		timescale:  uint32(cfg.SampleRate),
 	}
 	switch cfg.Codec {
 	case CodecAACLC:
-		wr.asc = append([]byte(nil), cfg.ASC...)
-		wr.defaultDelay = DefaultEncoderDelay // 1024
-		wr.defaultDuration = samplesPerFrame  // every AAC-LC AU is 1024 samples
+		m.asc = append([]byte(nil), cfg.ASC...)
+		m.defaultDelay = DefaultEncoderDelay // 1024
+		m.defaultDuration = samplesPerFrame  // every AAC-LC AU is 1024 samples
 	case CodecOpus:
 		// The Opus timescale is fixed at 48000; validateConfig enforced SampleRate.
-		wr.opusPreSkip = uint16(cfg.OpusPreSkip)
-		if wr.opusPreSkip == 0 {
-			wr.opusPreSkip = DefaultOpusPreSkip
+		m.opusPreSkip = uint16(cfg.OpusPreSkip)
+		if m.opusPreSkip == 0 {
+			m.opusPreSkip = DefaultOpusPreSkip
 		}
-		wr.opusInputRate = uint32(cfg.OpusInputSampleRate)
-		if wr.opusInputRate == 0 {
-			wr.opusInputRate = uint32(cfg.SampleRate)
+		m.opusInputRate = uint32(cfg.OpusInputSampleRate)
+		if m.opusInputRate == 0 {
+			m.opusInputRate = uint32(cfg.SampleRate)
 		}
-		wr.defaultDelay = int(wr.opusPreSkip)
+		m.defaultDelay = int(m.opusPreSkip)
 		// Opus packet durations vary (the final packet may be short), so callers
 		// supply each with WriteFrameDuration; defaultDuration stays 0.
 	case CodecFLAC:
-		wr.streamInfo = append([]byte(nil), cfg.STREAMINFO...)
-		wr.defaultDelay = 0 // FLAC has no encoder priming
+		m.streamInfo = append([]byte(nil), cfg.STREAMINFO...)
+		m.defaultDelay = 0 // FLAC has no encoder priming
 		// FLAC block sizes vary (the final frame is short); callers supply each
 		// with WriteFrameDuration; defaultDuration stays 0.
 	}
-	return wr, nil
+	return m
 }
 
 // WriteFrame appends one access unit to the mdat payload using the codec's fixed
@@ -284,7 +317,7 @@ func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 		return fmt.Errorf("go-m4a: WriteFrameDuration: sample duration must be positive")
 	}
 	if len(w.sizes) >= maxFrames {
-		return fmt.Errorf("go-m4a: WriteFrame: frame count would exceed the limit of %d", maxFrames)
+		return fmt.Errorf("go-m4a: WriteFrameDuration: frame count would exceed the limit of %d", maxFrames)
 	}
 	if _, err := w.w.Write(au); err != nil {
 		// A partial or failed write leaves the mdat payload out of sync with the
@@ -370,10 +403,7 @@ func (w *Writer) buildMoov() []byte {
 	var segmentDuration uint64
 	var mediaTime int64
 	if editList {
-		delay := w.encoderDelay
-		if delay == 0 {
-			delay = w.defaultDelay
-		}
+		delay := w.resolveDelay(w.encoderDelay)
 		mediaTime = int64(delay)
 		if w.mediaLength > 0 {
 			segmentDuration = uint64(w.mediaLength)
@@ -469,17 +499,33 @@ func (w *Writer) appendStts(dst []byte) []byte {
 }
 
 // sampleEntry builds the codec-specific stsd sample entry: mp4a+esds (AAC-LC),
-// Opus+dOps, or fLaC+dfLa.
-func (w *Writer) sampleEntry() []byte {
-	switch w.codec {
+// Opus+dOps, or fLaC+dfLa. The fragmented init segment reuses it verbatim, so both
+// paths describe the track identically.
+func (m *trackMeta) sampleEntry() []byte {
+	switch m.codec {
 	case CodecOpus:
-		dops := box.AppendDops(nil, uint8(w.channels), w.opusPreSkip, w.opusInputRate)
-		return box.AppendOpusEntry(nil, w.channels, w.sampleRate, dops)
+		dops := box.AppendDops(nil, uint8(m.channels), m.opusPreSkip, m.opusInputRate)
+		return box.AppendOpusEntry(nil, m.channels, m.sampleRate, dops)
 	case CodecFLAC:
-		dfla := box.AppendDfla(nil, w.streamInfo)
-		return box.AppendFlacEntry(nil, w.channels, w.sampleRate, dfla)
+		dfla := box.AppendDfla(nil, m.streamInfo)
+		return box.AppendFlacEntry(nil, m.channels, m.sampleRate, dfla)
 	default:
-		return box.AppendMp4a(nil, w.channels, w.sampleRate, w.asc)
+		return box.AppendMp4a(nil, m.channels, m.sampleRate, m.asc)
+	}
+}
+
+// resolveDelay returns the priming trim in media-timescale samples for an
+// EncoderDelay field: zero selects the codec's default, a positive value is taken
+// literally, and the NoEdit sentinel resolves to zero so a caller that has not
+// already intercepted it cannot turn -1 into a negative edit-list media_time.
+func (m *trackMeta) resolveDelay(encoderDelay int) int {
+	switch encoderDelay {
+	case NoEdit:
+		return 0
+	case 0:
+		return m.defaultDelay
+	default:
+		return encoderDelay
 	}
 }
 
