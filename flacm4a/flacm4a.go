@@ -3,9 +3,12 @@
 // Package flacm4a is an optional convenience bridge that couples go-flac's FLAC
 // codec to the go-m4a container. EncodeInterleaved takes interleaved PCM straight
 // to a FLAC .mp4 (fLaC/dfLa); DecodeInterleaved opens one and returns the decoded
-// PCM. It is a thin seam over the two libraries: the core m4a package stays
-// stdlib-only, and only this subpackage imports go-flac, so a consumer that merely
-// muxes or demuxes never pulls the codec.
+// PCM, bounded at m4a.DefaultMaxDecodedBytes, and DecodeStream decodes a file of
+// any length a frame at a time without accumulating it, which is the shape to
+// reach for with input the caller did not produce. It is a thin seam over the two
+// libraries: the core m4a package stays stdlib-only, and only this subpackage
+// imports go-flac, so a consumer that merely muxes or demuxes never pulls the
+// codec.
 package flacm4a
 
 import (
@@ -13,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	flacpcm "github.com/tphakala/go-flac/pcm"
 
@@ -43,11 +47,12 @@ const encoderBlockSize = 4096
 // correctness or a safety problem.
 const maxFLACBlockSize = 65535
 
-// maxPCMReservation is the ceiling on what DecodeInterleaved will reserve up
-// front. It bounds the RESERVATION only, not the decode: the frame loop appends
-// whatever the file decodes to, so this constant is not a limit on how much
-// memory a malicious file can make the decoder produce. See the note on
-// DecodeInterleaved.
+// maxPCMReservation is the ceiling on what an accumulating decode reserves up
+// front. It bounds the RESERVATION only. What bounds the decode is the caller's
+// limit, which pcmReservation also applies (see DecodeInterleavedLimit and
+// m4a.DefaultMaxDecodedBytes); this constant is what keeps a file's own
+// self-description from driving a large speculative allocation before the first
+// frame has decoded.
 //
 // The bounds pcmReservation derives from the container narrow the honest cases,
 // but they cannot make the reservation safe on their own, because FLAC's
@@ -67,7 +72,7 @@ const maxFLACBlockSize = 65535
 // does. Honest files are what this constant is tuned for.
 const maxPCMReservation = 64 << 20
 
-// maxRetainedSlack is the floor below which DecodeInterleaved never bothers
+// maxRetainedSlack is the floor below which an accumulating decode never bothers
 // copying the returned slice down to size. It is not the whole rule and not the
 // worst case: shouldTrim also requires the slack to be disproportionate, so what
 // can actually be handed back is max(maxRetainedSlack, length/2), which for a
@@ -166,26 +171,49 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // PCM, returning the PCM together with the container Info. FLAC is lossless, so the
 // PCM is bit-identical to what EncodeInterleaved was given.
 //
-// The buffer is sized up front from what the file declares, bounded by what the
-// container corroborates and by a fixed ceiling, so a file claiming an implausible
-// length cannot make the decoder reserve for the claim. Streams longer than the
-// ceiling are fully supported and simply grow past it. Note that this bounds the
-// reservation and not the decode: the returned PCM is as large as the audio in the
-// file actually decodes to, which for a heavily compressed stream can be many
-// times the file size.
+// The decode is bounded at m4a.DefaultMaxDecodedBytes: a stream that decodes to
+// more stops with an error wrapping m4a.ErrDecodeLimit instead of growing the
+// buffer to fit. That bound is what makes this safe to point at a file the caller
+// did not produce, because FLAC's compression ratio has no lower limit, so the
+// decoded size is not proportional to the file. Use DecodeInterleavedLimit to
+// choose the ceiling, or DecodeStream to decode a stream of any length without
+// accumulating it.
 func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
-	rd, err := m4a.NewReader(r)
-	if err != nil {
-		return nil, m4a.Info{}, err
-	}
-	info := rd.Info()
-	if info.Codec != m4a.CodecFLAC {
-		return nil, info, fmt.Errorf("go-m4a/flacm4a: track codec is %v, not FLAC", info.Codec)
-	}
+	return DecodeInterleavedLimit(r, int(defaultMaxDecodedBytes.Load()))
+}
 
-	fd, err := flacpcm.NewFrameDecoder(info.CodecConfig)
+// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
+// a variable rather than the constant itself only so that a test can lower it:
+// asserting that the wrapper is bounded otherwise costs a decode past the real
+// default, and a test that cannot afford that ends up asserting nothing, which
+// is exactly how a "delegate with no limit" regression would slip through.
+//
+// It is atomic because the alternative is safe only by an ordering invariant
+// nothing enforces: a plain variable is race-free here purely because Go defers
+// parallel tests until the serial ones finish, so adding t.Parallel to the test
+// that lowers it, or to any sibling that decodes, introduces a data race with no
+// warning. One atomic load per decoded file is not a cost worth that. Whatever
+// is stored must fit an int, which the constant does on every supported
+// architecture.
+var defaultMaxDecodedBytes atomic.Int64
+
+func init() { defaultMaxDecodedBytes.Store(m4a.DefaultMaxDecodedBytes) }
+
+// DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
+// decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
+// audio decodes past it. A maxBytes of zero or less means no limit, which
+// restores the unbounded behaviour and is for input the caller produced or
+// otherwise trusts.
+//
+// The buffer is sized up front from what the file declares, bounded by what the
+// container corroborates, by a fixed reservation ceiling and by maxBytes, so a
+// file claiming an implausible length cannot make the decoder reserve for the
+// claim. Streams longer than the reservation ceiling are fully supported and
+// simply grow past it, up to maxBytes.
+func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, error) {
+	rd, fd, info, err := openStream(r)
 	if err != nil {
-		return nil, info, fmt.Errorf("go-m4a/flacm4a: new frame decoder: %w", err)
+		return nil, info, err
 	}
 
 	// Reserve the whole decoded stream up front rather than letting append grow it
@@ -198,21 +226,21 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 	// built from; the container's channel count only narrows the buffer estimate,
 	// and a short estimate costs regrows rather than correctness.
 	si := fd.StreamInfo()
-	out := make([]byte, 0, pcmReservation(si.TotalSamples, info.FrameCount, si.Channels, info.Channels, si.BitDepth))
-	for {
-		au, err := rd.ReadFrame()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, info, err
-		}
-		pcm, _, err := fd.DecodeInterleaved(au)
-		if err != nil {
-			return nil, info, fmt.Errorf("go-m4a/flacm4a: decode frame: %w", err)
+	out := make([]byte, 0, pcmReservation(si.TotalSamples, info.FrameCount, si.Channels, info.Channels, si.BitDepth, maxBytes))
+	err = forEachFrame(rd, fd, func(pcm []byte) error {
+		// Written as a subtraction so the test cannot overflow int on a 32-bit
+		// build. len(out) never exceeds maxBytes, so the difference is non-negative,
+		// and a frame that lands exactly on the limit is a fit rather than an excess.
+		if maxBytes > 0 && len(pcm) > maxBytes-len(out) {
+			return fmt.Errorf("go-m4a/flacm4a: decoded output exceeds the %d-byte limit: %w", maxBytes, m4a.ErrDecodeLimit)
 		}
 		out = append(out, pcm...)
+		return nil
+	})
+	if err != nil {
+		return nil, info, err
 	}
+
 	// Hand back a right-sized copy when the reservation ran well ahead of the audio
 	// that actually decoded. A returned slice pins its entire backing array, so a
 	// file that overstates its length would otherwise leave the caller holding that
@@ -221,6 +249,83 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 		out = bytes.Clone(out)
 	}
 	return out, info, nil
+}
+
+// DecodeStream opens a FLAC .mp4 and decodes it one access unit at a time, handing
+// each frame's interleaved little-endian PCM to fn. It accumulates nothing, so it
+// decodes a stream of any length in memory proportional to a single frame, which
+// is what makes it the shape to reach for with input the caller did not produce.
+// There is no encode counterpart yet: EncodeInterleaved takes the whole PCM
+// buffer at once.
+//
+// The slice handed to fn aliases a buffer the decoder reuses across frames and is
+// valid only until fn returns; fn copies whatever it needs to keep. An error from
+// fn stops the decode and is returned as-is, so a caller can break out early on
+// its own sentinel. A nil fn is rejected with an error rather than panicking
+// partway through a file.
+func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
+	if fn == nil {
+		return m4a.Info{}, fmt.Errorf("go-m4a/flacm4a: DecodeStream: nil callback")
+	}
+	rd, fd, info, err := openStream(r)
+	if err != nil {
+		return info, err
+	}
+	return info, forEachFrame(rd, fd, fn)
+}
+
+// openStream opens r as a FLAC .mp4 and builds the frame decoder its STREAMINFO
+// describes. It is the shared prologue of the decode entry points.
+func openStream(r io.ReadSeeker) (*m4a.Reader, *flacpcm.FrameDecoder, m4a.Info, error) {
+	rd, err := m4a.NewReader(r)
+	if err != nil {
+		return nil, nil, m4a.Info{}, err
+	}
+	info := rd.Info()
+	if info.Codec != m4a.CodecFLAC {
+		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: track codec is %v, not FLAC: %w", info.Codec, m4a.ErrUnsupported)
+	}
+	fd, err := flacpcm.NewFrameDecoder(info.CodecConfig)
+	if err != nil {
+		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: new frame decoder: %w", err)
+	}
+	return rd, fd, info, nil
+}
+
+// forEachFrame decodes every remaining access unit and hands the PCM to fn.
+//
+// The access-unit buffer is reused across frames and grown only when a frame needs
+// more room: ReadFrameInto reports the size it wants without consuming the frame,
+// so the retry reads the same access unit. That keeps the loop to an allocation
+// per new largest frame, a handful over a whole stream, rather than the one per
+// access unit ReadFrame costs, and it bounds the buffer by the largest frame the
+// container actually holds rather than by anything the file declares.
+func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) error) error {
+	var au []byte
+	for {
+		n, err := rd.ReadFrameInto(au)
+		if errors.Is(err, io.ErrShortBuffer) {
+			// Grow geometrically rather than to exactly this frame. A stream whose
+			// frames grow monotonically would otherwise reallocate once per frame;
+			// doubling caps that at a handful for any stream. An oversized buffer is
+			// fine, since ReadFrameInto reads only the frame and reports its size.
+			au = make([]byte, max(n, 2*len(au)))
+			n, err = rd.ReadFrameInto(au)
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		pcm, _, err := fd.DecodeInterleaved(au[:n])
+		if err != nil {
+			return fmt.Errorf("go-m4a/flacm4a: decode frame: %w", err)
+		}
+		if err := fn(pcm); err != nil {
+			return err
+		}
+	}
 }
 
 // shouldTrim reports whether a decoded buffer of the given length and capacity
@@ -297,7 +402,14 @@ func frameReservation(samplesPerChannel int) int {
 // A declared count of zero means unknown, which STREAMINFO is allowed to say, and
 // a file with no frames decodes to nothing. Either way the reservation is zero
 // and the buffer simply grows as it did before.
-func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bitDepth int) int {
+//
+// limit is the caller's ceiling on the decoded size (zero or less for none), and
+// caps the reservation as well. Without that, a caller who allowed a megabyte
+// would still watch a hostile self-description drive a speculative allocation up
+// to maxPCMReservation before the first frame decoded, which is most of what the
+// limit exists to prevent. It is a ceiling and never a floor: a limit above what
+// the stream declares leaves the reservation where the declaration put it.
+func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bitDepth, limit int) int {
 	// FLAC caps a stream at 8 channels and 32 bits per sample.
 	const (
 		maxFLACChannels = 8
@@ -324,5 +436,8 @@ func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bit
 	bytesPerSample := (min(bitDepth, maxFLACBitDepth) + 7) / 8
 	n := min(samples*uint64(min(channels, maxFLACChannels)), maxPCMReservation)
 	n = min(n*uint64(bytesPerSample), maxPCMReservation)
+	if limit > 0 {
+		n = min(n, uint64(limit))
+	}
 	return int(n)
 }
