@@ -112,12 +112,15 @@ type WriterConfig struct {
 	// Opus it must be 48000, the fixed Opus container timescale; for FLAC any
 	// positive rate is accepted, because FLAC has no rate table.
 	//
-	// For FLAC it must also agree with the rate inside STREAMINFO. Nothing here
-	// checks that, and the two are read by different consumers: this package's
-	// Reader reports the sample entry, while a conforming decoder takes the
-	// authoritative rate from STREAMINFO (Xiph, Encapsulation of FLAC in ISOBMFF,
-	// section 3.3.1). A config where they disagree therefore produces a file that
-	// this package and ffmpeg read differently, with no error from either.
+	// For FLAC it should also agree with the rate inside STREAMINFO. That is the
+	// encapsulation's requirement, not one this package enforces: NewWriter does
+	// not compare them and will not reject a mismatch. Keeping them in step is the
+	// caller's job, and it matters because the two fields are read by different
+	// consumers. This package's Reader reports the sample entry, while a
+	// conforming decoder takes the authoritative rate from STREAMINFO (Xiph,
+	// Encapsulation of FLAC in ISOBMFF, section 3.3.1), so a config where they
+	// disagree produces a file that go-m4a and ffmpeg read differently, with no
+	// error from either.
 	SampleRate int
 
 	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
