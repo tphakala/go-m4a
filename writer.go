@@ -61,13 +61,20 @@ const audioObjectTypeAACLC = 2
 // integer rate must fit 16 bits; a higher rate would silently wrap when shifted
 // into the field.
 //
-// It is the only rate bound every codec shares, and it is checked before the
-// per-codec validation, so it is what rejects the two AAC table rates that do
-// not fit (88200 and 96000) rather than anything AAC-specific. What each codec
-// accepts under it differs: AAC-LC is restricted to the sampling-frequency table
-// (aacRateSupported), Opus is pinned to opusTimescale, and FLAC carries its rate in
-// STREAMINFO and is bounded by nothing else, so it accepts any positive rate up
-// to this ceiling. TestAcceptedSampleRates pins all three.
+// It is the ceiling every codec shares, the positive-rate check at the top of
+// validateConfig being the matching floor, and both run before the per-codec
+// validation. So this is what rejects the two AAC table rates that do not fit
+// (88200 and 96000), rather than anything AAC-specific. What each codec accepts
+// between floor and ceiling differs: AAC-LC is restricted to the
+// sampling-frequency table, enforced by the ASC cross-check in validateAACConfig;
+// Opus is pinned to opusTimescale; FLAC has no rate table at all. See
+// TestAcceptedSampleRates, which pins all three.
+//
+// For FLAC this ceiling is the package's limit rather than the format's. The Xiph
+// encapsulation defines a fallback for higher rates, writing the greatest
+// expressible regular division (48000 for a 96 kHz stream) or 65535 when there is
+// none. This package rejects instead, which is consistent with its reader taking
+// the sample entry as authoritative; #4 tracks supporting the high rates.
 const maxAudioSampleEntryRate = 0xFFFF
 
 // maxFrames caps the number of access units per file so the moov sample tables
@@ -100,11 +107,17 @@ type WriterConfig struct {
 	// SampleRate is the audio sample rate in Hz (for example 48000). Required, and
 	// bounded for every codec by what the sample entry can represent, so at most
 	// maxAudioSampleEntryRate (65535). Within that the accepted set is per codec:
-	// for AAC-LC it must be one of the MPEG-4 sampling-frequency table rates and
-	// must match the rate encoded in ASC, which leaves 7350 through 64000; for
+	// for AAC-LC it must be one of the eleven MPEG-4 sampling-frequency table
+	// rates that fit, 7350 to 64000, and must match the rate encoded in ASC; for
 	// Opus it must be 48000, the fixed Opus container timescale; for FLAC any
-	// positive rate is accepted, since the rate a decoder uses comes from
-	// STREAMINFO rather than from this field.
+	// positive rate is accepted, because FLAC has no rate table.
+	//
+	// For FLAC it must also agree with the rate inside STREAMINFO. Nothing here
+	// checks that, and the two are read by different consumers: this package's
+	// Reader reports the sample entry, while a conforming decoder takes the
+	// authoritative rate from STREAMINFO (Xiph, Encapsulation of FLAC in ISOBMFF,
+	// section 3.3.1). A config where they disagree therefore produces a file that
+	// this package and ffmpeg read differently, with no error from either.
 	SampleRate int
 
 	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
@@ -585,6 +598,13 @@ func validateAACConfig(cfg WriterConfig) error {
 	if len(cfg.ASC) < 2 {
 		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
 	}
+	// This guard cannot change which configs are accepted: an off-table rate can
+	// never match the ASC either, because the rate the ASC agrees with is read out
+	// of this same table, so the cross-check below would reject it regardless.
+	// What it changes is which error the caller gets, and that is worth the three
+	// lines: "unsupported sample rate 47999 Hz" says the rate is not one AAC can
+	// express, where "does not match ASC (48000 Hz)" would send the caller looking
+	// for a mismatch they cannot fix by editing the ASC.
 	if !aacRateSupported(cfg.SampleRate) {
 		return fmt.Errorf("go-m4a: unsupported sample rate %d Hz", cfg.SampleRate)
 	}
