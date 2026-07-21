@@ -284,6 +284,15 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 // per channel, then keep only as many samples per channel as Info.Duration
 // represents (Duration*SampleRate), discarding the trailing padding the edit
 // list excludes.
+//
+// This package has no counterpart to flacm4a.DecodeInterleaved or
+// opusm4a.DecodeInterleaved, so it has no counterpart to their
+// m4a.DefaultMaxDecodedBytes ceiling either. Nothing here accumulates: the
+// decoder streams, and a caller that accumulates its output itself (io.ReadAll
+// rather than io.Copy to a sink) owns that bound. Size it against the audio
+// rather than against the file, because the decoded size is not proportional to
+// the input here either: a near-minimal AAC-LC access unit still decodes to a
+// fixed 1024 samples per channel.
 func NewDecoder(r io.ReadSeeker) (*aacpcm.Decoder, m4a.Info, error) {
 	rd, err := m4a.NewReader(r)
 	if err != nil {

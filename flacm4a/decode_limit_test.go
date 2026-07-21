@@ -5,11 +5,23 @@ package flacm4a
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
 )
+
+// encodeFile encodes PCM to a FLAC .mp4 and returns the file bytes.
+func encodeFile(t *testing.T, pcm []byte, channels int) []byte {
+	t.Helper()
+	var buf memWS
+	cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: 16, CompressionLevel: 5}
+	if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
+		t.Fatalf("EncodeInterleaved: %v", err)
+	}
+	return buf.buf
+}
 
 // encodeSilence returns a FLAC .mp4 holding samplesPerCh samples of digital
 // silence per channel, together with the byte length that decodes back to.
@@ -19,12 +31,7 @@ import (
 func encodeSilence(t *testing.T, samplesPerCh, channels int) (file []byte, decoded int) {
 	t.Helper()
 	pcm := make([]byte, samplesPerCh*channels*2)
-	var buf memWS
-	cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: 16, CompressionLevel: 5}
-	if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
-		t.Fatalf("EncodeInterleaved: %v", err)
-	}
-	return buf.buf, len(pcm)
+	return encodeFile(t, pcm, channels), len(pcm)
 }
 
 // TestDecodeInterleavedLimitRejectsOversizedDecode is the regression guard for
@@ -75,13 +82,10 @@ func TestDecodeInterleavedLimitOneByteShort(t *testing.T) {
 
 func TestDecodeInterleavedLimitNonPositiveMeansUnlimited(t *testing.T) {
 	pcm := genS16(12000, 2)
-	var buf memWS
-	if err := EncodeInterleaved(&buf, Config{SampleRate: 48000, Channels: 2, BitDepth: 16, CompressionLevel: 5}, pcm); err != nil {
-		t.Fatalf("EncodeInterleaved: %v", err)
-	}
+	file := encodeFile(t, pcm, 2)
 
 	for _, limit := range []int{0, -1} {
-		got, _, err := DecodeInterleavedLimit(bytes.NewReader(buf.buf), limit)
+		got, _, err := DecodeInterleavedLimit(bytes.NewReader(file), limit)
 		if err != nil {
 			t.Fatalf("DecodeInterleavedLimit(%d): %v", limit, err)
 		}
@@ -98,6 +102,7 @@ func TestDecodeInterleavedLimitNonPositiveMeansUnlimited(t *testing.T) {
 // reservation is not observable through the exported API, so this asserts on the
 // function directly.
 func TestPCMReservationRespectsLimit(t *testing.T) {
+	t.Parallel()
 	// A stream declaring far more audio than the bounded cases allow, so the limit
 	// rather than the declaration decides each one.
 	const (
@@ -134,63 +139,98 @@ func TestPCMReservationRespectsLimit(t *testing.T) {
 }
 
 func TestDecodeStreamDeliversEveryFrame(t *testing.T) {
-	pcm := genS16(12000, 2)
-	var buf memWS
-	if err := EncodeInterleaved(&buf, Config{SampleRate: 48000, Channels: 2, BitDepth: 16, CompressionLevel: 5}, pcm); err != nil {
-		t.Fatalf("EncodeInterleaved: %v", err)
-	}
+	for _, channels := range []int{1, 2} {
+		t.Run(fmt.Sprintf("ch%d", channels), func(t *testing.T) {
+			pcm := genS16(12000, channels)
+			file := encodeFile(t, pcm, channels)
 
-	var got []byte
-	frames := 0
-	info, err := DecodeStream(bytes.NewReader(buf.buf), func(frame []byte) error {
-		frames++
-		got = append(got, frame...)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("DecodeStream: %v", err)
-	}
-	if info.Codec != m4a.CodecFLAC {
-		t.Errorf("Codec = %v, want FLAC", info.Codec)
-	}
-	if frames != info.FrameCount {
-		t.Errorf("callback ran %d times, want %d (one per access unit)", frames, info.FrameCount)
-	}
-	// FLAC is lossless, so the concatenated frames must be the input exactly.
-	if !bytes.Equal(got, pcm) {
-		t.Errorf("streamed PCM mismatch: got %d bytes, want %d bytes", len(got), len(pcm))
+			var got []byte
+			frames := 0
+			info, err := DecodeStream(bytes.NewReader(file), func(frame []byte) error {
+				frames++
+				got = append(got, frame...)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("DecodeStream: %v", err)
+			}
+			if info.Codec != m4a.CodecFLAC {
+				t.Errorf("Codec = %v, want FLAC", info.Codec)
+			}
+			// Guards the assertion below from going vacuous if the fixture ever
+			// shrinks to a single frame.
+			if info.FrameCount < 2 {
+				t.Fatalf("fixture has %d frames, want a multi-frame stream", info.FrameCount)
+			}
+			if frames != info.FrameCount {
+				t.Errorf("callback ran %d times, want %d (one per access unit)", frames, info.FrameCount)
+			}
+			// FLAC is lossless, so the concatenated frames must be the input exactly.
+			if !bytes.Equal(got, pcm) {
+				t.Errorf("streamed PCM mismatch: got %d bytes, want %d bytes", len(got), len(pcm))
+			}
+		})
 	}
 }
 
 func TestDecodeStreamPropagatesCallbackError(t *testing.T) {
-	file, _ := encodeSilence(t, 4096*3, 1)
+	file := encodeFile(t, genS16(12000, 1), 1)
 	stop := errors.New("caller stopped the decode")
 
-	calls := 0
-	if _, err := DecodeStream(bytes.NewReader(file), func([]byte) error {
-		calls++
-		return stop
-	}); !errors.Is(err, stop) {
-		t.Fatalf("err = %v, want the callback's error", err)
-	}
-	if calls != 1 {
-		t.Errorf("callback ran %d times, want 1: the decode must stop at the first error", calls)
+	// Stopping partway matters as much as stopping at once: an implementation that
+	// only checked the first callback's error would pass a first-frame-only test.
+	for _, stopAt := range []int{1, 3} {
+		calls := 0
+		_, err := DecodeStream(bytes.NewReader(file), func([]byte) error {
+			calls++
+			if calls == stopAt {
+				return stop
+			}
+			return nil
+		})
+		if !errors.Is(err, stop) {
+			t.Fatalf("stopAt %d: err = %v, want the callback's error", stopAt, err)
+		}
+		if calls != stopAt {
+			t.Errorf("callback ran %d times, want %d: the decode must stop at the first error", calls, stopAt)
+		}
 	}
 }
 
-// TestDecodeInterleavedAppliesDefaultLimit pins that the convenience wrapper is
-// bounded rather than unlimited. It cannot afford to decode past the real
-// default, so it checks the wiring the cheap way: the same file decodes under
-// the default, and the limit variant proves the mechanism.
-func TestDecodeInterleavedAppliesDefaultLimit(t *testing.T) {
-	if m4a.DefaultMaxDecodedBytes <= 0 {
-		t.Fatalf("DefaultMaxDecodedBytes = %d, want a positive ceiling", m4a.DefaultMaxDecodedBytes)
-	}
-	file, decoded := encodeSilence(t, 4096*3, 1)
+func TestDecodeStreamRejectsNilCallback(t *testing.T) {
+	file, _ := encodeSilence(t, 4096*3, 1)
 
+	if _, err := DecodeStream(bytes.NewReader(file), nil); err == nil {
+		t.Error("DecodeStream(nil callback) returned nil error, want a rejection rather than a panic")
+	}
+}
+
+// TestDecodeInterleavedAppliesTheDefaultLimit pins the wiring that is the whole
+// point of the change: the convenience wrapper must delegate with the package
+// default rather than with no limit. Asserting it against the real ceiling would
+// cost a gigabyte-scale decode, so the ceiling is lowered for the duration of the
+// test instead. Without this, a wrapper delegating with 0 passes every other test
+// in the file.
+func TestDecodeInterleavedAppliesTheDefaultLimit(t *testing.T) {
+	if defaultMaxDecodedBytes != m4a.DefaultMaxDecodedBytes {
+		t.Fatalf("defaultMaxDecodedBytes = %d, want the package constant %d", defaultMaxDecodedBytes, m4a.DefaultMaxDecodedBytes)
+	}
+	file, decoded := encodeSilence(t, 48000*5, 2)
+
+	restore := defaultMaxDecodedBytes
+	t.Cleanup(func() { defaultMaxDecodedBytes = restore })
+
+	defaultMaxDecodedBytes = decoded / 4
+	if _, _, err := DecodeInterleaved(bytes.NewReader(file)); !errors.Is(err, m4a.ErrDecodeLimit) {
+		t.Fatalf("err = %v, want ErrDecodeLimit: DecodeInterleaved must delegate with the package default", err)
+	}
+
+	// And the same file decodes once the ceiling is above it, so the failure above
+	// is the limit rather than anything else about the fixture.
+	defaultMaxDecodedBytes = decoded
 	pcm, _, err := DecodeInterleaved(bytes.NewReader(file))
 	if err != nil {
-		t.Fatalf("DecodeInterleaved: %v", err)
+		t.Fatalf("DecodeInterleaved under a sufficient default: %v", err)
 	}
 	if len(pcm) != decoded {
 		t.Errorf("PCM = %d bytes, want %d", len(pcm), decoded)

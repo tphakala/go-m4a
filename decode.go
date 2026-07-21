@@ -14,17 +14,28 @@ package m4a
 // of access units an attacker gets is bounded by what they pay for, but what an
 // access unit decodes to is not: a FLAC constant subframe encodes a whole
 // 65535-sample block in a handful of bytes, and a two-byte Opus packet with
-// zero-length DTX frames decodes to 120 ms. Both amplify by four to five orders
-// of magnitude, so a file of tens of kilobytes decodes to something on the order
-// of a gigabyte. Nor is this only an adversarial concern: sixty seconds of
-// ordinary digital silence encodes to about 14 kB of FLAC and decodes to 11.5 MB,
-// a ratio of 831:1, so a quiet field recording lands in the same place.
+// zero-length DTX frames decodes to 120 ms. FLAC amplifies by four to five
+// orders of magnitude, so a crafted file of tens of kilobytes decodes to
+// something on the order of a gigabyte; Opus is less exposed at three to four
+// orders, because a packet decodes to at most 5760 samples per channel and each
+// one costs a sample-table entry as well, but the loop shape is identical and
+// the bound is worth having in both. Nor is this only an adversarial concern:
+// sixty seconds of ordinary digital silence encodes to about 14 kB of FLAC and
+// decodes back to 11.5 MB, a ratio of 831:1, so a quiet field recording lands in
+// the same place as a crafted one.
 //
-// 256 MiB is about 23 minutes of 48 kHz stereo 16-bit. It is deliberately
-// generous, because it is a backstop against amplification rather than a policy
-// on how long a clip may be: an honest recording that trips it is a recording
-// nobody should be decoding into a single slice anyway. The accumulating decode
-// grows by doubling, so the transient peak while a decode approaches this ceiling
-// is larger than the ceiling itself; a caller that has to bound its real memory
-// use wants DecodeStream, not a smaller limit.
-const DefaultMaxDecodedBytes = 256 << 20
+// 1 GiB is deliberately generous, because this is a backstop against
+// amplification rather than a policy on how long a clip may be. It has to sit
+// above the largest honest input, and honest inputs run long: 1 GiB is about 93
+// minutes of 44.1 kHz stereo 16-bit, which covers essentially every album,
+// podcast and lecture recording, about 31 minutes at 24-bit 96 kHz, and about 15
+// minutes of 8-channel 24-bit. A crafted file still trips it four orders of
+// magnitude short of exhausting memory: at the measured worst case of roughly
+// 11,500:1 an attacker has to supply about 93 kB to reach it.
+//
+// It is not a memory guarantee, and a caller that needs one wants DecodeStream.
+// An accumulating decode grows geometrically (about 1.25x once the buffer is
+// large, not 2x), so while the old array is still live and the new one is being
+// filled the transient peak is close to twice the length reached, and the total
+// allocated over the whole decode, most of it garbage, is around five times it.
+const DefaultMaxDecodedBytes = 1 << 30

@@ -3,9 +3,12 @@
 // Package flacm4a is an optional convenience bridge that couples go-flac's FLAC
 // codec to the go-m4a container. EncodeInterleaved takes interleaved PCM straight
 // to a FLAC .mp4 (fLaC/dfLa); DecodeInterleaved opens one and returns the decoded
-// PCM. It is a thin seam over the two libraries: the core m4a package stays
-// stdlib-only, and only this subpackage imports go-flac, so a consumer that merely
-// muxes or demuxes never pulls the codec.
+// PCM, bounded at m4a.DefaultMaxDecodedBytes, and DecodeStream decodes a file of
+// any length a frame at a time without accumulating it, which is the shape to
+// reach for with input the caller did not produce. It is a thin seam over the two
+// libraries: the core m4a package stays stdlib-only, and only this subpackage
+// imports go-flac, so a consumer that merely muxes or demuxes never pulls the
+// codec.
 package flacm4a
 
 import (
@@ -43,11 +46,12 @@ const encoderBlockSize = 4096
 // correctness or a safety problem.
 const maxFLACBlockSize = 65535
 
-// maxPCMReservation is the ceiling on what DecodeInterleaved will reserve up
-// front. It bounds the RESERVATION only, not the decode: the frame loop appends
-// whatever the file decodes to, so this constant is not a limit on how much
-// memory a malicious file can make the decoder produce. See the note on
-// DecodeInterleaved.
+// maxPCMReservation is the ceiling on what an accumulating decode reserves up
+// front. It bounds the RESERVATION only. What bounds the decode is the caller's
+// limit, which pcmReservation also applies (see DecodeInterleavedLimit and
+// m4a.DefaultMaxDecodedBytes); this constant is what keeps a file's own
+// self-description from driving a large speculative allocation before the first
+// frame has decoded.
 //
 // The bounds pcmReservation derives from the container narrow the honest cases,
 // but they cannot make the reservation safe on their own, because FLAC's
@@ -67,7 +71,7 @@ const maxFLACBlockSize = 65535
 // does. Honest files are what this constant is tuned for.
 const maxPCMReservation = 64 << 20
 
-// maxRetainedSlack is the floor below which DecodeInterleaved never bothers
+// maxRetainedSlack is the floor below which an accumulating decode never bothers
 // copying the returned slice down to size. It is not the whole rule and not the
 // worst case: shouldTrim also requires the slack to be disproportionate, so what
 // can actually be handed back is max(maxRetainedSlack, length/2), which for a
@@ -174,8 +178,17 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // choose the ceiling, or DecodeStream to decode a stream of any length without
 // accumulating it.
 func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
-	return DecodeInterleavedLimit(r, m4a.DefaultMaxDecodedBytes)
+	return DecodeInterleavedLimit(r, defaultMaxDecodedBytes)
 }
+
+// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
+// a variable rather than the constant itself only so that a test can lower it:
+// asserting that the wrapper is bounded otherwise costs a decode past the real
+// default, and a test that cannot afford that ends up asserting nothing, which
+// is exactly how a "delegate with no limit" regression would slip through.
+// Production never writes it, and a test that lowers it must not run in
+// parallel with anything that decodes.
+var defaultMaxDecodedBytes = m4a.DefaultMaxDecodedBytes
 
 // DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
 // decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
@@ -233,14 +246,17 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 // each frame's interleaved little-endian PCM to fn. It accumulates nothing, so it
 // decodes a stream of any length in memory proportional to a single frame, which
 // is what makes it the shape to reach for with input the caller did not produce.
-// It is also the demux counterpart of EncodeInterleaved, which hands frames to a
-// callback the same way.
+// There is no encode counterpart yet: EncodeInterleaved takes the whole PCM
+// buffer at once.
 //
 // The slice handed to fn aliases a buffer the decoder reuses across frames and is
 // valid only until fn returns; fn copies whatever it needs to keep. An error from
 // fn stops the decode and is returned as-is, so a caller can break out early on
 // its own sentinel.
 func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
+	if fn == nil {
+		return m4a.Info{}, fmt.Errorf("go-m4a/flacm4a: DecodeStream: nil callback")
+	}
 	rd, fd, info, err := openStream(r)
 	if err != nil {
 		return info, err
@@ -257,7 +273,7 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *flacpcm.FrameDecoder, m4a.Info, 
 	}
 	info := rd.Info()
 	if info.Codec != m4a.CodecFLAC {
-		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: track codec is %v, not FLAC", info.Codec)
+		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: track codec is %v, not FLAC: %w", info.Codec, m4a.ErrUnsupported)
 	}
 	fd, err := flacpcm.NewFrameDecoder(info.CodecConfig)
 	if err != nil {
@@ -270,10 +286,10 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *flacpcm.FrameDecoder, m4a.Info, 
 //
 // The access-unit buffer is reused across frames and grown only when a frame needs
 // more room: ReadFrameInto reports the size it wants without consuming the frame,
-// so the retry reads the same access unit. That keeps the loop at one allocation
-// for the whole stream rather than the one per access unit ReadFrame costs, and it
-// bounds the buffer by the largest frame the container actually holds rather than
-// by anything the file declares.
+// so the retry reads the same access unit. That keeps the loop to an allocation
+// per new largest frame, a handful over a whole stream, rather than the one per
+// access unit ReadFrame costs, and it bounds the buffer by the largest frame the
+// container actually holds rather than by anything the file declares.
 func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) error) error {
 	var au []byte
 	for {

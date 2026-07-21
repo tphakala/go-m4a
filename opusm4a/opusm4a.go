@@ -3,9 +3,12 @@
 // Package opusm4a is an optional convenience bridge that couples go-opus's Opus
 // codec to the go-m4a container. EncodeInterleaved takes interleaved 16-bit PCM
 // straight to a gapless Opus .mp4; DecodeInterleaved opens one and returns the
-// decoded PCM. It is a thin seam over the two libraries: the core m4a package
-// stays stdlib-only, and only this subpackage imports go-opus, so a consumer that
-// merely muxes or demuxes never pulls the codec.
+// decoded PCM, bounded at m4a.DefaultMaxDecodedBytes, and DecodeStream decodes a
+// file of any length a packet at a time without accumulating it, which is the
+// shape to reach for with input the caller did not produce. It is a thin seam
+// over the two libraries: the core m4a package stays stdlib-only, and only this
+// subpackage imports go-opus, so a consumer that merely muxes or demuxes never
+// pulls the codec.
 package opusm4a
 
 import (
@@ -24,14 +27,24 @@ import (
 // container timescale, and the rate this bridge encodes and decodes at.
 const opusRate = 48000
 
-// frameSamplesPerChannel is the per-channel sample count of one encoded packet: a
-// 20 ms frame at 48 kHz, the standard Opus-in-MP4 packetization.
+// frameSamplesPerChannel is a 20 ms frame at 48 kHz: the frame size
+// EncodeInterleaved writes, which is also the standard Opus-in-MP4
+// packetization, and the per-packet estimate pcmReservation assumes on decode. A
+// foreign file may use any Opus frame size from 2.5 to 120 ms, so on the decode
+// side this is a guess rather than a fact.
 const frameSamplesPerChannel = opusRate / 50 // 960
 
-// maxSamplesPerChannel is the most one packet can decode to: RFC 6716 section 3.1
-// caps a packet at 120 ms of audio, which is 5760 samples at 48 kHz. It sizes the
-// decoder's output buffer, so it is a correctness bound rather than a hint.
+// maxSamplesPerChannel is the most one packet can decode to: RFC 6716 section
+// 3.2.5 requires that "the audio duration contained within a packet MUST NOT
+// exceed 120 ms" (rule [R5], restated in section 3.4), which is 5760 samples at
+// 48 kHz. It sizes the decoder's output buffer, so it is a correctness bound
+// rather than a hint.
 const maxSamplesPerChannel = 120 * opusRate / 1000 // 5760
+
+// maxOpusChannels is the channel count this bridge supports. openStream rejects
+// anything outside 1..2 before a decode starts, so pcmReservation's clamp to this
+// value is defence in depth rather than a reachable path.
+const maxOpusChannels = 2
 
 // maxPCMReservation is the ceiling on what an accumulating decode reserves up
 // front, the same 64 MiB flacm4a uses and for the same reason: the reservation is
@@ -147,14 +160,30 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // maximum. Use DecodeInterleavedLimit to choose the ceiling, or DecodeStream to
 // decode a stream of any length without accumulating it.
 func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
-	return DecodeInterleavedLimit(r, m4a.DefaultMaxDecodedBytes)
+	return DecodeInterleavedLimit(r, defaultMaxDecodedBytes)
 }
+
+// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
+// a variable rather than the constant itself only so that a test can lower it:
+// asserting that the wrapper is bounded otherwise costs a decode past the real
+// default, and a test that cannot afford that ends up asserting nothing, which
+// is exactly how a "delegate with no limit" regression would slip through.
+// Production never writes it, and a test that lowers it must not run in
+// parallel with anything that decodes.
+var defaultMaxDecodedBytes = m4a.DefaultMaxDecodedBytes
 
 // DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
 // decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
 // audio decodes past it. A maxBytes of zero or less means no limit, which
 // restores the unbounded behaviour and is for input the caller produced or
 // otherwise trusts.
+//
+// The buffer is sized up front from the packet count the container holds, on the
+// assumption of the 20 ms packetization this bridge writes, bounded by a fixed
+// reservation ceiling and by maxBytes. A file of longer packets is fully
+// supported and simply grows past the estimate, up to maxBytes; a file of shorter
+// ones decodes to less than was reserved, and the returned slice is then a
+// right-sized copy rather than the whole reservation.
 func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, error) {
 	rd, dec, info, err := openStream(r)
 	if err != nil {
@@ -203,13 +232,17 @@ func shouldTrim(length, capacity int) bool {
 // nothing, so it decodes a stream of any length in memory proportional to a single
 // packet, which is what makes it the shape to reach for with input the caller did
 // not produce. The PCM carries the same priming and padding DecodeInterleaved
-// returns, so the same trimming applies.
+// returns, so the same Info.EncoderDelay and Info.Duration trimming described
+// there applies.
 //
 // The slice handed to fn aliases a buffer reused across packets and is valid only
 // until fn returns; fn copies whatever it needs to keep. An error from fn stops
 // the decode and is returned as-is, so a caller can break out early on its own
 // sentinel.
 func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
+	if fn == nil {
+		return m4a.Info{}, fmt.Errorf("go-m4a/opusm4a: DecodeStream: nil callback")
+	}
 	rd, dec, info, err := openStream(r)
 	if err != nil {
 		return info, err
@@ -226,10 +259,10 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *opus.Decoder, m4a.Info, error) {
 	}
 	info := rd.Info()
 	if info.Codec != m4a.CodecOpus {
-		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: track codec is %v, not Opus", info.Codec)
+		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: track codec is %v, not Opus: %w", info.Codec, m4a.ErrUnsupported)
 	}
-	if info.Channels < 1 || info.Channels > 2 {
-		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: unsupported channel count %d", info.Channels)
+	if info.Channels < 1 || info.Channels > maxOpusChannels {
+		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: unsupported channel count %d: %w", info.Channels, m4a.ErrUnsupported)
 	}
 	dec, err := opus.NewDecoder(opusRate, info.Channels)
 	if err != nil {
@@ -243,9 +276,10 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *opus.Decoder, m4a.Info, error) {
 // Three buffers are reused for the whole stream: the access unit, the decoder's
 // int16 output, and the little-endian bytes fn sees. The access-unit buffer grows
 // only when a packet needs more room, which ReadFrameInto reports without
-// consuming the packet, so the retry reads the same one; that is one allocation
-// for the stream rather than the one per packet ReadFrame costs. The byte buffer
-// replaces the two-bytes-at-a-time append this loop used to grow from nil.
+// consuming the packet, so the retry reads the same one; that is an allocation
+// per new largest packet, a handful over a whole stream, rather than the one per
+// packet ReadFrame costs. The byte buffer replaces the two-bytes-at-a-time append
+// this loop used to grow from nil.
 func forEachPacket(rd *m4a.Reader, dec *opus.Decoder, channels int, fn func(pcm []byte) error) error {
 	var au []byte
 	samples := make([]int16, maxSamplesPerChannel*channels)
@@ -268,8 +302,10 @@ func forEachPacket(rd *m4a.Reader, dec *opus.Decoder, channels int, fn func(pcm 
 		}
 		// Defensive: the decoder cannot return more than the buffer it was given, so
 		// this never fires today. It costs one comparison per packet and turns a
-		// future upstream change from a panic into an error.
-		if got < 0 || got*channels > len(samples) {
+		// future upstream change from a panic into an error. Compared per channel
+		// rather than as got*channels, which would overflow int for a large enough
+		// got and let exactly the panic this guards against through.
+		if got < 0 || got > maxSamplesPerChannel {
 			return fmt.Errorf("go-m4a/opusm4a: decoder returned %d samples per channel, more than the %d-sample buffer", got, maxSamplesPerChannel)
 		}
 		for i := range got * channels {
@@ -301,7 +337,7 @@ func pcmReservation(frameCount, channels, limit int) int {
 		return 0
 	}
 	samples := min(uint64(frameCount), maxPCMReservation) * frameSamplesPerChannel
-	n := min(samples*uint64(min(channels, 2)), maxPCMReservation)
+	n := min(samples*uint64(min(channels, maxOpusChannels)), maxPCMReservation)
 	n = min(n*2, maxPCMReservation) // 16-bit samples
 	if limit > 0 {
 		n = min(n, uint64(limit))

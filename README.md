@@ -45,23 +45,30 @@ and its codec-specific box differ.
   34-byte STREAMINFO in `dfLa`; no edit list (FLAC has no priming). Reads
   ffmpeg-produced files and round-trips bit-exact (lossless) through go-flac.
 
-Parsing is bounds-checked throughout and never panics on malformed input, and a
-decode is bounded too. The decoded size of an audio file is not proportional to
-the file: a FLAC constant subframe encodes a whole 65535-sample block in a
-handful of bytes, and a two-byte Opus packet of zero-length DTX frames decodes to
-120 ms, so a crafted file of tens of kilobytes decodes to something on the order
-of a gigabyte. Sixty seconds of ordinary digital silence is a 831:1 ratio, so
-this is not only an adversarial concern.
+Parsing is bounds-checked throughout and never panics on malformed input, and the
+accumulating decodes are bounded too. The decoded size of an audio file is not
+proportional to the file: a FLAC constant subframe encodes a whole 65535-sample
+block in a handful of bytes, so a crafted file of tens of kilobytes decodes to
+something on the order of a gigabyte, and a two-byte Opus packet of zero-length
+DTX frames decodes to 120 ms. Sixty seconds of ordinary digital silence encodes
+to about 14 kB and decodes back to 11.5 MB, a ratio of 831:1, so this is not only
+an adversarial concern.
 
 `flacm4a.DecodeInterleaved` and `opusm4a.DecodeInterleaved` therefore stop at
-`m4a.DefaultMaxDecodedBytes` (256 MiB) and return an error wrapping
-`m4a.ErrDecodeLimit`. `DecodeInterleavedLimit` takes the ceiling as an argument
-(zero or less for none), and `DecodeStream` hands each frame's PCM to a callback
+`m4a.DefaultMaxDecodedBytes` (1 GiB, about 93 minutes of CD-quality stereo) and
+return an error wrapping `m4a.ErrDecodeLimit`; see that constant for how the
+value was chosen. `DecodeInterleavedLimit` takes the ceiling as an argument (zero
+or less for none), and `DecodeStream` hands each frame's PCM to a callback
 without accumulating at all, so it decodes a stream of any length in memory
-proportional to a single frame. What the accumulating decodes reserve up front is
-bounded separately, by what the container corroborates and by a fixed ceiling, so
-a file that declares an implausible length cannot make the decoder allocate for
-the claim before decoding anything.
+proportional to a single frame. What those decodes reserve up front is bounded
+separately, by what the container corroborates, by a fixed ceiling and by the
+limit itself, so a file that declares an implausible length cannot make the
+decoder allocate for the claim before decoding anything.
+
+`aacm4a` needs none of this and gets none of it: it has no accumulating decode,
+because `NewDecoder` returns a streaming decoder. A caller that accumulates that
+decoder's output itself owns the bound, and should size it against the audio
+rather than against the file.
 
 There is also a **fragmented (CMAF) writer** for live HLS or DASH: `InitSegment`
 builds the `ftyp`/`moov` initialization segment and a `FragmentWriter` appends
@@ -193,7 +200,8 @@ sample-accurate output. `flacm4a` needs no trimming (FLAC has no priming).
 
 Both `DecodeInterleaved` calls stop at `m4a.DefaultMaxDecodedBytes`. For a file
 the caller did not produce, or one longer than that ceiling, decode it a frame at
-a time instead and let nothing accumulate:
+a time instead and let nothing accumulate. Both bridges have the same pair, so
+`opusm4a.DecodeStream` and `opusm4a.DecodeInterleavedLimit` behave identically:
 
 ```go
 info, err := flacm4a.DecodeStream(r, func(pcm []byte) error {

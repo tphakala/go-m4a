@@ -7,7 +7,8 @@ import "errors"
 // Package-wide sentinel errors. They are returned wrapped (via fmt.Errorf with
 // %w) so callers can match with errors.Is while still getting a descriptive
 // message. The Reader shares these with the Writer, so they live here rather
-// than beside a single implementation.
+// than beside a single implementation; ErrDecodeLimit is here for the same
+// reason, shared by the codec bridges rather than by the container code.
 var (
 	// ErrCorrupt indicates a malformed container: a truncated box, a size field
 	// that overflows the stream, a missing required box (moov, stbl, esds), or
@@ -26,8 +27,9 @@ var (
 	// instead of panicking.
 	ErrClosed = errors.New("go-m4a: writer is closed")
 
-	// ErrDecodeLimit indicates that a decode was stopped because its output
-	// reached the caller's byte limit. It is returned by the codec bridges
+	// ErrDecodeLimit indicates that a decode was stopped because its output would
+	// have exceeded the caller's byte limit: output landing exactly on the limit
+	// is a fit, not an excess. It is returned by the codec bridges
 	// (flacm4a, opusm4a) rather than by the container code here, which decodes
 	// nothing; it lives in this package so both bridges report the same sentinel
 	// and a caller handling a mix of codecs matches one error. See
