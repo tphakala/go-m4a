@@ -9,6 +9,7 @@
 package opusm4a
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -39,6 +40,11 @@ const maxSamplesPerChannel = 120 * opusRate / 1000 // 5760
 // decode is the caller's limit, which pcmReservation also applies here. See the
 // note on flacm4a.maxPCMReservation for how the value was chosen.
 const maxPCMReservation = 64 << 20
+
+// maxRetainedSlack is the floor below which an accumulating decode never bothers
+// copying the returned slice down to size, the companion to maxPCMReservation and
+// again the same value flacm4a uses. See shouldTrim for the rest of the rule.
+const maxRetainedSlack = 64 << 10
 
 // Config configures Opus encoding. SampleRate must be 48000 (the Opus container
 // rate); Channels is 1 or 2; Bitrate is the target bits per second (0 selects the
@@ -169,7 +175,27 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 	if err != nil {
 		return nil, info, err
 	}
+
+	// Hand back a right-sized copy when the reservation ran well ahead of the audio
+	// that actually decoded, which happens when a file's packets are shorter than
+	// the 20 ms the reservation assumes. A returned slice pins its entire backing
+	// array, so the caller would otherwise keep that reservation for as long as it
+	// keeps the PCM.
+	if shouldTrim(len(out), cap(out)) {
+		out = bytes.Clone(out)
+	}
 	return out, info, nil
+}
+
+// shouldTrim reports whether a decoded buffer of the given length and capacity is
+// carrying enough dead capacity to be worth copying down to size. It is
+// flacm4a.shouldTrim, applied to the same problem: both tests are load-bearing,
+// the absolute one to ignore overshoot too small to be worth a copy and the
+// proportional one to keep the trim off buffers that merely carry append's growth
+// headroom. The rationale for the two thresholds is written out there.
+func shouldTrim(length, capacity int) bool {
+	slack := capacity - length
+	return slack > maxRetainedSlack && slack > length/2
 }
 
 // DecodeStream opens an Opus .mp4 and decodes it one packet at a time, handing
