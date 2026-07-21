@@ -154,7 +154,11 @@ func TestPCMReservation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := pcmReservation(tc.totalSamples, tc.frameCount, tc.siChannels, tc.seChannels, tc.bitDepth)
+			// These cases pin the reservation the container and STREAMINFO imply, so
+			// they run with no caller limit; TestPCMReservationRespectsLimit covers
+			// what a limit does to the same arithmetic.
+			const noLimit = 0
+			got := pcmReservation(tc.totalSamples, tc.frameCount, tc.siChannels, tc.seChannels, tc.bitDepth, noLimit)
 			if got != tc.want {
 				t.Errorf("pcmReservation(%d, %d, %d, %d, %d) = %d, want %d",
 					tc.totalSamples, tc.frameCount, tc.siChannels, tc.seChannels, tc.bitDepth, got, tc.want)

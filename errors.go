@@ -25,4 +25,17 @@ var (
 	// closed. A second Close, or any WriteFrame after Close, reports this
 	// instead of panicking.
 	ErrClosed = errors.New("go-m4a: writer is closed")
+
+	// ErrDecodeLimit indicates that a decode was stopped because its output
+	// reached the caller's byte limit. It is returned by the codec bridges
+	// (flacm4a, opusm4a) rather than by the container code here, which decodes
+	// nothing; it lives in this package so both bridges report the same sentinel
+	// and a caller handling a mix of codecs matches one error. See
+	// DefaultMaxDecodedBytes for why the limit exists.
+	//
+	// It is a resource limit, not a verdict on the file. A stream that trips it
+	// may be perfectly well-formed and merely longer than the caller allowed, so
+	// the remedy is a larger limit or a streaming decode, not treating the input
+	// as corrupt.
+	ErrDecodeLimit = errors.New("go-m4a: decoded size limit exceeded")
 )
