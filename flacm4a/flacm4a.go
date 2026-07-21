@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	flacpcm "github.com/tphakala/go-flac/pcm"
 
@@ -178,7 +179,7 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // choose the ceiling, or DecodeStream to decode a stream of any length without
 // accumulating it.
 func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
-	return DecodeInterleavedLimit(r, defaultMaxDecodedBytes)
+	return DecodeInterleavedLimit(r, int(defaultMaxDecodedBytes.Load()))
 }
 
 // defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
@@ -186,9 +187,17 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 // asserting that the wrapper is bounded otherwise costs a decode past the real
 // default, and a test that cannot afford that ends up asserting nothing, which
 // is exactly how a "delegate with no limit" regression would slip through.
-// Production never writes it, and a test that lowers it must not run in
-// parallel with anything that decodes.
-var defaultMaxDecodedBytes = m4a.DefaultMaxDecodedBytes
+//
+// It is atomic because the alternative is safe only by an ordering invariant
+// nothing enforces: a plain variable is race-free here purely because Go defers
+// parallel tests until the serial ones finish, so adding t.Parallel to the test
+// that lowers it, or to any sibling that decodes, introduces a data race with no
+// warning. One atomic load per decoded file is not a cost worth that. Whatever
+// is stored must fit an int, which the constant does on every supported
+// architecture.
+var defaultMaxDecodedBytes atomic.Int64
+
+func init() { defaultMaxDecodedBytes.Store(m4a.DefaultMaxDecodedBytes) }
 
 // DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
 // decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
@@ -252,7 +261,8 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 // The slice handed to fn aliases a buffer the decoder reuses across frames and is
 // valid only until fn returns; fn copies whatever it needs to keep. An error from
 // fn stops the decode and is returned as-is, so a caller can break out early on
-// its own sentinel.
+// its own sentinel. A nil fn is rejected with an error rather than panicking
+// partway through a file.
 func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
 	if fn == nil {
 		return m4a.Info{}, fmt.Errorf("go-m4a/flacm4a: DecodeStream: nil callback")
@@ -295,7 +305,11 @@ func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) 
 	for {
 		n, err := rd.ReadFrameInto(au)
 		if errors.Is(err, io.ErrShortBuffer) {
-			au = make([]byte, n)
+			// Grow geometrically rather than to exactly this frame. A stream whose
+			// frames grow monotonically would otherwise reallocate once per frame;
+			// doubling caps that at a handful for any stream. An oversized buffer is
+			// fine, since ReadFrameInto reads only the frame and reports its size.
+			au = make([]byte, max(n, 2*len(au)))
 			n, err = rd.ReadFrameInto(au)
 		}
 		if errors.Is(err, io.EOF) {

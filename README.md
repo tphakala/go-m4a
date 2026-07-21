@@ -55,7 +55,7 @@ to about 14 kB and decodes back to 11.5 MB, a ratio of 831:1, so this is not onl
 an adversarial concern.
 
 `flacm4a.DecodeInterleaved` and `opusm4a.DecodeInterleaved` therefore stop at
-`m4a.DefaultMaxDecodedBytes` (1 GiB, about 93 minutes of CD-quality stereo) and
+`m4a.DefaultMaxDecodedBytes` (1 GiB, about 101 minutes of CD-quality stereo) and
 return an error wrapping `m4a.ErrDecodeLimit`; see that constant for how the
 value was chosen. `DecodeInterleavedLimit` takes the ceiling as an argument (zero
 or less for none), and `DecodeStream` hands each frame's PCM to a callback
@@ -200,8 +200,8 @@ sample-accurate output. `flacm4a` needs no trimming (FLAC has no priming).
 
 Both `DecodeInterleaved` calls stop at `m4a.DefaultMaxDecodedBytes`. For a file
 the caller did not produce, or one longer than that ceiling, decode it a frame at
-a time instead and let nothing accumulate. Both bridges have the same pair, so
-`opusm4a.DecodeStream` and `opusm4a.DecodeInterleavedLimit` behave identically:
+a time instead and let nothing accumulate. Both bridges expose the same pair, so
+the `flacm4a` calls below have `opusm4a` counterparts that behave the same way:
 
 ```go
 info, err := flacm4a.DecodeStream(r, func(pcm []byte) error {

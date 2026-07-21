@@ -174,7 +174,10 @@ func TestDecodeStreamDeliversEveryFrame(t *testing.T) {
 }
 
 func TestDecodeStreamPropagatesCallbackError(t *testing.T) {
-	file := encodeFile(t, genS16(12000, 1), 1)
+	// 20000 samples at the encoder's 4096-sample blocks is five frames, so a
+	// stopAt below the frame count really does stop the decode early: at exactly
+	// three frames the stopAt = 3 row would also be what running to EOF produces.
+	file := encodeFile(t, genS16(20000, 1), 1)
 	stop := errors.New("caller stopped the decode")
 
 	// Stopping partway matters as much as stopping at once: an implementation that
@@ -212,22 +215,22 @@ func TestDecodeStreamRejectsNilCallback(t *testing.T) {
 // test instead. Without this, a wrapper delegating with 0 passes every other test
 // in the file.
 func TestDecodeInterleavedAppliesTheDefaultLimit(t *testing.T) {
-	if defaultMaxDecodedBytes != m4a.DefaultMaxDecodedBytes {
-		t.Fatalf("defaultMaxDecodedBytes = %d, want the package constant %d", defaultMaxDecodedBytes, m4a.DefaultMaxDecodedBytes)
+	if got := defaultMaxDecodedBytes.Load(); got != m4a.DefaultMaxDecodedBytes {
+		t.Fatalf("defaultMaxDecodedBytes = %d, want the package constant %d", got, m4a.DefaultMaxDecodedBytes)
 	}
 	file, decoded := encodeSilence(t, 48000*5, 2)
 
-	restore := defaultMaxDecodedBytes
-	t.Cleanup(func() { defaultMaxDecodedBytes = restore })
+	restore := defaultMaxDecodedBytes.Load()
+	t.Cleanup(func() { defaultMaxDecodedBytes.Store(restore) })
 
-	defaultMaxDecodedBytes = decoded / 4
+	defaultMaxDecodedBytes.Store(int64(decoded / 4))
 	if _, _, err := DecodeInterleaved(bytes.NewReader(file)); !errors.Is(err, m4a.ErrDecodeLimit) {
 		t.Fatalf("err = %v, want ErrDecodeLimit: DecodeInterleaved must delegate with the package default", err)
 	}
 
 	// And the same file decodes once the ceiling is above it, so the failure above
 	// is the limit rather than anything else about the fixture.
-	defaultMaxDecodedBytes = decoded
+	defaultMaxDecodedBytes.Store(int64(decoded))
 	pcm, _, err := DecodeInterleaved(bytes.NewReader(file))
 	if err != nil {
 		t.Fatalf("DecodeInterleaved under a sufficient default: %v", err)

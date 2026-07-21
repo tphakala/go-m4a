@@ -26,12 +26,15 @@ package m4a
 //
 // 1 GiB is deliberately generous, because this is a backstop against
 // amplification rather than a policy on how long a clip may be. It has to sit
-// above the largest honest input, and honest inputs run long: 1 GiB is about 93
-// minutes of 44.1 kHz stereo 16-bit, which covers essentially every album,
-// podcast and lecture recording, about 31 minutes at 24-bit 96 kHz, and about 15
-// minutes of 8-channel 24-bit. A crafted file still trips it four orders of
-// magnitude short of exhausting memory: at the measured worst case of roughly
-// 11,500:1 an attacker has to supply about 93 kB to reach it.
+// above the largest honest input, and honest inputs run long: 1 GiB is about 101
+// minutes of CD-quality 44.1 kHz stereo 16-bit, which covers essentially every
+// album, podcast and lecture recording, about 93 minutes of the same at 48 kHz,
+// about 31 minutes of 24-bit 96 kHz stereo, and about 15 minutes of 48 kHz
+// 8-channel 24-bit. Being generous costs little, because what an attacker has to
+// supply to reach the ceiling stays small either way: the cheapest maximal FLAC
+// access unit is on the order of fifty bytes and decodes to about two megabytes,
+// so tens of kilobytes of crafted input reach 1 GiB just as they reached a
+// quarter of it.
 //
 // It is not a memory guarantee, and a caller that needs one wants DecodeStream.
 // An accumulating decode grows geometrically (about 1.25x once the buffer is

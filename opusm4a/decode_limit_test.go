@@ -367,22 +367,22 @@ func TestDecodeStreamRejectsNilCallback(t *testing.T) {
 // test instead. Without this, a wrapper delegating with 0 passes every other test
 // in the file.
 func TestDecodeInterleavedAppliesTheDefaultLimit(t *testing.T) {
-	if defaultMaxDecodedBytes != m4a.DefaultMaxDecodedBytes {
-		t.Fatalf("defaultMaxDecodedBytes = %d, want the package constant %d", defaultMaxDecodedBytes, m4a.DefaultMaxDecodedBytes)
+	if got := defaultMaxDecodedBytes.Load(); got != m4a.DefaultMaxDecodedBytes {
+		t.Fatalf("defaultMaxDecodedBytes = %d, want the package constant %d", got, m4a.DefaultMaxDecodedBytes)
 	}
 	file, decoded := encodeClip(t, 24000, 2)
 
-	restore := defaultMaxDecodedBytes
-	t.Cleanup(func() { defaultMaxDecodedBytes = restore })
+	restore := defaultMaxDecodedBytes.Load()
+	t.Cleanup(func() { defaultMaxDecodedBytes.Store(restore) })
 
-	defaultMaxDecodedBytes = len(decoded) / 4
+	defaultMaxDecodedBytes.Store(int64(len(decoded) / 4))
 	if _, _, err := DecodeInterleaved(bytes.NewReader(file)); !errors.Is(err, m4a.ErrDecodeLimit) {
 		t.Fatalf("err = %v, want ErrDecodeLimit: DecodeInterleaved must delegate with the package default", err)
 	}
 
 	// And the same file decodes once the ceiling is above it, so the failure above
 	// is the limit rather than anything else about the fixture.
-	defaultMaxDecodedBytes = len(decoded)
+	defaultMaxDecodedBytes.Store(int64(len(decoded)))
 	got, _, err := DecodeInterleaved(bytes.NewReader(file))
 	if err != nil {
 		t.Fatalf("DecodeInterleaved under a sufficient default: %v", err)
