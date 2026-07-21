@@ -142,3 +142,17 @@ jobs:
       # This target asserts the offset resolves to the mdat payload every time.
       - name: Fuzz fragment writer
         run: go test -run='^$' -fuzz=FuzzFragmentWriter -fuzztime=30s .
+      # The reservation arithmetic is a pure function of numbers a file declares
+      # about itself, and its result goes straight into a make. These targets
+      # prove the bounds hold for every input rather than for the table rows
+      # someone thought of, and they need no fixtures and no codec, so they run
+      # at millions of executions per second.
+      - name: Fuzz flacm4a reservation
+        run: |
+          go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./flacm4a
+          go test -run='^$' -fuzz=FuzzFrameReservation -fuzztime=20s ./flacm4a
+          go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime=20s ./flacm4a
+      - name: Fuzz opusm4a reservation
+        run: |
+          go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./opusm4a
+          go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime=20s ./opusm4a
