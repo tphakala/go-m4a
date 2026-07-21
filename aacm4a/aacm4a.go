@@ -112,10 +112,6 @@ func EncodeInterleaved(w io.WriteSeeker, cfg aacpcm.Config, pcm []byte) error {
 
 // Constants behind the ADTS size estimate.
 const (
-	// defaultBitrate is the total bitrate go-aac's pcm.Config selects when Bitrate
-	// is left at zero (FFmpeg's default of 200 kb/s). go-aac keeps this value
-	// unexported, so unlike aac.FrameSize it has to be restated here.
-	defaultBitrate = 200000
 	// maxFrameBytesPerChannel is the AAC bit-reservoir ceiling of 6144 bits per
 	// channel per frame (ISO/IEC 14496-3), in bytes. For the mono and stereo
 	// AAC-LC this package encodes, no conforming frame exceeds it, which makes it
@@ -202,7 +198,7 @@ func estimateADTSSize(cfg aacpcm.Config, samplesPerChannel int) int {
 
 	bitrate := int64(cfg.Bitrate)
 	if bitrate <= 0 {
-		bitrate = defaultBitrate
+		bitrate = aac.DefaultBitrate
 	}
 	// Dividing first cannot overflow whatever Bitrate holds, and sat pins the
 	// quotient, so the payload product multiplies two pinned values.
