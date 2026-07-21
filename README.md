@@ -77,7 +77,15 @@ a byte slice or a socket, and it reuses its buffers, so a steady-state segment
 allocates nothing. It is codec-generic like the rest of the writer. See
 [Fragmented output for HLS](#fragmented-output-for-hls).
 
-Scope: a single audio track, mono or stereo, 44.1/48 kHz (Opus is always 48 kHz).
+Scope: a single audio track, mono or stereo. The sample rate depends on the
+codec, because each one carries its rate differently: **AAC-LC** takes any rate
+in the MPEG-4 sampling-frequency table that the 16-bit sample-entry field can
+hold, so 7350 through 64000 Hz (88.2 and 96 kHz are in the table but are rejected
+rather than written wrong); **Opus** is always 48 kHz, which its encapsulation
+fixes as the container timescale; **FLAC** carries its rate in STREAMINFO and is
+bounded only by that same 16-bit field, so any rate up to 65535 Hz. 44.1 and
+48 kHz are the best-trodden paths, and the others are covered by round-trip
+tests rather than only by the validator letting them past.
 Fragmented MP4 is write-only: the reader is for plain files and returns a typed
 `ErrUnsupported` for fragmented input. Also out of scope (again `ErrUnsupported`,
 never a crash): video or multiple audio tracks, other codecs, HE-AAC, surround,
