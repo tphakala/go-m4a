@@ -56,11 +56,25 @@ const samplesPerFrame = 1024
 // in the first five bits of an AudioSpecificConfig.
 const audioObjectTypeAACLC = 2
 
-// maxAudioSampleEntryRate is the largest sample rate the mp4a AudioSampleEntry
+// maxAudioSampleEntryRate is the largest sample rate the AudioSampleEntry
 // samplerate field can represent. It is a 16.16 fixed-point value, so the
 // integer rate must fit 16 bits; a higher rate would silently wrap when shifted
-// into the field. The supported 44100 and 48000 Hz (and 64000) are well within
-// it; 88200 and 96000 are not, so they are rejected rather than written wrong.
+// into the field.
+//
+// It is the ceiling every codec shares, the positive-rate check at the top of
+// validateConfig being the matching floor, and both run before the per-codec
+// validation. So this is what rejects the two AAC table rates that do not fit
+// (88200 and 96000), rather than anything AAC-specific. What each codec accepts
+// between floor and ceiling differs: AAC-LC is restricted to the
+// sampling-frequency table, enforced by the ASC cross-check in validateAACConfig;
+// Opus is pinned to opusTimescale; FLAC has no rate table at all. See
+// TestAcceptedSampleRates, which pins all three.
+//
+// For FLAC this ceiling is the package's limit rather than the format's. The Xiph
+// encapsulation defines a fallback for higher rates, writing the greatest
+// expressible regular division (48000 for a 96 kHz stream) or 65535 when there is
+// none. This package rejects instead, which is consistent with its reader taking
+// the sample entry as authoritative; #4 tracks supporting the high rates.
 const maxAudioSampleEntryRate = 0xFFFF
 
 // maxFrames caps the number of access units per file so the moov sample tables
@@ -90,9 +104,23 @@ type WriterConfig struct {
 	// STREAMINFO.
 	Codec Codec
 
-	// SampleRate is the audio sample rate in Hz (for example 48000). Required. For
-	// AAC-LC it must match the rate encoded in ASC; for Opus it must be 48000 (the
-	// fixed Opus container timescale).
+	// SampleRate is the audio sample rate in Hz (for example 48000). Required, and
+	// bounded for every codec by what the sample entry can represent, so at most
+	// maxAudioSampleEntryRate (65535). Within that the accepted set is per codec:
+	// for AAC-LC it must be one of the eleven MPEG-4 sampling-frequency table
+	// rates that fit, 7350 to 64000, and must match the rate encoded in ASC; for
+	// Opus it must be 48000, the fixed Opus container timescale; for FLAC any
+	// positive rate is accepted, because FLAC has no rate table.
+	//
+	// For FLAC it should also agree with the rate inside STREAMINFO. That is the
+	// encapsulation's requirement, not one this package enforces: NewWriter does
+	// not compare them and will not reject a mismatch. Keeping them in step is the
+	// caller's job, and it matters because the two fields are read by different
+	// consumers. This package's Reader reports the sample entry, while a
+	// conforming decoder takes the authoritative rate from STREAMINFO (Xiph,
+	// Encapsulation of FLAC in ISOBMFF, section 3.3.1), so a config where they
+	// disagree produces a file that go-m4a and ffmpeg read differently, with no
+	// error from either.
 	SampleRate int
 
 	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
@@ -573,7 +601,14 @@ func validateAACConfig(cfg WriterConfig) error {
 	if len(cfg.ASC) < 2 {
 		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
 	}
-	if !rateSupported(cfg.SampleRate) {
+	// This guard cannot change which configs are accepted: an off-table rate can
+	// never match the ASC either, because the rate the ASC agrees with is read out
+	// of this same table, so the cross-check below would reject it regardless.
+	// What it changes is which error the caller gets, and that is worth the three
+	// lines: "unsupported sample rate 47999 Hz" says the rate is not one AAC can
+	// express, where "does not match ASC (48000 Hz)" would send the caller looking
+	// for a mismatch they cannot fix by editing the ASC.
+	if !aacRateSupported(cfg.SampleRate) {
 		return fmt.Errorf("go-m4a: unsupported sample rate %d Hz", cfg.SampleRate)
 	}
 	aot, sfi, chanConfig := parseASC(cfg.ASC)
@@ -620,9 +655,11 @@ func validateFLACConfig(cfg WriterConfig) error {
 	return nil
 }
 
-// rateSupported reports whether rate appears in the AAC sampling frequency
-// table, i.e. whether it is a rate the writer can encode into an ASC index.
-func rateSupported(rate int) bool {
+// aacRateSupported reports whether rate appears in the AAC sampling frequency
+// table, i.e. whether it is a rate the writer can encode into an ASC index. It
+// is AAC-specific, as the name says: Opus and FLAC do not consult this table,
+// so it is not the package's answer to "is this rate supported".
+func aacRateSupported(rate int) bool {
 	for _, r := range samplingFrequencyTable {
 		if r == rate {
 			return true
