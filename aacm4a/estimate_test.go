@@ -176,7 +176,7 @@ func TestEstimateADTSSizeEdgeCases(t *testing.T) {
 	if withDefault <= 0 {
 		t.Fatalf("estimate with the default bitrate = %d, want positive", withDefault)
 	}
-	if want := defaultBitrate / 8 * samples / zeroRate.SampleRate; withDefault < want {
+	if want := aac.DefaultBitrate / 8 * samples / zeroRate.SampleRate; withDefault < want {
 		t.Errorf("estimate %d is below the %d bytes the default bitrate implies", withDefault, want)
 	}
 
