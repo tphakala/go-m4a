@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/tphakala/go-aac v0.4.0
 	github.com/tphakala/go-flac v1.0.0
-	github.com/tphakala/go-opus v0.1.3
+	github.com/tphakala/go-opus v1.0.0
 )
 
 require (
