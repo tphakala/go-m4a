@@ -167,8 +167,30 @@ jobs:
         run: |
           go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./flacm4a
           go test -run='^$' -fuzz=FuzzFrameReservation -fuzztime=20s ./flacm4a
-          go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime=20s ./flacm4a
       - name: Fuzz opusm4a reservation
+        run: go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./opusm4a
+      # ShouldTrim moved to internal/reservation in the moov de-dup refactor; fuzz it
+      # where it now lives rather than in the bridges, where -fuzz matches nothing and
+      # would pass without running.
+      - name: Fuzz reservation trim policy
+        run: go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime=20s ./internal/reservation
+      # The box table parsers turn an attacker-controlled entry count into a make,
+      # so the entry-count-versus-payload bound is the MP4 table-expansion defence.
+      # FuzzReader reaches them only through full container framing; these hit each
+      # parser body directly, and run at millions of executions per second.
+      - name: Fuzz box parsers
         run: |
-          go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./opusm4a
-          go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime=20s ./opusm4a
+          for target in FuzzParseStsz FuzzParseStsc FuzzParseStco FuzzParseCo64 FuzzParseStts FuzzParseDfla FuzzParseDops; do
+            go test -run='^$' -fuzz="$target" -fuzztime=10s ./internal/box
+          done
+      # The bridges hand attacker-controlled container bytes to third-party codecs.
+      # These targets assert the bridge's own contract (no panic, decoded size within
+      # the ceiling) and, for FLAC, the lossless round-trip property. They decode real
+      # audio so they run at tens of executions per second, not millions; the value is
+      # the seed corpus growing across builds, so the per-build budget stays short.
+      - name: Fuzz flacm4a bridge
+        run: |
+          go test -run='^$' -fuzz=FuzzRoundTrip -fuzztime=20s ./flacm4a
+          go test -run='^$' -fuzz=FuzzDecodeInterleaved -fuzztime=20s ./flacm4a
+      - name: Fuzz opusm4a bridge
+        run: go test -run='^$' -fuzz=FuzzDecodeInterleaved -fuzztime=20s ./opusm4a
