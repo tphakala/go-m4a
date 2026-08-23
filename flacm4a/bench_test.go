@@ -78,3 +78,57 @@ func BenchmarkDecodeInterleaved(b *testing.B) {
 		})
 	}
 }
+
+// longFormSamplesCh is a clip whose decoded stereo PCM (~76 MiB) is past the
+// reservation ceiling. The 15-second cases above live entirely inside the band
+// where the reservation covers the whole output in one make; a real regression in
+// the regrow path (the append chain that runs once the reservation is spent) was
+// invisible to the whole suite because nothing decoded far enough to reach it
+// (#20). This case reaches it.
+const longFormSamplesCh = benchRate * 420 // 7 minutes
+
+// BenchmarkDecodeInterleavedLongForm measures the decode path past the
+// reservation ceiling, where the output grows by appending beyond the reserved
+// buffer. It is stereo only, since that is what crosses the 64 MiB ceiling; the
+// encode is hoisted, so only the regrow-heavy decode is timed.
+func BenchmarkDecodeInterleavedLongForm(b *testing.B) {
+	pcm := genS16(longFormSamplesCh, 2)
+	cfg := Config{SampleRate: benchRate, Channels: 2, BitDepth: 16, CompressionLevel: 5}
+	w := &memWS{}
+	if err := EncodeInterleaved(w, cfg, pcm); err != nil {
+		b.Fatalf("encode: %v", err)
+	}
+	enc := w.buf
+
+	b.SetBytes(int64(len(pcm)))
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := DecodeInterleaved(bytes.NewReader(enc)); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
+
+// BenchmarkDecodeInterleavedUnknownLength measures the decode path when the
+// stream declares an unknown length (TotalSamples=0), so the reservation never
+// engages and the output is built entirely by appending. It is the case where any
+// cost the reservation path adds is pure loss, and the shape a benchmark should
+// watch so that cost stays visible (#20).
+func BenchmarkDecodeInterleavedUnknownLength(b *testing.B) {
+	pcm := genS16(benchSamplesCh, 2)
+	cfg := Config{SampleRate: benchRate, Channels: 2, BitDepth: 16, CompressionLevel: 5}
+	w := &memWS{}
+	if err := EncodeInterleaved(w, cfg, pcm); err != nil {
+		b.Fatalf("encode: %v", err)
+	}
+	enc := w.buf
+	clearTotalSamples(b, enc, benchSamplesCh)
+
+	b.SetBytes(int64(len(pcm)))
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := DecodeInterleaved(bytes.NewReader(enc)); err != nil {
+			b.Fatalf("decode: %v", err)
+		}
+	}
+}
