@@ -22,6 +22,7 @@ import (
 	"github.com/tphakala/go-opus/opus"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
 // opusRate is the sample rate the Opus-in-ISOBMFF encapsulation fixes for the
@@ -47,18 +48,11 @@ const maxSamplesPerChannel = 120 * opusRate / 1000 // 5760
 // value is defence in depth rather than a reachable path.
 const maxOpusChannels = 2
 
-// maxPCMReservation is the ceiling on what an accumulating decode reserves up
-// front, the same 64 MiB flacm4a uses and for the same reason: the reservation is
-// derived from a file's own description, so it needs a bound that does not scale
-// with what the file claims. It bounds the RESERVATION only. What bounds the
-// decode is the caller's limit, which pcmReservation also applies here. See the
-// note on flacm4a.maxPCMReservation for how the value was chosen.
-const maxPCMReservation = 64 << 20
-
-// maxRetainedSlack is the floor below which an accumulating decode never bothers
-// copying the returned slice down to size, the companion to maxPCMReservation and
-// again the same value flacm4a uses. See shouldTrim for the rest of the rule.
-const maxRetainedSlack = 64 << 10
+// The reservation ceiling (reservation.MaxPCMReservation) and the trim policy
+// (reservation.ShouldTrim, reservation.MaxRetainedSlack) live in internal/
+// reservation, shared with flacm4a; that package documents the general rule. The
+// reservation here is derived from a file's own description, so it needs a bound
+// that does not scale with what the file claims.
 
 // Config configures Opus encoding. SampleRate must be 48000 (the Opus container
 // rate); Channels is 1 or 2; Bitrate is the target bits per second (0 selects the
@@ -214,26 +208,23 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 		return nil, info, err
 	}
 
+	// An empty decode hands back nil rather than the non-nil zero-length slice the
+	// pre-sized make produced, so a caller's pcm == nil check and a JSON marshal
+	// both read the absent case as absent (null, not ""). This package's own writer
+	// refuses to close a track with no frames, so it is only reachable from a
+	// foreign or crafted file.
+	if len(out) == 0 {
+		return nil, info, nil
+	}
 	// Hand back a right-sized copy when the reservation ran well ahead of the audio
 	// that actually decoded, which happens when a file's packets are shorter than
 	// the 20 ms the reservation assumes. A returned slice pins its entire backing
 	// array, so the caller would otherwise keep that reservation for as long as it
 	// keeps the PCM.
-	if shouldTrim(len(out), cap(out)) {
+	if reservation.ShouldTrim(len(out), cap(out)) {
 		out = bytes.Clone(out)
 	}
 	return out, info, nil
-}
-
-// shouldTrim reports whether a decoded buffer of the given length and capacity is
-// carrying enough dead capacity to be worth copying down to size. It is
-// flacm4a.shouldTrim, applied to the same problem: both tests are load-bearing,
-// the absolute one to ignore overshoot too small to be worth a copy and the
-// proportional one to keep the trim off buffers that merely carry append's growth
-// headroom. The rationale for the two thresholds is written out there.
-func shouldTrim(length, capacity int) bool {
-	slack := capacity - length
-	return slack > maxRetainedSlack && slack > length/2
 }
 
 // DecodeStream opens an Opus .mp4 and decodes it one packet at a time, handing
@@ -345,14 +336,14 @@ func forEachPacket(rd *m4a.Reader, dec *opus.Decoder, channels int, fn func(pcm 
 // Overflow safety is by construction: frameCount is pinned to the ceiling before
 // it is multiplied and the running total is pinned again after, so the largest
 // product is the ceiling against 960, comfortably inside uint64, and the result is
-// under maxPCMReservation before the int conversion, so it fits a 32-bit int too.
+// under reservation.MaxPCMReservation before the int conversion, so it fits a 32-bit int too.
 func pcmReservation(frameCount, channels, limit int) int {
 	if frameCount <= 0 || channels <= 0 {
 		return 0
 	}
-	samples := min(uint64(frameCount), maxPCMReservation) * frameSamplesPerChannel
-	n := min(samples*uint64(min(channels, maxOpusChannels)), maxPCMReservation)
-	n = min(n*2, maxPCMReservation) // 16-bit samples
+	samples := min(uint64(frameCount), reservation.MaxPCMReservation) * frameSamplesPerChannel
+	n := min(samples*uint64(min(channels, maxOpusChannels)), reservation.MaxPCMReservation)
+	n = min(n*2, reservation.MaxPCMReservation) // 16-bit samples
 	if limit > 0 {
 		n = min(n, uint64(limit))
 	}

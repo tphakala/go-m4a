@@ -418,6 +418,76 @@ func (w *Writer) Close() error {
 	return nil
 }
 
+// moovSpec is the per-call input to buildMoovFrom: everything that differs
+// between a plain file's moov (Writer.buildMoov) and a fragmented stream's init
+// segment (InitSegment). Everything not named here, the minf/mdia/trak skeleton
+// and the "soun"/"SoundHandler" handler, is fixed and lives once in buildMoovFrom
+// so a box added to one path cannot silently diverge from the other.
+type moovSpec struct {
+	// stbl is the caller-built sample table: populated for a plain file, the four
+	// empty tables for an init segment. It is the one child buildMoovFrom does not
+	// assemble itself, because its contents are exactly what the two paths differ on.
+	stbl []byte
+
+	// mediaDuration is the mdhd duration; presentationDuration is the tkhd and mvhd
+	// duration. Both are zero for an init segment, whose timeline the fragments carry.
+	mediaDuration        uint64
+	presentationDuration uint64
+
+	// editList requests an edts/elst with these segment_duration and media_time
+	// values; when it is false, no edit list is emitted at all.
+	editList        bool
+	segmentDuration uint64
+	mediaTime       int64
+
+	// fragmented appends the mvex/trex that declares the movie fragmented, using
+	// the track's default sample duration. Only the init segment sets it.
+	fragmented bool
+
+	// prefix is prepended before the moov box: the ftyp for an init segment, nil
+	// for a plain file (whose ftyp and mdat are written separately).
+	prefix []byte
+}
+
+// buildMoovFrom assembles the moov box shared by the plain and fragmented writers
+// from spec, keeping the trak/mdia/minf skeleton and the sound-handler literals in
+// one place. Both Writer.buildMoov and InitSegment call it, so the two outputs stay
+// structurally identical by construction. The track_ID is fragmentTrackID (1) on
+// both paths.
+func (m *trackMeta) buildMoovFrom(spec moovSpec) []byte {
+	// minf: sound media header, self-contained data reference, sample table.
+	var minf []byte
+	minf = box.AppendSmhd(minf)
+	minf = box.AppendDinf(minf)
+	minf = box.AppendStbl(minf, spec.stbl)
+
+	// mdia: media header, sound handler, media information.
+	var mdia []byte
+	mdia = box.AppendMdhd(mdia, m.timescale, spec.mediaDuration)
+	mdia = box.AppendHdlr(mdia, box.NewFourCC("soun"), "SoundHandler")
+	mdia = box.AppendMinf(mdia, minf)
+
+	// trak: track header, optional edit list, media. Order is tkhd, edts, mdia.
+	var trak []byte
+	trak = box.AppendTkhd(trak, fragmentTrackID, spec.presentationDuration)
+	if spec.editList {
+		trak = box.AppendEdts(trak, box.AppendElst(nil, spec.segmentDuration, spec.mediaTime))
+	}
+	trak = box.AppendMdia(trak, mdia)
+
+	// moov: movie header, the single track, then the fragment declaration if any.
+	moov := box.AppendMvhd(nil, m.timescale, spec.presentationDuration)
+	moov = box.AppendTrak(moov, trak)
+	if spec.fragmented {
+		// mvex/trex declares the movie fragmented. default_sample_duration is the
+		// codec's fixed frame length where it has one (AAC-LC's 1024) and zero
+		// otherwise, in which case each fragment states its own.
+		moov = box.AppendMvex(moov, box.AppendTrex(nil,
+			fragmentTrackID, m.defaultDuration, box.SyncSampleFlags))
+	}
+	return box.AppendMoov(spec.prefix, moov)
+}
+
 // buildMoov assembles the complete moov box from the accumulated sample sizes,
 // the per-sample durations, and the resolved edit-list parameters. Movie and media
 // timescales both equal w.timescale (the sample rate, which is 48000 for Opus), so
@@ -467,30 +537,14 @@ func (w *Writer) buildMoov() []byte {
 	stbl = box.AppendStsz(stbl, w.sizes)
 	stbl = box.AppendStco(stbl, []uint32{uint32(w.payloadStart)})
 
-	// minf: sound media header, self-contained data reference, sample table.
-	var minf []byte
-	minf = box.AppendSmhd(minf)
-	minf = box.AppendDinf(minf)
-	minf = box.AppendStbl(minf, stbl)
-
-	// mdia: media header, sound handler, media information.
-	var mdia []byte
-	mdia = box.AppendMdhd(mdia, w.timescale, mediaDuration)
-	mdia = box.AppendHdlr(mdia, box.NewFourCC("soun"), "SoundHandler")
-	mdia = box.AppendMinf(mdia, minf)
-
-	// trak: track header, optional edit list, media. Order is tkhd, edts, mdia.
-	var trak []byte
-	trak = box.AppendTkhd(trak, 1, presentationDuration)
-	if editList {
-		trak = box.AppendEdts(trak, box.AppendElst(nil, segmentDuration, mediaTime))
-	}
-	trak = box.AppendMdia(trak, mdia)
-
-	// moov: movie header then the single track.
-	moov := box.AppendMvhd(nil, w.timescale, presentationDuration)
-	moov = box.AppendTrak(moov, trak)
-	return box.AppendMoov(nil, moov)
+	return w.buildMoovFrom(moovSpec{
+		stbl:                 stbl,
+		mediaDuration:        mediaDuration,
+		presentationDuration: presentationDuration,
+		editList:             editList,
+		segmentDuration:      segmentDuration,
+		mediaTime:            mediaTime,
+	})
 }
 
 // mediaDuration is the total decode duration of every access unit, in the media

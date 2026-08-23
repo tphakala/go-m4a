@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	flacpcm "github.com/tphakala/go-flac/pcm"
+	"github.com/tphakala/go-m4a/internal/reservation"
 
 	m4a "github.com/tphakala/go-m4a"
 )
@@ -142,14 +143,14 @@ func TestPCMReservation(t *testing.T) {
 		// Everything below is a file lying about its size while carrying enough
 		// frames that the container bound does not bind. None may exceed the cap,
 		// and none may overflow.
-		{"absurd sample count", math.MaxUint64, math.MaxInt, 2, seAbsent, 16, maxPCMReservation},
+		{"absurd sample count", math.MaxUint64, math.MaxInt, 2, seAbsent, 16, reservation.MaxPCMReservation},
 		// A lie about channels or depth is clamped to the FLAC maximum rather
 		// than to the cap, so a small declared sample count still reserves small.
 		{"absurd channels", 48000, framesFor, math.MaxInt, seAbsent, 16, 48000 * 8 * 2},
 		{"absurd bit depth", 48000, framesFor, 2, seAbsent, math.MaxInt, 48000 * 2 * 4},
-		{"absurd everything", math.MaxUint64, math.MaxInt, math.MaxInt, math.MaxInt, math.MaxInt, maxPCMReservation},
-		{"exactly at the cap", maxPCMReservation / 4, framesFor, 2, seAbsent, 16, maxPCMReservation},
-		{"one sample under the cap", maxPCMReservation/4 - 1, framesFor, 2, seAbsent, 16, maxPCMReservation - 4},
+		{"absurd everything", math.MaxUint64, math.MaxInt, math.MaxInt, math.MaxInt, math.MaxInt, reservation.MaxPCMReservation},
+		{"exactly at the cap", reservation.MaxPCMReservation / 4, framesFor, 2, seAbsent, 16, reservation.MaxPCMReservation},
+		{"one sample under the cap", reservation.MaxPCMReservation/4 - 1, framesFor, 2, seAbsent, 16, reservation.MaxPCMReservation - 4},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,66 +164,16 @@ func TestPCMReservation(t *testing.T) {
 				t.Errorf("pcmReservation(%d, %d, %d, %d, %d) = %d, want %d",
 					tc.totalSamples, tc.frameCount, tc.siChannels, tc.seChannels, tc.bitDepth, got, tc.want)
 			}
-			if got < 0 || got > maxPCMReservation {
-				t.Errorf("reservation %d escaped 0..%d", got, maxPCMReservation)
+			if got < 0 || got > reservation.MaxPCMReservation {
+				t.Errorf("reservation %d escaped 0..%d", got, reservation.MaxPCMReservation)
 			}
 		})
 	}
 }
 
-// TestShouldTrim pins the trim policy directly, which is the only affordable way
-// to cover it: the cases that matter are streams of tens of megabytes, and the
-// regression it guards against was found by measurement rather than by a test.
-// The slack figures below are the ones measured on real decodes.
-func TestShouldTrim(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		length   int
-		slack    int
-		wantTrim bool
-	}{
-		// The case the trim exists for: a file declared far more audio than it
-		// carried, so the reservation dwarfs the result.
-		{"over-declared length", 2000, 129070, true},
-		{"over-declared at the ceiling", 2000, maxPCMReservation - 2000, true},
-		// Pins the firing side. Without a row here the policy could be loosened
-		// several times over, retaining multiples of the audio, with a green
-		// suite: the rows above clear any plausible threshold by so much that
-		// they cannot distinguish one from another.
-		{"slack over half the audio", 1000000, 600000, true},
-		// Honest streams. A buffer that grew by append carries up to about a
-		// quarter of its length as headroom; none of that is worth a copy, and
-		// charging for it measurably cost more than pre-sizing ever saved. The
-		// slack figures are Go's real growth for these lengths from a zero
-		// reservation, and the 30s row is the binding one at ratio 0.2501, which
-		// is what rules out a quarter as the divisor.
-		{"exact reservation", 2880000, 0, false},
-		{"unknown length, 5s", 960000, 236032, false},
-		{"unknown length, 30s", 5760000, 1440768, false},
-		// Past the ceiling the buffer starts at maxPCMReservation and grows from
-		// there, so its residual slack is a much smaller fraction than an
-		// unknown-length stream's: this is a real 9-minute clip at ratio 0.0115.
-		{"declared length past the ceiling, 9min", 103680000, 1191936, false},
-		// Just under the proportional boundary, which is where a moderately
-		// over-declared file (a truncated recording is the realistic one) lands.
-		// Its slack is retained by design; recovering it would cost copying the
-		// whole buffer to reclaim a third of it.
-		{"moderate over-declaration is retained", 38400000, 15360000, false},
-		// Small absolute slack is never worth a copy whatever the proportion.
-		{"tiny buffer, proportionally huge slack", 8, 1024, false},
-		{"empty buffer", 0, 0, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := shouldTrim(tc.length, tc.length+tc.slack); got != tc.wantTrim {
-				t.Errorf("shouldTrim(len=%d, cap=%d) = %v, want %v (slack %d)",
-					tc.length, tc.length+tc.slack, got, tc.wantTrim, tc.slack)
-			}
-		})
-	}
-}
+// The trim policy itself (ShouldTrim) is tested in internal/reservation, shared
+// with opusm4a. What stays here is the FLAC-specific reservation arithmetic and
+// the end-to-end assertion that a real decode does not over-retain.
 
 // TestPCMReservationExact checks the reservation matches the decoded length for
 // a real round trip, so DecodeInterleaved neither regrows nor over-reserves on
@@ -337,7 +288,7 @@ func TestDecodeDoesNotAmplifyOverdeclaredLength(t *testing.T) {
 		t.Errorf("decoded %d bytes, want the original %d", len(out), len(pcm))
 	}
 	// The allocation half: one short frame must not reserve for the declared 2^36.
-	// The bound is absolute rather than a fraction of maxPCMReservation, because
+	// The bound is absolute rather than a fraction of reservation.MaxPCMReservation, because
 	// the honest figure here has nothing to do with that constant: it is measured
 	// at about 158 KB (a 131 KB reservation from the one-frame container bound,
 	// plus reader and decoder overhead) and does not move when the ceiling does.
@@ -349,8 +300,8 @@ func TestDecodeDoesNotAmplifyOverdeclaredLength(t *testing.T) {
 			"the declared length was believed", len(enc), allocated, len(pcm))
 	}
 	// The retention half: the returned slice is what the caller holds on to.
-	if slack := cap(out) - len(out); slack > maxRetainedSlack {
+	if slack := cap(out) - len(out); slack > reservation.MaxRetainedSlack {
 		t.Errorf("returned slice retains %d bytes of slack for %d bytes of audio, want at most %d",
-			slack, len(out), maxRetainedSlack)
+			slack, len(out), reservation.MaxRetainedSlack)
 	}
 }
