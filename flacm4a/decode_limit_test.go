@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
 // encodeFile encodes PCM to a FLAC .mp4 and returns the file bytes.
@@ -112,13 +113,13 @@ func TestPCMReservationRespectsLimit(t *testing.T) {
 		bitDepth     = 16
 	)
 	// Ten minutes of 48 kHz stereo 16-bit is 115.2 MB, so with no limit this
-	// declaration is what maxPCMReservation is there to clamp. Asserting the exact
+	// declaration is what reservation.MaxPCMReservation is there to clamp. Asserting the exact
 	// value rather than "positive" keeps the limit cases below meaningful: if the
 	// clamp broke, an unasserted unbounded value would still be positive and every
 	// bounded case would still pass.
 	unbounded := pcmReservation(totalSamples, frameCount, channels, channels, bitDepth, 0)
-	if unbounded != maxPCMReservation {
-		t.Fatalf("unbounded reservation = %d, want the %d ceiling for a declaration this large", unbounded, maxPCMReservation)
+	if unbounded != reservation.MaxPCMReservation {
+		t.Fatalf("unbounded reservation = %d, want the %d ceiling for a declaration this large", unbounded, reservation.MaxPCMReservation)
 	}
 
 	for _, limit := range []int{1, 4096, 1 << 20} {

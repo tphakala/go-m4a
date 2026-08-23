@@ -21,6 +21,7 @@ import (
 	flacpcm "github.com/tphakala/go-flac/pcm"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
 // encoderBlockSize mirrors the fixed block size go-flac's FrameEncoder emits
@@ -47,45 +48,14 @@ const encoderBlockSize = 4096
 // correctness or a safety problem.
 const maxFLACBlockSize = 65535
 
-// maxPCMReservation is the ceiling on what an accumulating decode reserves up
-// front. It bounds the RESERVATION only. What bounds the decode is the caller's
-// limit, which pcmReservation also applies (see DecodeInterleavedLimit and
-// m4a.DefaultMaxDecodedBytes); this constant is what keeps a file's own
-// self-description from driving a large speculative allocation before the first
-// frame has decoded.
-//
-// The bounds pcmReservation derives from the container narrow the honest cases,
-// but they cannot make the reservation safe on their own, because FLAC's
-// compression ratio has no lower limit: a constant subframe encodes 65535
-// samples in a handful of bytes, so a crafted file buys the largest permitted
-// block for almost nothing: an access unit carrying one costs on the order of
-// fifty bytes plus its sample-table entry, and thirty-three of them reach this
-// ceiling, so a file of a couple of kilobytes still gets there.
-//
-// 64 MiB is about six minutes of 48 kHz stereo 16-bit. The value is a deliberate
-// trade and was measured rather than guessed. Lowering it to 8 MiB was tried and
-// reverted: it bounds a crafted file to 8 MiB instead of 64 MiB, which is a weak
-// gain given that both are transient and freed and that the unbounded decode
-// dwarfs either, and it costs every honest clip past 43 seconds its exact
-// reservation. Measured on a three-minute stereo clip, that gave up essentially
-// all of the benefit, allocating about three and a half times what this ceiling
-// does. Honest files are what this constant is tuned for.
-const maxPCMReservation = 64 << 20
-
-// maxRetainedSlack is the floor below which an accumulating decode never bothers
-// copying the returned slice down to size. It is not the whole rule and not the
-// worst case: shouldTrim also requires the slack to be disproportionate, so what
-// can actually be handed back is max(maxRetainedSlack, length/2), which for a
-// buffer near the ceiling is over 20 MiB.
-//
-// That is a deliberate trade rather than an oversight. Recovering half a buffer
-// costs copying all of it, so trimming a 38 MB result to reclaim 19 MB is not
-// obviously worth doing, whereas the case this exists for, a file that declared
-// orders of magnitude more audio than it carried, clears any such threshold
-// easily. The cost is that a moderately over-declared file, a truncated
-// recording being the realistic one, keeps proportional slack. See shouldTrim
-// for why the proportional test cannot simply be dropped.
-const maxRetainedSlack = 64 << 10
+// The reservation ceiling (reservation.MaxPCMReservation) and the trim policy
+// (reservation.ShouldTrim, reservation.MaxRetainedSlack) live in internal/
+// reservation, shared with opusm4a; that package documents the general rule. The
+// container bounds pcmReservation derives below cannot make the reservation safe
+// on their own, which is why the ceiling exists: FLAC's compression ratio has no
+// lower limit, so a constant subframe encodes a 65535-sample block in a handful
+// of bytes, and a crafted file of a couple of kilobytes still reaches any
+// per-claim estimate.
 
 // Config configures FLAC encoding. SampleRate is the audio rate in Hz; Channels is
 // 1 or 2; BitDepth is 16 or 24; CompressionLevel is 0 (fastest) to 8 (smallest).
@@ -241,11 +211,19 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 		return nil, info, err
 	}
 
+	// An empty decode hands back nil rather than the non-nil zero-length slice the
+	// pre-sized make produced, so a caller's pcm == nil check and a JSON marshal
+	// both read the absent case as absent (null, not ""). This package's own writer
+	// refuses to close a track with no frames, so it is only reachable from a
+	// foreign or crafted file.
+	if len(out) == 0 {
+		return nil, info, nil
+	}
 	// Hand back a right-sized copy when the reservation ran well ahead of the audio
 	// that actually decoded. A returned slice pins its entire backing array, so a
 	// file that overstates its length would otherwise leave the caller holding that
 	// reservation for as long as it keeps the PCM.
-	if shouldTrim(len(out), cap(out)) {
+	if reservation.ShouldTrim(len(out), cap(out)) {
 		out = bytes.Clone(out)
 	}
 	return out, info, nil
@@ -328,30 +306,6 @@ func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) 
 	}
 }
 
-// shouldTrim reports whether a decoded buffer of the given length and capacity
-// is carrying enough dead capacity to be worth copying down to size.
-//
-// Both tests are load-bearing. The absolute one ignores small overshoot, which is
-// not worth a copy. The proportional one keeps the trim off honest files, and it
-// is the whole reason this is a function rather than one condition inline: a
-// buffer that reached its length through append carries up to a quarter of that
-// length as growth headroom, so an absolute threshold alone fires on essentially
-// every stream past a megabyte and charges it a full extra copy. Measured on a
-// 9-minute clip, that copy cost about 104 MB, and it fell hardest on streams
-// declaring an unknown length, where the reservation never engages at all so the
-// copy buys nothing whatsoever.
-//
-// The divisor is half rather than a quarter deliberately. Growth headroom runs to
-// about a quarter of the length, so a quarter is exactly on the boundary and was
-// measured still firing on an honest 30-second unknown-length stream. What the
-// trim is for is the disproportionate case, where a file declared far more audio
-// than it carried and the slack dwarfs the audio instead of being a fraction of
-// it; that case clears any of these divisors by orders of magnitude.
-func shouldTrim(length, capacity int) bool {
-	slack := capacity - length
-	return slack > maxRetainedSlack && slack > length/2
-}
-
 // frameReservation returns the number of FLAC frames that samplesPerChannel
 // samples encode to, for use as a slice capacity. The round-up is a remainder
 // test rather than the usual (n + blockSize - 1) / blockSize because that form
@@ -385,7 +339,7 @@ func frameReservation(samplesPerChannel int) int {
 // to defeat it, because the per-access-unit budget (maxFLACBlockSize samples at
 // the widest permitted stride) is around two megabytes while an access unit
 // costs the attacker about a byte, so a few dozen of them still reach any
-// generous ceiling. maxPCMReservation is what actually bounds the damage, and
+// generous ceiling. reservation.MaxPCMReservation is what actually bounds the damage, and
 // the reasoning for its size lives there. This function narrows the honest
 // cases; it does not make a hostile one safe.
 //
@@ -393,10 +347,10 @@ func frameReservation(samplesPerChannel int) int {
 // to a bound before it is multiplied and the running total is pinned again after.
 // At the current ceiling the largest product is frameCount against
 // maxFLACBlockSize, just under 2^42, and the other two reach exactly 2^29 and
-// 2^28; all are far inside uint64, and the result is pinned to maxPCMReservation
+// 2^28; all are far inside uint64, and the result is pinned to reservation.MaxPCMReservation
 // before the int conversion, so it fits a 32-bit int too. bytesPerSample needs no
 // separate clamp, since (min(bitDepth, 32) + 7) / 8 is at most 4 by its own
-// arithmetic. These figures scale with maxPCMReservation, so they are worth
+// arithmetic. These figures scale with reservation.MaxPCMReservation, so they are worth
 // recomputing rather than trusting if that constant ever moves again.
 //
 // A declared count of zero means unknown, which STREAMINFO is allowed to say, and
@@ -406,7 +360,7 @@ func frameReservation(samplesPerChannel int) int {
 // limit is the caller's ceiling on the decoded size (zero or less for none), and
 // caps the reservation as well. Without that, a caller who allowed a megabyte
 // would still watch a hostile self-description drive a speculative allocation up
-// to maxPCMReservation before the first frame decoded, which is most of what the
+// to reservation.MaxPCMReservation before the first frame decoded, which is most of what the
 // limit exists to prevent. It is a ceiling and never a floor: a limit above what
 // the stream declares leaves the reservation where the declaration put it.
 func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bitDepth, limit int) int {
@@ -430,12 +384,12 @@ func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bit
 		channels = seChannels
 	}
 
-	samples := min(totalSamples, maxPCMReservation)
-	samples = min(samples, min(uint64(frameCount), maxPCMReservation)*maxFLACBlockSize)
+	samples := min(totalSamples, reservation.MaxPCMReservation)
+	samples = min(samples, min(uint64(frameCount), reservation.MaxPCMReservation)*maxFLACBlockSize)
 
 	bytesPerSample := (min(bitDepth, maxFLACBitDepth) + 7) / 8
-	n := min(samples*uint64(min(channels, maxFLACChannels)), maxPCMReservation)
-	n = min(n*uint64(bytesPerSample), maxPCMReservation)
+	n := min(samples*uint64(min(channels, maxFLACChannels)), reservation.MaxPCMReservation)
+	n = min(n*uint64(bytesPerSample), reservation.MaxPCMReservation)
 	if limit > 0 {
 		n = min(n, uint64(limit))
 	}

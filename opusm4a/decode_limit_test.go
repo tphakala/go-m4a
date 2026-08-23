@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
 // encodeClip encodes a sine to an Opus .mp4 and returns the file bytes together
@@ -157,7 +158,7 @@ func TestPCMReservation(t *testing.T) {
 		{"no frames", 0, 2, 0, 0},
 		{"no channels", 50, 0, 0, 0},
 		{"negative frame count", -1, 2, 0, 0},
-		{"absurd frame count clamps to the ceiling", math.MaxInt, 2, 0, maxPCMReservation},
+		{"absurd frame count clamps to the ceiling", math.MaxInt, 2, 0, reservation.MaxPCMReservation},
 		{"absurd channel count clamps to stereo", oneSecond, math.MaxInt, 0, 48000 * 2 * 2},
 		{"limit below the estimate", oneSecond, 2, 4096, 4096},
 		{"limit above the estimate is not a floor", oneSecond, 2, math.MaxInt, 48000 * 2 * 2},
@@ -170,53 +171,16 @@ func TestPCMReservation(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("pcmReservation(%d, %d, %d) = %d, want %d", tc.frameCount, tc.channels, tc.limit, got, tc.want)
 			}
-			if got < 0 || got > maxPCMReservation {
-				t.Errorf("reservation %d escaped 0..%d", got, maxPCMReservation)
+			if got < 0 || got > reservation.MaxPCMReservation {
+				t.Errorf("reservation %d escaped 0..%d", got, reservation.MaxPCMReservation)
 			}
 		})
 	}
 }
 
-// TestShouldTrim pins the rule that decides whether an accumulating decode hands
-// back its buffer or a right-sized copy. The rows are flacm4a's, deliberately:
-// the two bridges apply the same rule with the same thresholds, and the rows
-// that matter are the ones that discriminate between plausible divisors. A table
-// of round numbers passes for any divisor from a half to a quarter and so
-// defends nothing; the "unknown length, 30s" row sits at ratio 0.2501 and is what
-// rules out a quarter. See flacm4a.shouldTrim for the measurements behind them.
-func TestShouldTrim(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		length   int
-		slack    int
-		wantTrim bool
-	}{
-		// The case the trim exists for: far more was reserved than decoded.
-		{"over-reserved", 2000, 129070, true},
-		{"over-reserved at the ceiling", 2000, maxPCMReservation - 2000, true},
-		// Pins the firing side closely enough that the policy cannot be loosened
-		// several times over with a green suite.
-		{"slack over half the audio", 1000000, 600000, true},
-		// Honest streams: a buffer that grew by append carries up to about a quarter
-		// of its length as headroom, and none of that is worth a copy.
-		{"exact reservation", 2880000, 0, false},
-		{"unknown length, 5s", 960000, 236032, false},
-		{"unknown length, 30s", 5760000, 1440768, false},
-		// Small absolute slack is never worth a copy whatever the proportion.
-		{"tiny buffer, proportionally huge slack", 8, 1024, false},
-		{"empty buffer", 0, 0, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := shouldTrim(tc.length, tc.length+tc.slack); got != tc.wantTrim {
-				t.Errorf("shouldTrim(len=%d, cap=%d) = %v, want %v (slack %d)",
-					tc.length, tc.length+tc.slack, got, tc.wantTrim, tc.slack)
-			}
-		})
-	}
-}
+// The trim policy itself (ShouldTrim) is tested in internal/reservation, shared
+// with flacm4a. What stays here is the Opus-specific reservation arithmetic and
+// the end-to-end assertion that a real decode does not over-retain.
 
 // TestDecodeInterleavedTrimsOverReservation covers the case the trim exists for.
 // The reservation assumes the 20 ms packetization this bridge writes, so a file
@@ -242,9 +206,9 @@ func TestDecodeInterleavedTrimsOverReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeInterleavedLimit: %v", err)
 	}
-	// Asserted against the threshold rather than by calling shouldTrim, so that a
+	// Asserted against the threshold rather than by calling reservation.ShouldTrim, so that a
 	// change loosening the predicate cannot make this test agree with it.
-	if slack := cap(pcm) - len(pcm); slack > maxRetainedSlack {
+	if slack := cap(pcm) - len(pcm); slack > reservation.MaxRetainedSlack {
 		t.Errorf("returned buffer keeps %d bytes of slack behind %d bytes of PCM", slack, len(pcm))
 	}
 }

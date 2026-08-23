@@ -93,42 +93,32 @@ func InitSegment(cfg WriterConfig) ([]byte, error) {
 	stbl = box.AppendStsz(stbl, nil)
 	stbl = box.AppendStco(stbl, nil)
 
-	var minf []byte
-	minf = box.AppendSmhd(minf)
-	minf = box.AppendDinf(minf)
-	minf = box.AppendStbl(minf, stbl)
-
-	// Every duration in the init segment is zero: the length of a live stream is
-	// not known when it starts, and the fragments carry the timeline themselves.
-	var mdia []byte
-	mdia = box.AppendMdhd(mdia, meta.timescale, 0)
-	mdia = box.AppendHdlr(mdia, box.NewFourCC("soun"), "SoundHandler")
-	mdia = box.AppendMinf(mdia, minf)
-
-	var trak []byte
-	trak = box.AppendTkhd(trak, fragmentTrackID, 0)
 	// A zero trim means there is nothing to present differently from the media, so
 	// emit no edit list at all. That covers both NoEdit and a codec without priming
 	// (FLAC), and it matters: an entry with media_time 0 and segment_duration 0 is a
 	// null edit, which a player reading segment_duration literally can take as
 	// "present nothing". flacm4a suppresses the edit list on the non-fragmented path
-	// for the same reason.
+	// for the same reason. When there is a trim, segment_duration stays 0: the
+	// open-ended edit presents the track from media_time to its end, whenever that
+	// turns out to be.
+	editList := false
+	var mediaTime int64
 	if delay := meta.resolveDelay(cfg.EncoderDelay); delay != 0 {
-		// segment_duration 0 is the open-ended edit: present the track from
-		// media_time to its end, whenever that turns out to be.
-		trak = box.AppendEdts(trak, box.AppendElst(nil, 0, int64(delay)))
+		editList = true
+		mediaTime = int64(delay)
 	}
-	trak = box.AppendMdia(trak, mdia)
 
-	moov := box.AppendMvhd(nil, meta.timescale, 0)
-	moov = box.AppendTrak(moov, trak)
-	// mvex is what declares the movie fragmented. default_sample_duration is the
-	// codec's fixed frame length where it has one (AAC-LC's 1024) and zero
-	// otherwise, in which case each fragment states its own.
-	moov = box.AppendMvex(moov, box.AppendTrex(nil,
-		fragmentTrackID, meta.defaultDuration, box.SyncSampleFlags))
-
-	return box.AppendMoov(out, moov), nil
+	// Every duration in the init segment is zero: the length of a live stream is not
+	// known when it starts, and the fragments carry the timeline themselves. The
+	// trak/mdia/minf skeleton, and the mvex that declares the movie fragmented, are
+	// assembled by buildMoovFrom, the same builder the non-fragmented Writer uses.
+	return meta.buildMoovFrom(moovSpec{
+		stbl:       stbl,
+		editList:   editList,
+		mediaTime:  mediaTime,
+		fragmented: true,
+		prefix:     out,
+	}), nil
 }
 
 // FragmentWriter emits the media segments of a fragmented MP4 (CMAF) stream: the

@@ -5,6 +5,8 @@ package flacm4a
 import (
 	"math"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
 // FuzzPCMReservation asserts the invariants of the decode reservation over
@@ -19,7 +21,7 @@ import (
 //
 //   - it never panics, whatever the arithmetic is handed;
 //   - the result is a legal capacity, so 0 <= n and make can take it;
-//   - the result never exceeds maxPCMReservation, which is what stops a
+//   - the result never exceeds reservation.MaxPCMReservation, which is what stops a
 //     self-description from driving the allocation;
 //   - the result never exceeds a positive caller limit, which is what stops it
 //     from exceeding what the caller allowed;
@@ -41,8 +43,8 @@ func FuzzPCMReservation(f *testing.F) {
 		if got < 0 {
 			t.Fatalf("reservation %d is negative, which make would reject", got)
 		}
-		if got > maxPCMReservation {
-			t.Fatalf("reservation %d exceeds the %d ceiling", got, maxPCMReservation)
+		if got > reservation.MaxPCMReservation {
+			t.Fatalf("reservation %d exceeds the %d ceiling", got, reservation.MaxPCMReservation)
 		}
 		if limit > 0 && got > limit {
 			t.Fatalf("reservation %d exceeds the caller's limit %d", got, limit)
@@ -89,26 +91,6 @@ func FuzzFrameReservation(f *testing.F) {
 			if got > samplesPerChannel {
 				t.Fatalf("frame reservation %d exceeds the sample count %d", got, samplesPerChannel)
 			}
-		}
-	})
-}
-
-// FuzzShouldTrim asserts that the trim decision is total and self-consistent:
-// it must not panic on any length and capacity a decode can produce, and it
-// must never ask for a copy of a buffer that has no slack to reclaim.
-func FuzzShouldTrim(f *testing.F) {
-	f.Add(0, 0)
-	f.Add(1000000, 1600000)
-	f.Add(math.MaxInt, math.MaxInt)
-	f.Add(0, math.MaxInt)
-
-	f.Fuzz(func(t *testing.T, length, capacity int) {
-		if length < 0 || capacity < length {
-			t.Skip("not a slice: a capacity is never below its length")
-		}
-		if got := shouldTrim(length, capacity); got && capacity-length <= maxRetainedSlack {
-			t.Fatalf("shouldTrim(%d, %d) asked for a copy to reclaim %d bytes, under the %d floor",
-				length, capacity, capacity-length, maxRetainedSlack)
 		}
 	})
 }
