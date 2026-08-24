@@ -125,6 +125,59 @@ func TestOpusFlacSampleEntriesParse(t *testing.T) {
 	assertSampleEntry(t, flac, fourCCFlac, 1, 44100, fourCCDfla)
 }
 
+// TestFLACSampleEntryRateReduction pins the power-of-two reduction AppendFlacEntry
+// applies so a rate above the 16.16 field ceiling does not overflow it. The
+// standard high rates land on a real base rate, matching the Xiph FLAC-in-ISOBMFF
+// spec and ffmpeg; the true rate is carried by STREAMINFO and the container
+// timescale, not this legacy hint.
+func TestFLACSampleEntryRateReduction(t *testing.T) {
+	cases := []struct {
+		rate uint32
+		want uint32
+	}{
+		{8000, 8000},
+		{44100, 44100},
+		{48000, 48000},
+		{65535, 65535},
+		{65536, 32768},
+		{88200, 44100},
+		{96000, 48000},
+		{176400, 44100},
+		{192000, 48000},
+		{1048575, 65535}, // the 20-bit STREAMINFO maximum halves down to the field ceiling
+	}
+	for _, tc := range cases {
+		if got := flacSampleEntryRate(tc.rate); got != tc.want {
+			t.Errorf("flacSampleEntryRate(%d) = %d, want %d", tc.rate, got, tc.want)
+		}
+		// The value actually written into the fLaC AudioSampleEntry is the reduced one.
+		si := make([]byte, StreamInfoBodyLen)
+		flac := AppendFlacEntry(nil, 2, tc.rate, AppendDfla(nil, si))
+		assertSampleEntry(t, flac, fourCCFlac, 2, tc.want, fourCCDfla)
+	}
+}
+
+// TestSTREAMINFOSampleRate pins the 20-bit rate extraction used on the read path to
+// recover a FLAC track's true rate from STREAMINFO rather than the reduced sample
+// entry.
+func TestSTREAMINFOSampleRate(t *testing.T) {
+	for _, rate := range []uint32{8000, 44100, 96000, 192000, 0xFFFFF} {
+		si := make([]byte, StreamInfoBodyLen)
+		// Pack the 20-bit rate starting at byte 10, per RFC 9639 section 8.2.
+		si[10] = byte(rate >> 12)
+		si[11] = byte(rate >> 4)
+		si[12] = byte(rate << 4)
+		if got := STREAMINFOSampleRate(si); got != rate {
+			t.Errorf("STREAMINFOSampleRate(%d packed) = %d, want %d", rate, got, rate)
+		}
+	}
+	// A block too short to hold the field yields 0, so a reader falls back to the
+	// sample entry rather than reading past the slice.
+	if got := STREAMINFOSampleRate(make([]byte, 12)); got != 0 {
+		t.Errorf("STREAMINFOSampleRate(short) = %d, want 0", got)
+	}
+}
+
 func assertSampleEntry(t *testing.T, entry []byte, wantType FourCC, wantCh uint16, wantRate uint32, wantChild FourCC) {
 	t.Helper()
 	h, err := ParseHeader(entry)

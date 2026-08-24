@@ -77,12 +77,19 @@ func TestWriteReadFLAC(t *testing.T) {
 	for i := range streamInfo {
 		streamInfo[i] = byte(0x10 + i)
 	}
+	// The reader now recovers a FLAC track's rate from STREAMINFO (bytes 10-12), so
+	// encode the real 44100/1 there. The remaining filler stays distinctive, which is
+	// what the CodecConfig round-trip check below verifies.
+	rate, channels := 44100, 1
+	streamInfo[10] = byte(rate >> 12)
+	streamInfo[11] = byte(rate >> 4)
+	streamInfo[12] = byte(rate<<4) | byte((channels-1)<<1)
 
 	var buf memWS
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec:      CodecFLAC,
-		SampleRate: 44100,
-		Channels:   1,
+		SampleRate: rate,
+		Channels:   channels,
 		STREAMINFO: streamInfo,
 	})
 	if err != nil {

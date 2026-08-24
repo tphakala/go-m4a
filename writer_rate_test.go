@@ -33,12 +33,12 @@ func ascFor(t *testing.T, rate, channels int) []byte {
 	}
 }
 
-// flacStreamInfo builds a STREAMINFO block declaring the given rate. The writer
-// copies it into dfLa verbatim and never parses it, so a block of zeros would
-// satisfy every check here; it carries the real rate anyway because a decoder
-// takes the authoritative rate from STREAMINFO, so a fixture declaring 0 Hz
-// would be exactly the divergent file this package cannot detect and the tests
-// should not be modelling.
+// flacStreamInfo builds a STREAMINFO block declaring the given rate and channel
+// count. The writer copies it into dfLa verbatim and never parses it, but the
+// reader now recovers a FLAC track's sample rate from this block (resolveFormat),
+// so the rate a fixture encodes here is what a read-back reports. It carries the
+// real rate for that reason, and because a conforming decoder takes the
+// authoritative rate from STREAMINFO regardless.
 //
 // Layout (RFC 9639 section 8.2): 16 bits min block size, 16 max, 24 min frame
 // size, 24 max, then 20 bits sample rate, 3 bits channels-1, 5 bits bit
@@ -93,8 +93,16 @@ func TestAcceptedSampleRates(t *testing.T) {
 		{"flac 44100", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 2, STREAMINFO: flacStreamInfo(44100, 2)}, true},
 		{"flac 8000", WriterConfig{Codec: CodecFLAC, SampleRate: 8000, Channels: 1, STREAMINFO: flacStreamInfo(8000, 1)}, true},
 		{"flac 47999 needs no table entry", WriterConfig{Codec: CodecFLAC, SampleRate: 47999, Channels: 1, STREAMINFO: flacStreamInfo(47999, 1)}, true},
-		{"flac 65535 at the sample entry ceiling", WriterConfig{Codec: CodecFLAC, SampleRate: 65535, Channels: 1, STREAMINFO: flacStreamInfo(65535, 1)}, true},
-		{"flac 65536 exceeds the sample entry", WriterConfig{Codec: CodecFLAC, SampleRate: 65536, Channels: 1, STREAMINFO: flacStreamInfo(65536, 1)}, false},
+		{"flac 65535 fits the sample entry directly", WriterConfig{Codec: CodecFLAC, SampleRate: 65535, Channels: 1, STREAMINFO: flacStreamInfo(65535, 1)}, true},
+		// Above the 16.16 sample-entry field, FLAC no longer rejects: the sample entry
+		// carries a reduced power-of-two hint and STREAMINFO the true rate. Accepted up
+		// to the 20-bit STREAMINFO maximum, rejected beyond it.
+		{"flac 65536 above the sample entry, reduced hint", WriterConfig{Codec: CodecFLAC, SampleRate: 65536, Channels: 1, STREAMINFO: flacStreamInfo(65536, 1)}, true},
+		{"flac 88200 high rate", WriterConfig{Codec: CodecFLAC, SampleRate: 88200, Channels: 2, STREAMINFO: flacStreamInfo(88200, 2)}, true},
+		{"flac 96000 high rate", WriterConfig{Codec: CodecFLAC, SampleRate: 96000, Channels: 2, STREAMINFO: flacStreamInfo(96000, 2)}, true},
+		{"flac 192000 high rate", WriterConfig{Codec: CodecFLAC, SampleRate: 192000, Channels: 2, STREAMINFO: flacStreamInfo(192000, 2)}, true},
+		{"flac 1048575 at the STREAMINFO maximum", WriterConfig{Codec: CodecFLAC, SampleRate: 1048575, Channels: 1, STREAMINFO: flacStreamInfo(1048575, 1)}, true},
+		{"flac 1048576 exceeds the STREAMINFO maximum", WriterConfig{Codec: CodecFLAC, SampleRate: 1048576, Channels: 1, STREAMINFO: flacStreamInfo(1048576, 1)}, false},
 
 		// The floor is shared by every codec.
 		{"zero rate", WriterConfig{Codec: CodecFLAC, SampleRate: 0, Channels: 1, STREAMINFO: flacStreamInfo(48000, 1)}, false},
@@ -156,13 +164,11 @@ func TestRoundTripSampleRates(t *testing.T) {
 // TestRoundTripFLACOffTableRate pins the asymmetry the prose kept getting wrong:
 // FLAC consults no rate table, so the writer accepts rates AAC has no index for.
 //
-// Note what carries the rate here. A conforming decoder takes it from STREAMINFO,
-// but this package's Reader reports the sample entry (reader.go, resolveFormat:
-// "FLAC has no ASC: the sample entry samplerate and channel count are
-// authoritative"), so what round-trips below is the sample entry. The fixture
-// declares the same rate in STREAMINFO so the two agree; a config where they
-// disagree produces a file this package and ffmpeg read differently, which
-// nothing currently detects.
+// The rate round-trips through STREAMINFO: the reader recovers a FLAC track's rate
+// from the dfLa STREAMINFO (resolveFormat), which the fixture declares. Here the
+// sample entry agrees anyway, because 47999 fits the 16.16 field directly;
+// TestRoundTripFLACHighRate covers the case where it cannot and the two diverge by
+// design.
 func TestRoundTripFLACOffTableRate(t *testing.T) {
 	t.Parallel()
 	const rate = 47999
@@ -193,6 +199,58 @@ func TestRoundTripFLACOffTableRate(t *testing.T) {
 	}
 	if info := r.Info(); info.SampleRate != rate {
 		t.Errorf("SampleRate = %d, want %d", info.SampleRate, rate)
+	}
+}
+
+// TestRoundTripFLACHighRate covers FLAC sample rates above the 16.16 sample-entry
+// ceiling (issue #4). The writer must reduce the sample-entry hint without
+// overflowing the field, and the reader must report the true rate recovered from
+// STREAMINFO rather than the reduced hint.
+func TestRoundTripFLACHighRate(t *testing.T) {
+	t.Parallel()
+	for _, rate := range []int{88200, 96000, 176400, 192000, 1048575} {
+		t.Run(fmt.Sprintf("flac%d", rate), func(t *testing.T) {
+			t.Parallel()
+			const channels = 2
+			cfg := WriterConfig{Codec: CodecFLAC, SampleRate: rate, Channels: channels, STREAMINFO: flacStreamInfo(rate, channels), EncoderDelay: NoEdit}
+			ws := &memWS{}
+			w, err := NewWriter(ws, cfg)
+			if err != nil {
+				t.Fatalf("NewWriter(%d Hz): %v", rate, err)
+			}
+			for i, au := range synthFrames(3) {
+				if err := w.WriteFrameDuration(au, 4096); err != nil {
+					t.Fatalf("WriteFrameDuration %d: %v", i, err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			r, err := NewReader(bytes.NewReader(ws.buf))
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			if info := r.Info(); info.SampleRate != rate {
+				t.Errorf("read-back SampleRate = %d, want the true rate %d (not the reduced sample-entry hint)", info.SampleRate, rate)
+			}
+
+			// The on-disk fLaC sample entry carries the reduced hint, never an
+			// overflowed field. Layout after the type FourCC: 6 reserved, 2
+			// data_reference_index, 8 reserved, 2 channelcount, 2 samplesize, 2
+			// pre_defined, 2 reserved, so the 16.16 samplerate starts 28 bytes in.
+			i := bytes.Index(ws.buf, []byte("fLaC"))
+			if i < 0 {
+				t.Fatal("no fLaC sample entry in the written file")
+			}
+			field := binary.BigEndian.Uint32(ws.buf[i+28 : i+32])
+			if hint := int(field >> 16); hint <= 0 || hint > 0xFFFF {
+				t.Errorf("fLaC sample-entry rate hint = %d (raw %#08x), want a nonzero value inside the 16-bit field", hint, field)
+			}
+			if low := field & 0xFFFF; low != 0 {
+				t.Errorf("fLaC sample-entry fraction = %#04x, want 0", low)
+			}
+		})
 	}
 }
 

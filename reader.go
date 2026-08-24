@@ -746,8 +746,17 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		// malformed file's samplerate field. The dOps OutputChannelCount already
 		// set tr.seChannels.
 		sampleRate = opusTimescale
+	case tr.codec == fourccFlac:
+		// FLAC has no ASC, and its AudioSampleEntry samplerate is only a reduced hint
+		// for rates above 65535 Hz: a muxer (this package included) halves such a rate
+		// to fit the 16.16 field. The authoritative rate is the 20-bit value in the
+		// dfLa STREAMINFO, so prefer it and fall back to the sample entry only when the
+		// block is absent or declares 0 (unknown). The channel count stays from the
+		// sample entry.
+		if r := box.STREAMINFOSampleRate(tr.codecConfig); r > 0 {
+			sampleRate = int(r)
+		}
 	}
-	// FLAC has no ASC: the sample entry samplerate and channel count are authoritative.
 	return sampleRate, channels
 }
 
