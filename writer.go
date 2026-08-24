@@ -56,6 +56,11 @@ const samplesPerFrame = 1024
 // in the first five bits of an AudioSpecificConfig.
 const audioObjectTypeAACLC = 2
 
+// flacStreamInfoLen is the exact size of a FLAC STREAMINFO metadata block, the
+// dfLa box payload. It is fixed by the format (RFC 9639 section 8.2), so both the
+// NewWriter config check and the SetSTREAMINFO setter require exactly this length.
+const flacStreamInfoLen = 34
+
 // maxAudioSampleEntryRate is the largest sample rate the AudioSampleEntry
 // samplerate field can represent. It is a 16.16 fixed-point value, so the
 // integer rate must fit 16 bits; a higher rate would silently wrap when shifted
@@ -143,8 +148,12 @@ type WriterConfig struct {
 	OpusInputSampleRate int
 
 	// STREAMINFO is the 34-byte FLAC STREAMINFO metadata block, the payload of the
-	// dfLa box (from go-flac's pcm.FrameEncoder.StreamInfoBytes). Required for
-	// CodecFLAC; ignored otherwise.
+	// dfLa box (from go-flac's pcm.FrameEncoder.StreamInfoBytes). Used only for
+	// CodecFLAC; ignored otherwise. It may be left empty here and supplied later
+	// with Writer.SetSTREAMINFO, before Close, which is what lets an encoder stream
+	// frames first and provide the finalized block (with its measured frame sizes
+	// and MD5) at the end. Whether given here or later, a CodecFLAC track must have
+	// a 34-byte block by Close, which errors otherwise.
 	STREAMINFO []byte
 
 	// EncoderDelay is the number of leading priming samples to trim with an edit
@@ -374,6 +383,36 @@ func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 	return nil
 }
 
+// SetSTREAMINFO supplies the 34-byte FLAC STREAMINFO metadata block that the dfLa
+// box carries, for a CodecFLAC writer created with an empty WriterConfig.STREAMINFO.
+// It exists because go-flac's StreamInfoBytes is only final after the whole encode
+// (it records the measured min/max frame sizes and MD5), while the dfLa box is not
+// built until Close: a caller can stream every frame first, then set STREAMINFO
+// just before Close, avoiding buffering the clip. Calling it again overwrites the
+// block, and calling it on a writer that was given STREAMINFO at NewWriter simply
+// replaces that value.
+//
+// It copies the bytes, so a later mutation of streamInfo by the caller cannot
+// change the box. It returns an error if the writer is not FLAC, if streamInfo is
+// not exactly flacStreamInfoLen bytes, or if the writer is already closed
+// (ErrClosed), the last so a block set after finalize cannot be silently ignored.
+func (w *Writer) SetSTREAMINFO(streamInfo []byte) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if w.closed {
+		return ErrClosed
+	}
+	if w.codec != CodecFLAC {
+		return fmt.Errorf("go-m4a: SetSTREAMINFO: writer codec is %s, not FLAC", w.codec)
+	}
+	if len(streamInfo) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: SetSTREAMINFO: STREAMINFO is %d bytes, want %d", len(streamInfo), flacStreamInfoLen)
+	}
+	w.streamInfo = append([]byte(nil), streamInfo...)
+	return nil
+}
+
 // Close finalizes the file: it patches the streamed mdat largesize, seeks past
 // the payload, and writes the moov metadata (mvhd, trak with tkhd, optional
 // edts/elst, and mdia down to the sample tables). It reports an error if no
@@ -395,6 +434,14 @@ func (w *Writer) Close() error {
 	w.closed = true
 	if len(w.sizes) == 0 {
 		return fmt.Errorf("go-m4a: Close: no frames written")
+	}
+	// A FLAC track must carry a STREAMINFO block by finalize: it was either given
+	// at NewWriter or supplied later with SetSTREAMINFO. Enforce the exact length
+	// here rather than trusting the setter alone, so a writer created with an empty
+	// STREAMINFO that never got SetSTREAMINFO fails with a clear error instead of
+	// building a dfLa box around a zero-length block.
+	if w.codec == CodecFLAC && len(w.streamInfo) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: Close: FLAC track has no STREAMINFO; call SetSTREAMINFO before Close")
 	}
 
 	// Overwrite the 8-byte mdat largesize in place: header size + payload.
@@ -699,12 +746,18 @@ func validateOpusConfig(cfg WriterConfig) error {
 	return nil
 }
 
-// validateFLACConfig checks that the STREAMINFO metadata block is present and the
-// expected 34 bytes.
+// validateFLACConfig checks the STREAMINFO metadata block. It accepts either the
+// full 34 bytes supplied up front, or an empty slice, which defers the block to a
+// later Writer.SetSTREAMINFO call. Deferral exists because go-flac's
+// StreamInfoBytes is only final after the whole encode (it carries the measured
+// min/max frame sizes and MD5), while the dfLa box is not built until Close; the
+// flacm4a bridge relies on it to stream frames without buffering the clip. Any
+// other length is rejected. Close enforces that a non-empty block is present by
+// the time the file is finalized (flacStreamInfoLen bytes), so an empty config
+// that never gets SetSTREAMINFO fails there rather than writing a malformed dfLa.
 func validateFLACConfig(cfg WriterConfig) error {
-	const streamInfoLen = 34
-	if len(cfg.STREAMINFO) != streamInfoLen {
-		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d", len(cfg.STREAMINFO), streamInfoLen)
+	if len(cfg.STREAMINFO) != 0 && len(cfg.STREAMINFO) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d or 0 (set later via SetSTREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
 	}
 	return nil
 }

@@ -80,13 +80,17 @@ func BenchmarkDecodeInterleaved(b *testing.B) {
 }
 
 // encodeAllocCeiling bounds the encode path's allocations for the 15-second clip.
-// Reslicing every frame out of one pre-sized arena, rather than a bytes.Clone per
-// frame, holds this clip at ~104 allocations; the removed clones were ~175 of the
-// old ~279 (one per frame, plus fixed pipeline cost from the encoder, the writer's
-// sample tables, and StreamInfoBytes). The ceiling sits above the arena figure
-// with headroom for minor pipeline drift, and well below the clone total, so a
-// revert to per-frame cloning trips it.
-const encodeAllocCeiling = 150
+// Writing each frame straight into the mdat stream from the go-flac callback,
+// with STREAMINFO supplied late at Close, removes both the per-frame arena and the
+// frame-record slice the buffered encode used to keep. This clip now settles at
+// ~100 allocations (stereo ~102), essentially the fixed pipeline cost of the
+// encoder, the writer's sample tables, and StreamInfoBytes, and its bytes/op drop
+// from a few megabytes (the arena was sized to the whole PCM input) to well under
+// a megabyte. The ceiling sits just above the measured figure with headroom for
+// minor pipeline drift; a regression that reintroduces per-frame buffering (the
+// old path allocated ~279 times) trips it. See BenchmarkEncodeInterleaved
+// -benchmem for the bytes/op the count alone does not capture.
+const encodeAllocCeiling = 120
 
 // TestEncodeInterleavedAllocations is the regression guard for that arena (#20:
 // the repo keeps allocation-count tests so a growth-chain regression cannot slip

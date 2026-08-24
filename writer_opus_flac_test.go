@@ -215,7 +215,10 @@ func TestWriterCodecConfigValidation(t *testing.T) {
 		{"opus negative preskip", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: -1}},
 		{"opus preskip overflows u16", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 70000}},
 		{"opus input rate negative", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusInputSampleRate: -1}},
-		{"flac missing streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1}},
+		// An empty FLAC STREAMINFO is deliberately NOT a NewWriter error any more: it
+		// is the deferred form supplied later with SetSTREAMINFO (enforced at Close).
+		// TestFLACStreamInfoDeferral covers both the deferral and the Close-without-it
+		// failure. A wrong non-zero length is still rejected up front.
 		{"flac short streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: make([]byte, 20)}},
 		{"unknown codec", WriterConfig{Codec: Codec(99), SampleRate: 48000, Channels: 1}},
 	}

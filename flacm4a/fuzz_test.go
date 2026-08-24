@@ -64,33 +64,3 @@ func FuzzPCMReservation(f *testing.F) {
 	})
 }
 
-// FuzzFrameReservation asserts that the encoder's frame-count estimate is a
-// legal slice capacity for any input, including the values whose usual
-// round-up form would overflow.
-func FuzzFrameReservation(f *testing.F) {
-	f.Add(0)
-	f.Add(1)
-	f.Add(4096)
-	f.Add(4097)
-	f.Add(math.MaxInt)
-	f.Add(-1)
-
-	f.Fuzz(func(t *testing.T, samplesPerChannel int) {
-		got := frameReservation(samplesPerChannel)
-
-		if got < 0 {
-			t.Fatalf("frame reservation %d is negative, which make would reject", got)
-		}
-		// Every sample has to land in some frame, so the count can never be short
-		// of the exact division; and it is a count of blocks, so it can never
-		// exceed the sample count itself.
-		if samplesPerChannel > 0 {
-			if want := samplesPerChannel / encoderBlockSize; got < want {
-				t.Fatalf("frame reservation %d is short of the %d whole blocks in %d samples", got, want, samplesPerChannel)
-			}
-			if got > samplesPerChannel {
-				t.Fatalf("frame reservation %d exceeds the sample count %d", got, samplesPerChannel)
-			}
-		}
-	})
-}

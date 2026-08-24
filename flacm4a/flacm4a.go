@@ -24,15 +24,6 @@ import (
 	"github.com/tphakala/go-m4a/internal/reservation"
 )
 
-// encoderBlockSize mirrors the fixed block size go-flac's FrameEncoder emits
-// (pcm.encoderBlockSize, which is unexported so it cannot be read from here).
-// Only the final block of a stream is shorter. No output depends on the value:
-// it sizes the frame slice and nothing else, so drift upstream costs regrows
-// rather than correctness. TestFrameReservationCoversEncoder pins it against
-// what go-flac actually emits so that drift surfaces as a failure here instead
-// of as a silent slowdown.
-const encoderBlockSize = 4096
-
 // maxFLACBlockSize is the largest number of samples one FLAC frame can hold.
 // RFC 9639 section 9.1.1 codes an escaped block size as a 16-bit field holding
 // blocksize-1, and section 9.1.6 forbids the value 65535 there (a block of
@@ -96,47 +87,16 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 		return fmt.Errorf("go-m4a/flacm4a: new frame encoder: %w", err)
 	}
 
-	// Encode all frames up front so StreamInfoBytes carries the measured min/max
-	// frame sizes and MD5 before the dfLa box is built at Close.
-	//
-	// Frame bytes accumulate in one arena rather than a bytes.Clone per frame.
-	// go-flac reuses the buffer it hands the callback, so each frame still has to be
-	// copied out, but copying into a single growing arena and storing (offset,
-	// length) records collapses what was one allocation per frame (176 for a 15s
-	// clip, the dominant share of this path's allocations) into one amortized
-	// buffer. The records are resliced against the finished arena only in the flush
-	// loop below, after every append, so no sub-slice outlives a growth realloc.
-	type frame struct {
-		offset    int
-		length    int
-		blockSize int
-	}
-	// Reserve the frame slice up front rather than growing it from nil and copying
-	// every intermediate, the same chain #8 removed from aacm4a. The count is
-	// predictable because samplesPerChannel is already known and go-flac emits
-	// fixed-size blocks. This is only a capacity hint: a wrong count costs regrows,
-	// never correctness.
-	frames := make([]frame, 0, frameReservation(samplesPerChannel))
-	// Pre-size the arena from the PCM length. FLAC output is smaller than its PCM
-	// input for real audio, so len(pcm) is an upper bound that avoids regrows on the
-	// honest path; an incompressible input costs a regrow, never correctness.
-	// len(pcm) is an existing slice length, so the reservation cannot overflow.
-	arena := make([]byte, 0, len(pcm))
-	err = fe.EncodeInterleaved(pcm, func(fr []byte, blockSize int) error {
-		off := len(arena)
-		arena = append(arena, fr...)
-		frames = append(frames, frame{offset: off, length: len(fr), blockSize: blockSize})
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("go-m4a/flacm4a: encode: %w", err)
-	}
-
+	// Open the writer up front with an empty STREAMINFO. go-flac's StreamInfoBytes
+	// is only final after the whole encode (it carries the measured min/max frame
+	// sizes and MD5), but the dfLa box is not built until Close, so the writer does
+	// not need STREAMINFO until then. Supplying it late via SetSTREAMINFO lets each
+	// frame stream straight into the mdat payload as it is encoded, replacing the
+	// per-clip arena and frame-record buffering the up-front encode used to need.
 	wr, err := m4a.NewWriter(w, m4a.WriterConfig{
 		Codec:      m4a.CodecFLAC,
 		SampleRate: cfg.SampleRate,
 		Channels:   cfg.Channels,
-		STREAMINFO: fe.StreamInfoBytes(),
 		// FLAC frames decode to exactly the input samples with no priming, so there
 		// is nothing to trim: omit the edit list.
 		EncoderDelay: m4a.NoEdit,
@@ -144,10 +104,31 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 	if err != nil {
 		return err
 	}
-	for _, f := range frames {
-		if err := wr.WriteFrameDuration(arena[f.offset:f.offset+f.length], uint32(f.blockSize)); err != nil {
+
+	// Write each frame directly from the encode callback. go-flac reuses the buffer
+	// it hands the callback, but WriteFrameDuration copies the access unit into the
+	// mdat stream before returning, so nothing has to outlive the call. A write
+	// failure is surfaced verbatim (it already carries the "go-m4a:" prefix) rather
+	// than being re-wrapped as an encode error.
+	var writeErr error
+	encErr := fe.EncodeInterleaved(pcm, func(fr []byte, blockSize int) error {
+		if err := wr.WriteFrameDuration(fr, uint32(blockSize)); err != nil {
+			writeErr = err
 			return err
 		}
+		return nil
+	})
+	if writeErr != nil {
+		return writeErr
+	}
+	if encErr != nil {
+		return fmt.Errorf("go-m4a/flacm4a: encode: %w", encErr)
+	}
+
+	// StreamInfoBytes is final now that every frame is encoded; supply it before
+	// Close builds the dfLa box.
+	if err := wr.SetSTREAMINFO(fe.StreamInfoBytes()); err != nil {
+		return err
 	}
 	return wr.Close()
 }
@@ -324,24 +305,6 @@ func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) 
 			return err
 		}
 	}
-}
-
-// frameReservation returns the number of FLAC frames that samplesPerChannel
-// samples encode to, for use as a slice capacity. The round-up is a remainder
-// test rather than the usual (n + blockSize - 1) / blockSize because that form
-// is overflow-free whatever it is handed, so the function stays safe if a future
-// caller reaches it with a larger value than today's does. Today's cannot
-// overflow either form: samplesPerChannel is len(pcm) divided by a stride of at
-// least 2, so it never exceeds half the int range.
-func frameReservation(samplesPerChannel int) int {
-	if samplesPerChannel <= 0 {
-		return 0
-	}
-	n := samplesPerChannel / encoderBlockSize
-	if samplesPerChannel%encoderBlockSize != 0 {
-		n++
-	}
-	return n
 }
 
 // pcmReservation returns the byte capacity to reserve for a decoded stream,
