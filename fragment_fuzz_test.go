@@ -177,6 +177,14 @@ func FuzzFragmentWriter(f *testing.F) {
 			t.Fatalf("NewFragmentWriter: %v", err)
 		}
 
+		// Exercise Grow on half the inputs: it is a pure capacity hint, so every
+		// segment invariant below must hold byte-for-byte whether or not it ran. The
+		// hint is deliberately imperfect (an access-unit estimate, not the exact
+		// arena size) so the regrow-after-hint path is covered too.
+		if len(lengths)%2 == 0 {
+			fw.Grow(len(lengths), len(lengths)*8)
+		}
+
 		// Two segments from the same input, so the second one starts at a non-zero
 		// decode time and carries sequence number 2. A single segment cannot
 		// distinguish an accumulated decode time from an assigned one.
