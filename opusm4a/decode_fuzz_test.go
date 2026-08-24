@@ -4,6 +4,7 @@ package opusm4a
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,12 +18,16 @@ import (
 // than bouncing off the demuxer.
 //
 // The contract asserted is the bridge's own, not the codec's: over any input the
-// decode never panics, and a decode that succeeds never returns more than
-// m4a.DefaultMaxDecodedBytes of PCM. That ceiling is load-bearing for Opus in
-// particular: a two-byte packet of zero-length DTX frames decodes to the 120 ms
-// maximum, so a foreign file's per-packet amplification is exactly what the limit
-// exists to bound. A crash found here may be an upstream go-opus bug rather than a
-// go-m4a one; the target still owns go-m4a's contract regardless.
+// decode never panics, a decode that succeeds never returns more than
+// m4a.DefaultMaxDecodedBytes of PCM, and a decode that fails returns one of the
+// bridge's typed sentinels rather than a bare codec error. That ceiling is
+// load-bearing for Opus in particular: a two-byte packet of zero-length DTX frames
+// decodes to the 120 ms maximum, so a foreign file's per-packet amplification is
+// exactly what the limit exists to bound. The sentinel assertion is the guard for
+// #32: a container the demuxer accepted but whose Opus payload the codec rejects
+// must surface as ErrCorrupt, matching the demuxer's own rejections. A crash found
+// here may be an upstream go-opus bug rather than a go-m4a one; the target still
+// owns go-m4a's contract regardless.
 func FuzzDecodeInterleaved(f *testing.F) {
 	for _, name := range []string{"opus_mono48k.mp4", "opus_stereo48k.mp4"} {
 		path := filepath.Join("..", "testdata", "interop", name)
@@ -40,6 +45,12 @@ func FuzzDecodeInterleaved(f *testing.F) {
 
 		pcm, _, err := DecodeInterleaved(bytes.NewReader(data))
 		if err != nil {
+			// A rejected file is a valid outcome, but it must be typed: every decode
+			// error, whether from the demuxer or from go-opus rejecting the payload,
+			// wraps one of these sentinels.
+			if !errors.Is(err, m4a.ErrCorrupt) && !errors.Is(err, m4a.ErrUnsupported) && !errors.Is(err, m4a.ErrDecodeLimit) {
+				t.Fatalf("decode error on %d-byte input is not a typed sentinel: %v", len(data), err)
+			}
 			return
 		}
 		if len(pcm) > m4a.DefaultMaxDecodedBytes {

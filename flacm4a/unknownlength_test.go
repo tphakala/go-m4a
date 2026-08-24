@@ -81,6 +81,20 @@ func TestDecodeUnknownLength(t *testing.T) {
 			if !bytes.Equal(got, pcm) {
 				t.Errorf("unknown-length decode mismatch: got %d bytes, want %d", len(got), len(pcm))
 			}
+			// Prove the unknown-length path was genuinely taken, not just that the
+			// forged field round-tripped: the STREAMINFO the reader recovered into
+			// CodecConfig must still carry total_samples == 0, so the decoder decoded
+			// without a header sample count rather than down the ordinary reservation
+			// path. CodecConfig is the 34-byte STREAMINFO body; the packed
+			// rate/channels/bps/total field is the uint64 at offset 10, total_samples
+			// its low 36 bits.
+			const totalMask = (uint64(1) << 36) - 1
+			if len(info.CodecConfig) < 18 {
+				t.Fatalf("CodecConfig is %d bytes, too short for a STREAMINFO body", len(info.CodecConfig))
+			}
+			if got := binary.BigEndian.Uint64(info.CodecConfig[10:]) & totalMask; got != 0 {
+				t.Errorf("decoded STREAMINFO total_samples = %d, want 0: unknown-length path was not taken", got)
+			}
 		})
 	}
 }

@@ -851,3 +851,54 @@ func BenchmarkAppendSegment(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkColdArenaOnly measures the first segment of a fresh writer with a
+// pre-grown destination, so only the sample-arena growth chain is counted, not the
+// destination's growth. This is the cost Grow exists to remove: a stream that
+// churns FragmentWriters pays it once per stream.
+func BenchmarkColdArenaOnly(b *testing.B) {
+	frames := synthFrames(94) // about two seconds of AAC-LC at 48 kHz
+	dst := make([]byte, 0, 64*1024)
+	cfg := aacFragmentConfig()
+	b.ReportAllocs()
+	for b.Loop() {
+		f, err := NewFragmentWriter(cfg)
+		if err != nil {
+			b.Fatalf("NewFragmentWriter: %v", err)
+		}
+		for _, au := range frames {
+			if err := f.WriteFrame(au); err != nil {
+				b.Fatalf("WriteFrame: %v", err)
+			}
+		}
+		if _, err := f.AppendSegment(dst[:0]); err != nil {
+			b.Fatalf("AppendSegment: %v", err)
+		}
+	}
+}
+
+// BenchmarkColdArenaOnlyGrown is BenchmarkColdArenaOnly with the arena pre-sized
+// by Grow. It shows the growth-chain churn collapse: the first segment allocates
+// its arena in one reservation instead of the make-and-copy chain.
+func BenchmarkColdArenaOnlyGrown(b *testing.B) {
+	frames := synthFrames(94)
+	total := segmentTotalBytes(frames)
+	dst := make([]byte, 0, 64*1024)
+	cfg := aacFragmentConfig()
+	b.ReportAllocs()
+	for b.Loop() {
+		f, err := NewFragmentWriter(cfg)
+		if err != nil {
+			b.Fatalf("NewFragmentWriter: %v", err)
+		}
+		f.Grow(len(frames), total)
+		for _, au := range frames {
+			if err := f.WriteFrame(au); err != nil {
+				b.Fatalf("WriteFrame: %v", err)
+			}
+		}
+		if _, err := f.AppendSegment(dst[:0]); err != nil {
+			b.Fatalf("AppendSegment: %v", err)
+		}
+	}
+}
