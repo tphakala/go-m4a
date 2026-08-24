@@ -280,7 +280,16 @@ duration automatically carries per-sample durations.
 
 The segments use 64-bit `tfdt` decode times, because a 32-bit one at 48 kHz wraps
 after about 24.8 hours of continuous streaming. `Reset` rebinds a writer to a new
-stream while keeping its buffers, for pooling across sessions.
+stream while keeping its buffers, for pooling across sessions; an arena grown to an
+outlier size by one pathological segment is released on `Reset` rather than pinning
+that peak for the life of the pool.
+
+Those buffers grow on the first segment. For a deployment that churns writers, or
+that wants the very first segment allocation-free too, `Grow(samples, bytes)`
+pre-reserves the arena for a segment of about `samples` access units totalling
+about `bytes` of payload. It is a capacity hint only: it never changes the bytes a
+segment emits, over-large values are clamped to the per-segment caps, and a wrong
+estimate costs a regrow rather than correctness.
 
 ## Gapless playback and the edit list
 

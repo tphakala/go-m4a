@@ -5,6 +5,7 @@ package m4a
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/tphakala/go-m4a/internal/box"
 )
@@ -37,6 +38,20 @@ const fragmentTrackID = 1
 const (
 	maxSamplesPerSegment = 1 << 20
 	maxSegmentBytes      = 64 << 20
+)
+
+// resetRetainBytes and resetRetainSamples bound what Reset keeps of the sample
+// arena. A normal segment (a ~34 KB, ~94-access-unit two-second AAC-LC segment) is
+// far below both, so a writer pooled across streams of the usual shape keeps its
+// capacity and still stops allocating after the first stream. A pathological
+// segment that grew the arena toward maxSegmentBytes is released on Reset instead
+// of pinning peak memory for the life of the pool; the next stream re-presizes via
+// Grow or grows normally. The bound applies only on Reset, never per segment, so
+// the steady-state path stays zero-alloc. Both are tunable relative to the segment
+// caps above.
+const (
+	resetRetainBytes   = 1 << 20 // 1 MiB
+	resetRetainSamples = 4096
 )
 
 // InitSegment builds the CMAF initialization segment for cfg: the ftyp box and a
@@ -128,7 +143,9 @@ func InitSegment(cfg WriterConfig) ([]byte, error) {
 //
 // Access units are buffered with WriteFrame or WriteFrameDuration and flushed as
 // one segment by AppendSegment. The buffers are reused across segments, so a
-// steady-state stream allocates nothing per segment once they have grown.
+// steady-state stream allocates nothing per segment once they have grown. Grow
+// pre-reserves those buffers so the very first segment need not pay the growth
+// chain either.
 //
 // A FragmentWriter is not safe for concurrent use. One live stream needs one
 // FragmentWriter, which is also what keeps the sequence number and decode time
@@ -175,6 +192,11 @@ func NewFragmentWriter(cfg WriterConfig) (*FragmentWriter, error) {
 // number 1, decode time 0, and no pending samples. The sample buffers keep their
 // capacity, so a writer pooled across streams stops allocating after the first.
 // Any samples buffered but not yet flushed are discarded.
+//
+// An arena grown past its retention bound (resetRetainBytes / resetRetainSamples)
+// by a pathological segment is released here rather than pinning that peak for the
+// life of a pool. A normal segment stays well under the bound and keeps its
+// capacity; a caller that knows the next stream's shape can call Grow after Reset.
 func (f *FragmentWriter) Reset(cfg WriterConfig) error {
 	if err := validateFragmentConfig(cfg); err != nil {
 		return err
@@ -183,7 +205,40 @@ func (f *FragmentWriter) Reset(cfg WriterConfig) error {
 	f.sequenceNumber = 1
 	f.baseDecodeTime = 0
 	f.discardPending()
+	if cap(f.samples) > resetRetainBytes {
+		f.samples = nil
+	}
+	if cap(f.sizes) > resetRetainSamples {
+		f.sizes = nil
+		f.durations = nil
+	}
 	return nil
+}
+
+// Grow pre-reserves capacity for one segment of about samples access units
+// totalling about bytes of payload, so the first segment (and the first after a
+// Reset that released the arena) does not pay the buffer growth chain. It is a
+// capacity hint only: it never changes the bytes any segment emits, and a wrong
+// estimate costs regrows, never correctness. samples sizes the size and duration
+// tables; bytes sizes the sample arena. Values above the per-segment caps are
+// clamped to them. A negative argument panics, as slices.Grow does.
+func (f *FragmentWriter) Grow(samples, bytes int) {
+	if samples < 0 || bytes < 0 {
+		panic("go-m4a: FragmentWriter.Grow: negative count")
+	}
+	samples = min(samples, maxSamplesPerSegment)
+	bytes = min(bytes, maxSegmentBytes)
+	// slices.Grow(s, n) guarantees room to append n more elements past len(s), so
+	// pass the shortfall against len, not against unused capacity: it subtracts the
+	// unused capacity itself. Subtracting it here too would double-count it and
+	// leave a pooled writer that kept some capacity short of the requested target.
+	if n := samples - len(f.sizes); n > 0 {
+		f.sizes = slices.Grow(f.sizes, n)
+		f.durations = slices.Grow(f.durations, n)
+	}
+	if n := bytes - len(f.samples); n > 0 {
+		f.samples = slices.Grow(f.samples, n)
+	}
 }
 
 // WriteFrame buffers one access unit using the codec's fixed per-sample duration,
