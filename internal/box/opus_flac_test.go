@@ -125,12 +125,12 @@ func TestOpusFlacSampleEntriesParse(t *testing.T) {
 	assertSampleEntry(t, flac, fourCCFlac, 1, 44100, fourCCDfla)
 }
 
-// TestFLACSampleEntryRateReduction pins the power-of-two reduction AppendFlacEntry
-// applies so a rate above the 16.16 field ceiling does not overflow it. The
-// standard high rates land on a real base rate, matching ffmpeg's MP4 muxer (and
-// the Xiph FLAC-in-ISOBMFF spec's greatest-regular-division result for these
-// rates); the true rate is carried by STREAMINFO and the container timescale, not
-// this legacy hint.
+// TestFLACSampleEntryRateReduction pins the reduction AppendFlacEntry applies so a
+// rate above the 16.16 field ceiling does not overflow it. The standard high rates
+// land on a real base rate by even halving (the Xiph FLAC-in-ISOBMFF
+// greatest-regular-division rule, which also matches ffmpeg for these rates); a
+// rate with no regular division within the field falls back to 65535. The true
+// rate is carried by STREAMINFO and the container timescale, not this legacy hint.
 func TestFLACSampleEntryRateReduction(t *testing.T) {
 	cases := []struct {
 		rate uint32
@@ -145,7 +145,11 @@ func TestFLACSampleEntryRateReduction(t *testing.T) {
 		{96000, 48000},
 		{176400, 44100},
 		{192000, 48000},
-		{1048575, 65535}, // the 20-bit STREAMINFO maximum halves down to the field ceiling
+		// Odd rates above the field have no regular division that fits, so they take
+		// the 65535 fallback rather than a truncated, nonconforming hint.
+		{65537, 65535},
+		{131071, 65535},
+		{1048575, 65535}, // the 20-bit STREAMINFO maximum
 	}
 	for _, tc := range cases {
 		if got := flacSampleEntryRate(tc.rate); got != tc.want {
