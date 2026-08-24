@@ -77,12 +77,19 @@ func TestWriteReadFLAC(t *testing.T) {
 	for i := range streamInfo {
 		streamInfo[i] = byte(0x10 + i)
 	}
+	// The reader now recovers a FLAC track's rate from STREAMINFO (bytes 10-12), so
+	// encode the real 44100/1 there. The remaining filler stays distinctive, which is
+	// what the CodecConfig round-trip check below verifies.
+	rate, channels := 44100, 1
+	streamInfo[10] = byte(rate >> 12)
+	streamInfo[11] = byte(rate >> 4)
+	streamInfo[12] = byte(rate<<4) | byte((channels-1)<<1)
 
 	var buf memWS
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec:      CodecFLAC,
-		SampleRate: 44100,
-		Channels:   1,
+		SampleRate: rate,
+		Channels:   channels,
 		STREAMINFO: streamInfo,
 	})
 	if err != nil {
@@ -215,7 +222,10 @@ func TestWriterCodecConfigValidation(t *testing.T) {
 		{"opus negative preskip", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: -1}},
 		{"opus preskip overflows u16", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 70000}},
 		{"opus input rate negative", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusInputSampleRate: -1}},
-		{"flac missing streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1}},
+		// An empty FLAC STREAMINFO is deliberately NOT a NewWriter error any more: it
+		// is the deferred form supplied later with SetSTREAMINFO (enforced at Close).
+		// TestFLACStreamInfoDeferral covers both the deferral and the Close-without-it
+		// failure. A wrong non-zero length is still rejected up front.
 		{"flac short streaminfo", WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: make([]byte, 20)}},
 		{"unknown codec", WriterConfig{Codec: Codec(99), SampleRate: 48000, Channels: 1}},
 	}

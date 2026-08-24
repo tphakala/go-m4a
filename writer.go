@@ -56,26 +56,33 @@ const samplesPerFrame = 1024
 // in the first five bits of an AudioSpecificConfig.
 const audioObjectTypeAACLC = 2
 
-// maxAudioSampleEntryRate is the largest sample rate the AudioSampleEntry
-// samplerate field can represent. It is a 16.16 fixed-point value, so the
-// integer rate must fit 16 bits; a higher rate would silently wrap when shifted
-// into the field.
+// flacStreamInfoLen is the exact size of a FLAC STREAMINFO metadata block, the
+// dfLa box payload. It is fixed by the format (RFC 9639 section 8.2), so both the
+// NewWriter config check and the SetSTREAMINFO setter require exactly this length.
+const flacStreamInfoLen = 34
+
+// maxAudioSampleEntryRate is the largest integer sample rate the AudioSampleEntry
+// samplerate field, a 16.16 fixed-point value, can hold: a higher rate would wrap
+// when shifted into the 16-bit integer part.
 //
-// It is the ceiling every codec shares, the positive-rate check at the top of
-// validateConfig being the matching floor, and both run before the per-codec
-// validation. So this is what rejects the two AAC table rates that do not fit
-// (88200 and 96000), rather than anything AAC-specific. What each codec accepts
-// between floor and ceiling differs: AAC-LC is restricted to the
-// sampling-frequency table, enforced by the ASC cross-check in validateAACConfig;
-// Opus is pinned to opusTimescale; FLAC has no rate table at all. See
-// TestAcceptedSampleRates, which pins all three.
-//
-// For FLAC this ceiling is the package's limit rather than the format's. The Xiph
-// encapsulation defines a fallback for higher rates, writing the greatest
-// expressible regular division (48000 for a 96 kHz stream) or 65535 when there is
-// none. This package rejects instead, which is consistent with its reader taking
-// the sample entry as authoritative; #4 tracks supporting the high rates.
+// It is not a ceiling every codec shares. Each codec's validator decides how to
+// treat a rate above it. AAC-LC rejects such rates (validateAACConfig), because
+// 88200 and 96000 are sampling-frequency-table rates that do not fit and AAC
+// carries no authoritative rate anywhere else, so a fallback would misreport the
+// track. Opus never approaches it, its rate being pinned to opusTimescale. FLAC
+// accepts rates up to maxFLACSampleRate: the fLaC sample entry then carries the
+// reduced power-of-two hint from flacSampleEntryRate, while the true rate rides in
+// the STREAMINFO block (which the reader reads back) and in the mdhd/mvhd
+// timescale. See TestAcceptedSampleRates, which pins all three.
 const maxAudioSampleEntryRate = 0xFFFF
+
+// maxFLACSampleRate is the largest sample rate a FLAC stream can declare. The
+// STREAMINFO sample-rate field is 20 bits (RFC 9639 section 8.2), so the format
+// caps a stream at 0xFFFFF = 1048575 Hz. validateFLACConfig accepts up to this;
+// rates above maxAudioSampleEntryRate cannot be held exactly by the sample entry,
+// so the fLaC entry carries a reduced hint and the reader recovers the true rate
+// from STREAMINFO.
+const maxFLACSampleRate = 0xFFFFF
 
 // maxFrames caps the number of access units per file so the moov sample tables
 // and their enclosing box sizes cannot overflow the 32-bit box size field. At
@@ -104,23 +111,22 @@ type WriterConfig struct {
 	// STREAMINFO.
 	Codec Codec
 
-	// SampleRate is the audio sample rate in Hz (for example 48000). Required, and
-	// bounded for every codec by what the sample entry can represent, so at most
-	// maxAudioSampleEntryRate (65535). Within that the accepted set is per codec:
-	// for AAC-LC it must be one of the eleven MPEG-4 sampling-frequency table
-	// rates that fit, 7350 to 64000, and must match the rate encoded in ASC; for
-	// Opus it must be 48000, the fixed Opus container timescale; for FLAC any
-	// positive rate is accepted, because FLAC has no rate table.
+	// SampleRate is the audio sample rate in Hz (for example 48000). Required and
+	// positive; the accepted range is per codec. For AAC-LC it must be one of the
+	// eleven MPEG-4 sampling-frequency table rates that fit the 16.16 sample-entry
+	// field, 7350 to 64000, and must match the rate encoded in ASC. For Opus it must
+	// be 48000, the fixed Opus container timescale. For FLAC any positive rate up to
+	// maxFLACSampleRate (the 20-bit STREAMINFO maximum, 1048575) is accepted, well
+	// past the 65535 the sample entry can hold: a higher rate is written as a reduced
+	// power-of-two hint in the sample entry, while the true rate rides in STREAMINFO
+	// and the media timescale.
 	//
-	// For FLAC it should also agree with the rate inside STREAMINFO. That is the
-	// encapsulation's requirement, not one this package enforces: NewWriter does
-	// not compare them and will not reject a mismatch. Keeping them in step is the
-	// caller's job, and it matters because the two fields are read by different
-	// consumers. This package's Reader reports the sample entry, while a
-	// conforming decoder takes the authoritative rate from STREAMINFO (Xiph,
-	// Encapsulation of FLAC in ISOBMFF, section 3.3.1), so a config where they
-	// disagree produces a file that go-m4a and ffmpeg read differently, with no
-	// error from either.
+	// For FLAC, SampleRate should agree with the rate inside STREAMINFO. NewWriter
+	// does not compare them, so keeping them in step is the caller's job; the value
+	// that matters on read is STREAMINFO's, which this package's Reader and a
+	// conforming decoder both take as authoritative (Xiph, Encapsulation of FLAC in
+	// ISOBMFF). A config where they disagree produces a file whose reported rate
+	// comes from STREAMINFO, not from this field.
 	SampleRate int
 
 	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
@@ -143,8 +149,12 @@ type WriterConfig struct {
 	OpusInputSampleRate int
 
 	// STREAMINFO is the 34-byte FLAC STREAMINFO metadata block, the payload of the
-	// dfLa box (from go-flac's pcm.FrameEncoder.StreamInfoBytes). Required for
-	// CodecFLAC; ignored otherwise.
+	// dfLa box (from go-flac's pcm.FrameEncoder.StreamInfoBytes). Used only for
+	// CodecFLAC; ignored otherwise. It may be left empty here and supplied later
+	// with Writer.SetSTREAMINFO, before Close, which is what lets an encoder stream
+	// frames first and provide the finalized block (with its measured frame sizes
+	// and MD5) at the end. Whether given here or later, a CodecFLAC track must have
+	// a 34-byte block by Close, which errors otherwise.
 	STREAMINFO []byte
 
 	// EncoderDelay is the number of leading priming samples to trim with an edit
@@ -374,6 +384,36 @@ func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 	return nil
 }
 
+// SetSTREAMINFO supplies the 34-byte FLAC STREAMINFO metadata block that the dfLa
+// box carries, for a CodecFLAC writer created with an empty WriterConfig.STREAMINFO.
+// It exists because go-flac's StreamInfoBytes is only final after the whole encode
+// (it records the measured min/max frame sizes and MD5), while the dfLa box is not
+// built until Close: a caller can stream every frame first, then set STREAMINFO
+// just before Close, avoiding buffering the clip. Calling it again overwrites the
+// block, and calling it on a writer that was given STREAMINFO at NewWriter simply
+// replaces that value.
+//
+// It copies the bytes, so a later mutation of streamInfo by the caller cannot
+// change the box. It returns an error if the writer is not FLAC, if streamInfo is
+// not exactly flacStreamInfoLen bytes, or if the writer is already closed
+// (ErrClosed), the last so a block set after finalize cannot be silently ignored.
+func (w *Writer) SetSTREAMINFO(streamInfo []byte) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if w.closed {
+		return ErrClosed
+	}
+	if w.codec != CodecFLAC {
+		return fmt.Errorf("go-m4a: SetSTREAMINFO: writer codec is %s, not FLAC", w.codec)
+	}
+	if len(streamInfo) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: SetSTREAMINFO: STREAMINFO is %d bytes, want %d", len(streamInfo), flacStreamInfoLen)
+	}
+	w.streamInfo = append([]byte(nil), streamInfo...)
+	return nil
+}
+
 // Close finalizes the file: it patches the streamed mdat largesize, seeks past
 // the payload, and writes the moov metadata (mvhd, trak with tkhd, optional
 // edts/elst, and mdia down to the sample tables). It reports an error if no
@@ -395,6 +435,14 @@ func (w *Writer) Close() error {
 	w.closed = true
 	if len(w.sizes) == 0 {
 		return fmt.Errorf("go-m4a: Close: no frames written")
+	}
+	// A FLAC track must carry a STREAMINFO block by finalize: it was either given
+	// at NewWriter or supplied later with SetSTREAMINFO. Enforce the exact length
+	// here rather than trusting the setter alone, so a writer created with an empty
+	// STREAMINFO that never got SetSTREAMINFO fails with a clear error instead of
+	// building a dfLa box around a zero-length block.
+	if w.codec == CodecFLAC && len(w.streamInfo) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: Close: FLAC track has no STREAMINFO; call SetSTREAMINFO before Close")
 	}
 
 	// Overwrite the 8-byte mdat largesize in place: header size + payload.
@@ -630,12 +678,10 @@ func validateConfig(cfg WriterConfig) error {
 	if cfg.SampleRate <= 0 {
 		return fmt.Errorf("go-m4a: sample rate %d Hz is not positive", cfg.SampleRate)
 	}
-	if cfg.SampleRate > maxAudioSampleEntryRate {
-		// The AudioSampleEntry samplerate is a 16.16 field, so a rate above 65535 Hz
-		// cannot be represented and would be written wrong. 88200 and 96000 Hz are
-		// the affected AAC rates; reject rather than corrupt.
-		return fmt.Errorf("go-m4a: sample rate %d Hz exceeds the samplerate field maximum of %d Hz", cfg.SampleRate, maxAudioSampleEntryRate)
-	}
+	// The 16.16 sample-entry ceiling is no longer checked here: it is not shared by
+	// every codec. AAC rejects a rate above it, FLAC accepts higher rates and writes
+	// a reduced sample-entry hint, and Opus is pinned below it. Each per-codec
+	// validator applies the rule that fits its rate model.
 
 	switch cfg.Codec {
 	case CodecAACLC:
@@ -654,6 +700,15 @@ func validateConfig(cfg WriterConfig) error {
 func validateAACConfig(cfg WriterConfig) error {
 	if len(cfg.ASC) < 2 {
 		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
+	}
+	if cfg.SampleRate > maxAudioSampleEntryRate {
+		// 88200 and 96000 are AAC-LC sampling-frequency-table rates, but they do not
+		// fit the 16.16 sample-entry samplerate field, and AAC carries no
+		// authoritative rate elsewhere (unlike FLAC's STREAMINFO), so writing the
+		// reduced fallback would silently misreport the track. Reject rather than
+		// corrupt. This is checked before the table lookup so the message names the
+		// real problem.
+		return fmt.Errorf("go-m4a: sample rate %d Hz exceeds the samplerate field maximum of %d Hz", cfg.SampleRate, maxAudioSampleEntryRate)
 	}
 	// This guard cannot change which configs are accepted: an off-table rate can
 	// never match the ASC either, because the rate the ASC agrees with is read out
@@ -699,12 +754,23 @@ func validateOpusConfig(cfg WriterConfig) error {
 	return nil
 }
 
-// validateFLACConfig checks that the STREAMINFO metadata block is present and the
-// expected 34 bytes.
+// validateFLACConfig checks the STREAMINFO metadata block. It accepts either the
+// full 34 bytes supplied up front, or an empty slice, which defers the block to a
+// later Writer.SetSTREAMINFO call. Deferral exists because go-flac's
+// StreamInfoBytes is only final after the whole encode (it carries the measured
+// min/max frame sizes and MD5), while the dfLa box is not built until Close; the
+// flacm4a bridge relies on it to stream frames without buffering the clip. Any
+// other length is rejected. Close enforces that a non-empty block is present by
+// the time the file is finalized (flacStreamInfoLen bytes), so an empty config
+// that never gets SetSTREAMINFO fails there rather than writing a malformed dfLa.
 func validateFLACConfig(cfg WriterConfig) error {
-	const streamInfoLen = 34
-	if len(cfg.STREAMINFO) != streamInfoLen {
-		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d", len(cfg.STREAMINFO), streamInfoLen)
+	if cfg.SampleRate > maxFLACSampleRate {
+		// FLAC's STREAMINFO sample-rate field is 20 bits, so the format cannot even
+		// declare a higher rate. Reject rather than write a truncated STREAMINFO.
+		return fmt.Errorf("go-m4a: FLAC sample rate %d Hz exceeds the maximum of %d Hz", cfg.SampleRate, maxFLACSampleRate)
+	}
+	if len(cfg.STREAMINFO) != 0 && len(cfg.STREAMINFO) != flacStreamInfoLen {
+		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d or 0 (set later via SetSTREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
 	}
 	return nil
 }
