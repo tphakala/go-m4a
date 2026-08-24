@@ -29,11 +29,13 @@ import (
 // container timescale, and the rate this bridge encodes and decodes at.
 const opusRate = 48000
 
-// frameSamplesPerChannel is a 20 ms frame at 48 kHz: the frame size
-// EncodeInterleaved writes, which is also the standard Opus-in-MP4
-// packetization, and the per-packet estimate pcmReservation assumes on decode. A
-// foreign file may use any Opus frame size from 2.5 to 120 ms, so on the decode
-// side this is a guess rather than a fact.
+// frameSamplesPerChannel is a 20 ms frame at 48 kHz, the per-packet estimate
+// pcmReservation assumes on decode. A decode always runs at 48 kHz (go-opus
+// decodes any Opus stream to that rate), so this stays fixed at the 48 kHz frame
+// even though EncodeInterleaved now frames the encoder input at the source rate
+// (cfg.SampleRate/50) for a non-48 kHz input. A foreign file may use any Opus
+// frame size from 2.5 to 120 ms, so on the decode side this is a guess rather
+// than a fact.
 const frameSamplesPerChannel = opusRate / 50 // 960
 
 // maxSamplesPerChannel is the most one packet can decode to: RFC 6716 section
@@ -54,9 +56,11 @@ const maxOpusChannels = 2
 // reservation here is derived from a file's own description, so it needs a bound
 // that does not scale with what the file claims.
 
-// Config configures Opus encoding. SampleRate must be 48000 (the Opus container
-// rate); Channels is 1 or 2; Bitrate is the target bits per second (0 selects the
-// go-opus automatic rate).
+// Config configures Opus encoding. SampleRate is the input rate in Hz and must be
+// one of the Opus source rates 8000, 12000, 16000, 24000 or 48000; the container
+// timescale is fixed at 48000 regardless, and the source rate is recorded in the
+// dOps InputSampleRate field. Channels is 1 or 2; Bitrate is the target bits per
+// second (0 selects the go-opus automatic rate).
 type Config struct {
 	SampleRate int
 	Channels   int
@@ -69,8 +73,13 @@ type Config struct {
 // the encoder pre-skip and the trailing padding so a compliant player presents
 // exactly the original audio.
 func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
-	if cfg.SampleRate != opusRate {
-		return fmt.Errorf("go-m4a/opusm4a: SampleRate %d unsupported, want %d", cfg.SampleRate, opusRate)
+	// Opus accepts these five input rates; go-opus rejects anything else. The
+	// container timescale stays 48 kHz regardless (set below), so the input rate
+	// affects only the encoder framing and the dOps InputSampleRate field.
+	switch cfg.SampleRate {
+	case 8000, 12000, 16000, 24000, 48000:
+	default:
+		return fmt.Errorf("go-m4a/opusm4a: SampleRate %d unsupported, want one of 8000, 12000, 16000, 24000, 48000", cfg.SampleRate)
 	}
 	if cfg.Channels < 1 || cfg.Channels > 2 {
 		return fmt.Errorf("go-m4a/opusm4a: channels %d out of range, want 1 or 2", cfg.Channels)
@@ -92,32 +101,44 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 	preSkip := enc.PreSkip()
 
 	wr, err := m4a.NewWriter(w, m4a.WriterConfig{
-		Codec:               m4a.CodecOpus,
-		SampleRate:          opusRate,
-		Channels:            cfg.Channels,
-		OpusPreSkip:         preSkip,
-		OpusInputSampleRate: opusRate,
-		MediaLength:         int64(samplesPerChannel),
+		Codec:       m4a.CodecOpus,
+		SampleRate:  opusRate, // the container timescale is fixed at 48 kHz
+		Channels:    cfg.Channels,
+		OpusPreSkip: preSkip, // 48 kHz-domain pre-skip (312), for the dOps box and edit list
+		// Record the true source rate in dOps InputSampleRate (informational; Opus
+		// still decodes at 48 kHz).
+		OpusInputSampleRate: cfg.SampleRate,
+		// MediaLength is the presented length in the 48 kHz media timescale, so scale
+		// the source-rate sample count up. 48000 is an exact multiple of every accepted
+		// input rate, so the division is exact; grouping it as (48000 / sourceRate)
+		// makes that truncation-free by construction.
+		MediaLength: int64(samplesPerChannel) * (opusRate / int64(cfg.SampleRate)),
 	})
 	if err != nil {
 		return err
 	}
 
-	// The encoder has a preSkip-sample algorithmic delay, so the last preSkip
-	// content samples only emerge after that many more input samples. Encode
-	// samplesPerChannel+preSkip samples (zero-padding past the input) so every
-	// content sample is flushed out; the edit list trims the leading pre-skip and
-	// the trailing padding.
-	total := samplesPerChannel + preSkip
-	frameLen := frameSamplesPerChannel * cfg.Channels // int16 values per frame
+	// The encoder has an algorithmic delay, so the last content samples only emerge
+	// after that many more input samples are pushed in. That delay is Lookahead in
+	// SOURCE samples (PreSkip is the same delay expressed in the 48 kHz domain, 312),
+	// so flush samplesPerChannel+Lookahead source samples (zero-padding past the
+	// input) to push every content sample out; the edit list trims the leading
+	// pre-skip and the trailing padding.
+	total := samplesPerChannel + enc.Lookahead()
+	// Frame the encoder input at the source rate: a 20 ms frame is sourceRate/50
+	// samples per channel (960 at 48 kHz, 480 at 24 kHz, and so on), each a legal
+	// Opus frame duration. The container packet durations stay 48 kHz-domain because
+	// opus.PacketDuration reports them there.
+	frameSamples := cfg.SampleRate / 50
+	frameLen := frameSamples * cfg.Channels // int16 values per frame
 	frame := make([]int16, frameLen)
 	pkt := make([]byte, 1276) // holds any single VBR Opus packet
-	for off := 0; off < total; off += frameSamplesPerChannel {
+	for off := 0; off < total; off += frameSamples {
 		// Fill this frame's interleaved samples into the reused int16 buffer. A full
 		// 20 ms frame (the common case) overwrites the whole buffer, so only a short
 		// final frame and the trailing flush frames need the tail zeroed for padding.
 		remaining := max(samplesPerChannel-off, 0)
-		n := min(frameSamplesPerChannel, remaining) * cfg.Channels
+		n := min(frameSamples, remaining) * cfg.Channels
 		base := off * stride
 		for i := 0; i < n; i++ {
 			frame[i] = int16(binary.LittleEndian.Uint16(pcm[base+2*i:]))
