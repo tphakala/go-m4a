@@ -280,7 +280,10 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *flacpcm.FrameDecoder, m4a.Info, 
 	}
 	fd, err := flacpcm.NewFrameDecoder(info.CodecConfig)
 	if err != nil {
-		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: new frame decoder: %w", err)
+		// NewReader accepted the container, but its STREAMINFO does not build a
+		// decoder: corrupt from the bridge's point of view. Wrap ErrCorrupt so the
+		// decode path carries the same typed contract as the demuxer's rejections.
+		return nil, nil, info, fmt.Errorf("go-m4a/flacm4a: new frame decoder: %w: %w", err, m4a.ErrCorrupt)
 	}
 	return rd, fd, info, nil
 }
@@ -313,7 +316,9 @@ func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) 
 		}
 		pcm, _, err := fd.DecodeInterleaved(au[:n])
 		if err != nil {
-			return fmt.Errorf("go-m4a/flacm4a: decode frame: %w", err)
+			// The container framed this access unit but its FLAC payload will not
+			// decode: corrupt input. Wrap ErrCorrupt to match the demuxer's contract.
+			return fmt.Errorf("go-m4a/flacm4a: decode frame: %w: %w", err, m4a.ErrCorrupt)
 		}
 		if err := fn(pcm); err != nil {
 			return err

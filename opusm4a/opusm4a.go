@@ -267,7 +267,10 @@ func openStream(r io.ReadSeeker) (*m4a.Reader, *opus.Decoder, m4a.Info, error) {
 	}
 	dec, err := opus.NewDecoder(opusRate, info.Channels)
 	if err != nil {
-		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: new decoder: %w", err)
+		// The rate is constant and the channel count was validated just above, so
+		// this is practically unreachable from container input; wrap ErrCorrupt
+		// anyway so every bridge decode error carries the demuxer's typed contract.
+		return nil, nil, info, fmt.Errorf("go-m4a/opusm4a: new decoder: %w: %w", err, m4a.ErrCorrupt)
 	}
 	return rd, dec, info, nil
 }
@@ -303,7 +306,9 @@ func forEachPacket(rd *m4a.Reader, dec *opus.Decoder, channels int, fn func(pcm 
 		}
 		got, err := dec.Decode(au[:n], samples)
 		if err != nil {
-			return fmt.Errorf("go-m4a/opusm4a: decode packet: %w", err)
+			// The container framed this access unit but its Opus payload will not
+			// decode: corrupt input. Wrap ErrCorrupt to match the demuxer's contract.
+			return fmt.Errorf("go-m4a/opusm4a: decode packet: %w: %w", err, m4a.ErrCorrupt)
 		}
 		// Defensive: the decoder cannot return more than the buffer it was given, so
 		// this never fires today. It costs one comparison per packet and turns a
@@ -311,7 +316,10 @@ func forEachPacket(rd *m4a.Reader, dec *opus.Decoder, channels int, fn func(pcm 
 		// rather than as got*channels, which would overflow int for a large enough
 		// got and let exactly the panic this guards against through.
 		if got < 0 || got > maxSamplesPerChannel {
-			return fmt.Errorf("go-m4a/opusm4a: decoder returned %d samples per channel, more than the %d it was given room for", got, maxSamplesPerChannel)
+			// Unreachable today (the decoder cannot exceed the buffer it was handed),
+			// but wrap ErrCorrupt so every decode-path error honors the same typed
+			// contract as the frame/packet decode failures above.
+			return fmt.Errorf("go-m4a/opusm4a: decoder returned %d samples per channel, more than the %d it was given room for: %w", got, maxSamplesPerChannel, m4a.ErrCorrupt)
 		}
 		for i := range got * channels {
 			binary.LittleEndian.PutUint16(pcm[2*i:], uint16(samples[i]))

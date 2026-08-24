@@ -13,6 +13,12 @@ var (
 	// ErrCorrupt indicates a malformed container: a truncated box, a size field
 	// that overflows the stream, a missing required box (moov, stbl, esds), or
 	// an inconsistent sample table.
+	//
+	// The codec bridges also return it for a well-formed container whose codec
+	// payload will not decode: a STREAMINFO or dOps that does not build a decoder,
+	// or a FLAC frame / Opus packet the codec rejects. Such a file parsed as a
+	// container but is corrupt at the codec layer, so the bridges give it the same
+	// typed verdict as the demuxer's own rejections.
 	ErrCorrupt = errors.New("go-m4a: corrupt container")
 
 	// ErrUnsupported indicates a well-formed MP4 that falls outside the reader's
