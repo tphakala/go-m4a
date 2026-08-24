@@ -363,9 +363,39 @@ func AppendDfla(dst, streamInfo []byte) []byte {
 	return append(dst, streamInfo...)
 }
 
-// AppendFlacEntry appends the fLaC AudioSampleEntry with its dfLa child.
+// maxSampleEntryRate is the largest integer the 16.16 AudioSampleEntry samplerate
+// field can hold (its integer part is 16 bits). A higher rate must be reduced
+// before it is shifted in, or it would wrap.
+const maxSampleEntryRate = 0xFFFF
+
+// AppendFlacEntry appends the fLaC AudioSampleEntry with its dfLa child. sampleRate
+// is the true FLAC rate; a rate above maxSampleEntryRate is reduced with
+// flacSampleEntryRate so the 16.16 samplerate field does not overflow. That field
+// is only a legacy hint: the authoritative rate is the 20-bit value in the dfLa
+// STREAMINFO, and the container timescale carries the true rate too, so the
+// reduction loses nothing a conforming reader relies on.
 func AppendFlacEntry(dst []byte, channels uint16, sampleRate uint32, dfla []byte) []byte {
-	return appendAudioSampleEntry(dst, fourCCFlac, channels, sampleRate, dfla)
+	return appendAudioSampleEntry(dst, fourCCFlac, channels, flacSampleEntryRate(sampleRate), dfla)
+}
+
+// flacSampleEntryRate reduces a FLAC sample rate to one the 16.16 sample-entry
+// samplerate field can hold. The Xiph "Encapsulation of FLAC in ISOBMFF" spec
+// fills the field with the greatest expressible regular division of the rate, so
+// halve it while it divides evenly: 96000 and 192000 reduce to 48000, 88200 and
+// 176400 to 44100 (which is also what ffmpeg's MP4 muxer emits for these rates).
+// When no regular division brings the rate within the field, an odd rate above the
+// limit such as 65537, the spec mandates the 65535 fallback rather than a
+// truncated, nonconforming value. A rate that already fits is returned unchanged.
+// The field is only a hint; a conforming reader takes the true rate from STREAMINFO
+// regardless.
+func flacSampleEntryRate(rate uint32) uint32 {
+	for rate > maxSampleEntryRate && rate%2 == 0 {
+		rate /= 2
+	}
+	if rate > maxSampleEntryRate {
+		return maxSampleEntryRate
+	}
+	return rate
 }
 
 // AppendStsdEntry appends the stsd (sample description) FullBox holding one

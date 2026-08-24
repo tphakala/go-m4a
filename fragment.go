@@ -402,6 +402,15 @@ func validateFragmentConfig(cfg WriterConfig) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
+	if cfg.Codec == CodecFLAC && len(cfg.STREAMINFO) != flacStreamInfoLen {
+		// The non-fragmented Writer accepts an empty STREAMINFO and lets the encoder
+		// supply the finalized block at Close via SetSTREAMINFO. The fragmented path
+		// cannot: it writes the dfLa box into the init segment up front, and there is
+		// no Close nor a SetSTREAMINFO equivalent, so the full block must be present
+		// now. Reject an empty (deferred) block here rather than emit a dfLa around a
+		// zero-length STREAMINFO.
+		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d (fragmented output cannot defer STREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
+	}
 	if cfg.MediaLength != 0 {
 		// MediaLength pins the non-fragmented edit list to an exact source length,
 		// which a live stream of unknown duration has no equivalent of. Reject it

@@ -297,6 +297,24 @@ func ParseDfla(payload []byte) (streamInfo []byte, err error) {
 	return body[:length], nil
 }
 
+// STREAMINFOSampleRate reads the 20-bit sample rate from a FLAC STREAMINFO
+// metadata block body, per RFC 9639 section 8.2. That field, not the enclosing
+// AudioSampleEntry samplerate, is the authoritative rate for a FLAC-in-MP4 track:
+// the sample entry's 16.16 field can only hold rates up to 65535 Hz, so a muxer
+// reduces a higher rate to a hint there while STREAMINFO keeps the true value (up
+// to 1048575 Hz). It returns 0 when si is too short to hold the field, or when the
+// encoded rate is 0 (which STREAMINFO uses for "unknown"), so a caller can fall
+// back to the sample entry.
+//
+// Layout up to the rate: 16 bits min block size, 16 max, 24 min frame size, 24
+// max (80 bits total), then the 20-bit sample rate. It starts at bit 80, byte 10.
+func STREAMINFOSampleRate(si []byte) uint32 {
+	if len(si) < 13 {
+		return 0
+	}
+	return uint32(si[10])<<12 | uint32(si[11])<<4 | uint32(si[12])>>4
+}
+
 // streamInfoBodyLen is the fixed byte length of a FLAC STREAMINFO metadata block
 // body, the payload a dfLa box carries.
 const streamInfoBodyLen = 34

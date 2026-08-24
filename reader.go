@@ -724,9 +724,13 @@ func (rd *Reader) validateOffsets() error {
 	return nil
 }
 
-// resolveFormat prefers the ASC-derived sample rate and channel count, falling
-// back to the mp4a AudioSampleEntry fields when the ASC does not carry them (an
-// explicit-rate index or a zero channel configuration).
+// resolveFormat resolves the track's sample rate and channel count, per codec. For
+// AAC-LC it prefers the ASC-derived values, falling back to the mp4a
+// AudioSampleEntry fields when the ASC does not carry them (an explicit-rate index
+// or a zero channel configuration). For Opus the encapsulation fixes the rate at 48
+// kHz. For FLAC it takes the authoritative rate from the dfLa STREAMINFO, since the
+// sample entry holds only a reduced hint for rates above 65535 Hz, and falls back
+// to the sample entry when STREAMINFO is absent or declares 0.
 func resolveFormat(tr *track) (sampleRate, channels int) {
 	sampleRate = int(tr.seSampleRate)
 	channels = int(tr.seChannels)
@@ -746,8 +750,17 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		// malformed file's samplerate field. The dOps OutputChannelCount already
 		// set tr.seChannels.
 		sampleRate = opusTimescale
+	case tr.codec == fourccFlac:
+		// FLAC has no ASC, and its AudioSampleEntry samplerate is only a reduced hint
+		// for rates above 65535 Hz: a muxer (this package included) halves such a rate
+		// to fit the 16.16 field. The authoritative rate is the 20-bit value in the
+		// dfLa STREAMINFO, so prefer it and fall back to the sample entry only when the
+		// block is absent or declares 0 (unknown). The channel count stays from the
+		// sample entry.
+		if r := box.STREAMINFOSampleRate(tr.codecConfig); r > 0 {
+			sampleRate = int(r)
+		}
 	}
-	// FLAC has no ASC: the sample entry samplerate and channel count are authoritative.
 	return sampleRate, channels
 }
 

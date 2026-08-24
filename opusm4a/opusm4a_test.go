@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"testing"
+	"time"
 
 	m4a "github.com/tphakala/go-m4a"
 )
@@ -127,5 +128,86 @@ func TestOpusRoundTrip(t *testing.T) {
 			}
 			t.Logf("ch=%d: input RMS %.0f, decoded RMS %.0f, %d frames", channels, inRMS, outRMS, info.FrameCount)
 		})
+	}
+}
+
+// genSineAt is genSine at an explicit source rate, so the tone stays a real 440 Hz
+// sine at input rates other than 48 kHz.
+func genSineAt(samplesPerCh, channels, rate int) []byte {
+	out := make([]byte, 0, samplesPerCh*channels*2)
+	for i := 0; i < samplesPerCh; i++ {
+		v := int16(math.Round(18000 * math.Sin(2*math.Pi*440*float64(i)/float64(rate))))
+		for c := 0; c < channels; c++ {
+			out = binary.LittleEndian.AppendUint16(out, uint16(v))
+		}
+	}
+	return out
+}
+
+// TestOpusRoundTripInputRates covers Opus source rates other than 48 kHz (issue
+// #3). The container timescale stays 48 kHz, the edit list keeps its 312-sample
+// pre-skip, the dOps InputSampleRate records the true source rate, and MediaLength
+// (the presented duration) is scaled into the 48 kHz domain. Decode always runs at
+// 48 kHz, so parity is checked on signal energy rather than byte length.
+func TestOpusRoundTripInputRates(t *testing.T) {
+	for _, rate := range []int{8000, 12000, 16000, 24000, 48000} {
+		t.Run(fmt.Sprintf("%dHz", rate), func(t *testing.T) {
+			const channels = 1
+			samplesPerCh := rate / 2 // 0.5 s at the source rate
+			pcm := genSineAt(samplesPerCh, channels, rate)
+
+			var buf memWS
+			if err := EncodeInterleaved(&buf, Config{SampleRate: rate, Channels: channels, Bitrate: 96000}, pcm); err != nil {
+				t.Fatalf("EncodeInterleaved: %v", err)
+			}
+			got, info, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+			if err != nil {
+				t.Fatalf("DecodeInterleaved: %v", err)
+			}
+			// The container timescale is fixed at 48 kHz regardless of input rate.
+			if info.SampleRate != 48000 {
+				t.Errorf("SampleRate = %d, want 48000 (the Opus container rate)", info.SampleRate)
+			}
+			if info.EncoderDelay != 312 {
+				t.Errorf("EncoderDelay = %d, want 312", info.EncoderDelay)
+			}
+			// dOps InputSampleRate carries the true source rate (bytes 4..8 of the body).
+			if len(info.CodecConfig) < 8 {
+				t.Fatalf("dOps body is %d bytes, too short to hold InputSampleRate", len(info.CodecConfig))
+			}
+			if isr := binary.BigEndian.Uint32(info.CodecConfig[4:8]); isr != uint32(rate) {
+				t.Errorf("dOps InputSampleRate = %d, want the source rate %d", isr, rate)
+			}
+			// The presented duration is the source length. In the 48 kHz timescale that
+			// is samplesPerCh*48000/rate ticks; samplesPerCh is rate/2, so it is 24000
+			// ticks (0.5 s) at every accepted rate.
+			wantDur := time.Duration(samplesPerCh) * time.Second / time.Duration(rate)
+			if diff := info.Duration - wantDur; diff < -time.Millisecond || diff > time.Millisecond {
+				t.Errorf("Duration = %v, want ~%v (source length presented)", info.Duration, wantDur)
+			}
+
+			// Energy parity: trim the 48 kHz pre-skip, then compare RMS. A tone's
+			// amplitude is rate-independent, so the source-rate input and the 48 kHz
+			// decode carry the same energy even though their lengths differ.
+			skip := int(info.EncoderDelay) * channels * 2
+			if skip > len(got) {
+				t.Fatalf("decoded %d bytes, fewer than the %d-byte pre-skip", len(got), skip)
+			}
+			content := got[skip:]
+			inRMS, outRMS := rms(pcm), rms(content)
+			if outRMS < 0.5*inRMS || outRMS > 1.5*inRMS {
+				t.Errorf("decoded RMS %.0f not within 50%% of input RMS %.0f", outRMS, inRMS)
+			}
+			t.Logf("%dHz ch=%d: input RMS %.0f, decoded RMS %.0f, %d frames, dur %v", rate, channels, inRMS, outRMS, info.FrameCount, info.Duration)
+		})
+	}
+}
+
+// TestOpusRejectsUnsupportedInputRate pins that a rate outside the five Opus source
+// rates is rejected rather than silently mis-framed.
+func TestOpusRejectsUnsupportedInputRate(t *testing.T) {
+	var buf memWS
+	if err := EncodeInterleaved(&buf, Config{SampleRate: 44100, Channels: 1}, genSineAt(4410, 1, 44100)); err == nil {
+		t.Fatal("EncodeInterleaved accepted 44100 Hz, want a rejection")
 	}
 }

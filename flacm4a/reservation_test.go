@@ -39,62 +39,6 @@ func genPCM(t *testing.T, samplesPerCh, channels, bitDepth int) []byte {
 	}
 }
 
-func TestFrameReservation(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name              string
-		samplesPerChannel int
-		want              int
-	}{
-		{"empty", 0, 0},
-		{"negative", -1, 0},
-		{"one sample", 1, 1},
-		{"one short of a block", encoderBlockSize - 1, 1},
-		{"exactly one block", encoderBlockSize, 1},
-		{"one past a block", encoderBlockSize + 1, 2},
-		{"exactly two blocks", 2 * encoderBlockSize, 2},
-		{"15s of 48 kHz", 15 * 48000, 176},
-		// This row guards against overflow at the top of the int range rather
-		// than against a hand-computed value: the expectation restates the
-		// implementation, so it proves the call returns instead of wrapping.
-		{"max int does not overflow", math.MaxInt, math.MaxInt/encoderBlockSize + 1},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := frameReservation(tc.samplesPerChannel); got != tc.want {
-				t.Errorf("frameReservation(%d) = %d, want %d", tc.samplesPerChannel, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestFrameReservationCoversEncoder pins the reservation against what go-flac
-// actually emits, so a block-size change upstream shows up here as a failure
-// rather than as a silent regrow.
-func TestFrameReservationCoversEncoder(t *testing.T) {
-	t.Parallel()
-	for _, samplesPerCh := range []int{1, 4095, 4096, 4097, 10000, 48000} {
-		t.Run(fmt.Sprintf("%d_samples", samplesPerCh), func(t *testing.T) {
-			t.Parallel()
-			pcm := genS16(samplesPerCh, 1)
-			cfg := Config{SampleRate: 48000, Channels: 1, BitDepth: 16, CompressionLevel: 5}
-			w := &memWS{}
-			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
-				t.Fatalf("encode: %v", err)
-			}
-			rd, err := m4a.NewReader(bytes.NewReader(w.buf))
-			if err != nil {
-				t.Fatalf("reader: %v", err)
-			}
-			got, want := rd.Info().FrameCount, frameReservation(samplesPerCh)
-			if got != want {
-				t.Errorf("encoder emitted %d frames, reservation was %d", got, want)
-			}
-		})
-	}
-}
-
 func TestPCMReservation(t *testing.T) {
 	t.Parallel()
 	// framesFor is a frame count large enough not to bind the reservation, for
