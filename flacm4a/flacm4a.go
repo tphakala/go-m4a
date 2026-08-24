@@ -98,19 +98,34 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 
 	// Encode all frames up front so StreamInfoBytes carries the measured min/max
 	// frame sizes and MD5 before the dfLa box is built at Close.
+	//
+	// Frame bytes accumulate in one arena rather than a bytes.Clone per frame.
+	// go-flac reuses the buffer it hands the callback, so each frame still has to be
+	// copied out, but copying into a single growing arena and storing (offset,
+	// length) records collapses what was one allocation per frame (176 for a 15s
+	// clip, the dominant share of this path's allocations) into one amortized
+	// buffer. The records are resliced against the finished arena only in the flush
+	// loop below, after every append, so no sub-slice outlives a growth realloc.
 	type frame struct {
-		data      []byte
+		offset    int
+		length    int
 		blockSize int
 	}
 	// Reserve the frame slice up front rather than growing it from nil and copying
 	// every intermediate, the same chain #8 removed from aacm4a. The count is
 	// predictable because samplesPerChannel is already known and go-flac emits
 	// fixed-size blocks. This is only a capacity hint: a wrong count costs regrows,
-	// never correctness. It is also the smaller of the two allocations in this
-	// loop; the bytes.Clone per frame below dominates, and is left alone here.
+	// never correctness.
 	frames := make([]frame, 0, frameReservation(samplesPerChannel))
+	// Pre-size the arena from the PCM length. FLAC output is smaller than its PCM
+	// input for real audio, so len(pcm) is an upper bound that avoids regrows on the
+	// honest path; an incompressible input costs a regrow, never correctness.
+	// len(pcm) is an existing slice length, so the reservation cannot overflow.
+	arena := make([]byte, 0, len(pcm))
 	err = fe.EncodeInterleaved(pcm, func(fr []byte, blockSize int) error {
-		frames = append(frames, frame{data: bytes.Clone(fr), blockSize: blockSize})
+		off := len(arena)
+		arena = append(arena, fr...)
+		frames = append(frames, frame{offset: off, length: len(fr), blockSize: blockSize})
 		return nil
 	})
 	if err != nil {
@@ -130,7 +145,7 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 		return err
 	}
 	for _, f := range frames {
-		if err := wr.WriteFrameDuration(f.data, uint32(f.blockSize)); err != nil {
+		if err := wr.WriteFrameDuration(arena[f.offset:f.offset+f.length], uint32(f.blockSize)); err != nil {
 			return err
 		}
 	}

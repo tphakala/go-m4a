@@ -79,6 +79,43 @@ func BenchmarkDecodeInterleaved(b *testing.B) {
 	}
 }
 
+// encodeAllocCeiling bounds the encode path's allocations for the 15-second clip.
+// Reslicing every frame out of one pre-sized arena, rather than a bytes.Clone per
+// frame, holds this clip at ~104 allocations; the removed clones were ~175 of the
+// old ~279 (one per frame, plus fixed pipeline cost from the encoder, the writer's
+// sample tables, and StreamInfoBytes). The ceiling sits above the arena figure
+// with headroom for minor pipeline drift, and well below the clone total, so a
+// revert to per-frame cloning trips it.
+const encodeAllocCeiling = 150
+
+// TestEncodeInterleavedAllocations is the regression guard for that arena (#20:
+// the repo keeps allocation-count tests so a growth-chain regression cannot slip
+// back in invisibly). The sink is hoisted and reset the same way
+// BenchmarkEncodeInterleaved does, so its own growth is not counted.
+func TestEncodeInterleavedAllocations(t *testing.T) {
+	for _, tc := range benchCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pcm := genS16(benchSamplesCh, tc.channels)
+			cfg := Config{SampleRate: benchRate, Channels: tc.channels, BitDepth: 16, CompressionLevel: 5}
+			w := &memWS{}
+			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
+				t.Fatalf("warm-up encode: %v", err)
+			}
+
+			allocs := testing.AllocsPerRun(10, func() {
+				w.pos = 0
+				if err := EncodeInterleaved(w, cfg, pcm); err != nil {
+					t.Fatalf("encode: %v", err)
+				}
+			})
+
+			if allocs > encodeAllocCeiling {
+				t.Errorf("encode allocates %.0f times, want <= %d (per-frame cloning may be back)", allocs, encodeAllocCeiling)
+			}
+		})
+	}
+}
+
 // longFormSamplesCh is a clip whose decoded stereo PCM (~76 MiB) is past the
 // reservation ceiling. The 15-second cases above live entirely inside the band
 // where the reservation covers the whole output in one make; a real regression in
