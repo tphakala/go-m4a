@@ -307,7 +307,7 @@ func ParseDfla(payload []byte) (streamInfo []byte, err error) {
 // back to the sample entry.
 //
 // Layout up to the rate: 16 bits min block size, 16 max, 24 min frame size, 24
-// max, then the 20-bit sample rate. It starts at bit 160, byte 10.
+// max (80 bits total), then the 20-bit sample rate. It starts at bit 80, byte 10.
 func STREAMINFOSampleRate(si []byte) uint32 {
 	if len(si) < 13 {
 		return 0

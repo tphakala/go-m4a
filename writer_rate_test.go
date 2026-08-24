@@ -43,7 +43,7 @@ func ascFor(t *testing.T, rate, channels int) []byte {
 // Layout (RFC 9639 section 8.2): 16 bits min block size, 16 max, 24 min frame
 // size, 24 max, then 20 bits sample rate, 3 bits channels-1, 5 bits bit
 // depth-1, 36 bits total samples, 128 bits MD5. The rate therefore starts at
-// bit 160, which is byte 10.
+// bit 80 (16+16+24+24), which is byte 10.
 func flacStreamInfo(rate, channels int) []byte {
 	si := make([]byte, 34)
 	si[10] = byte(rate >> 12)
@@ -208,7 +208,17 @@ func TestRoundTripFLACOffTableRate(t *testing.T) {
 // STREAMINFO rather than the reduced hint.
 func TestRoundTripFLACHighRate(t *testing.T) {
 	t.Parallel()
-	for _, rate := range []int{88200, 96000, 176400, 192000, 1048575} {
+	for _, tc := range []struct {
+		rate     int
+		wantHint int // the reduced 16.16 sample-entry hint: rate halved until it fits 16 bits
+	}{
+		{88200, 44100},
+		{96000, 48000},
+		{176400, 44100},
+		{192000, 48000},
+		{1048575, 65535},
+	} {
+		rate := tc.rate
 		t.Run(fmt.Sprintf("flac%d", rate), func(t *testing.T) {
 			t.Parallel()
 			const channels = 2
@@ -244,8 +254,8 @@ func TestRoundTripFLACHighRate(t *testing.T) {
 				t.Fatal("no fLaC sample entry in the written file")
 			}
 			field := binary.BigEndian.Uint32(ws.buf[i+28 : i+32])
-			if hint := int(field >> 16); hint <= 0 || hint > 0xFFFF {
-				t.Errorf("fLaC sample-entry rate hint = %d (raw %#08x), want a nonzero value inside the 16-bit field", hint, field)
+			if hint := int(field >> 16); hint != tc.wantHint {
+				t.Errorf("fLaC sample-entry rate hint = %d (raw %#08x), want the reduced %d", hint, field, tc.wantHint)
 			}
 			if low := field & 0xFFFF; low != 0 {
 				t.Errorf("fLaC sample-entry fraction = %#04x, want 0", low)

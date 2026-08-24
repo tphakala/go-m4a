@@ -127,9 +127,10 @@ func TestOpusFlacSampleEntriesParse(t *testing.T) {
 
 // TestFLACSampleEntryRateReduction pins the power-of-two reduction AppendFlacEntry
 // applies so a rate above the 16.16 field ceiling does not overflow it. The
-// standard high rates land on a real base rate, matching the Xiph FLAC-in-ISOBMFF
-// spec and ffmpeg; the true rate is carried by STREAMINFO and the container
-// timescale, not this legacy hint.
+// standard high rates land on a real base rate, matching ffmpeg's MP4 muxer (and
+// the Xiph FLAC-in-ISOBMFF spec's greatest-regular-division result for these
+// rates); the true rate is carried by STREAMINFO and the container timescale, not
+// this legacy hint.
 func TestFLACSampleEntryRateReduction(t *testing.T) {
 	cases := []struct {
 		rate uint32

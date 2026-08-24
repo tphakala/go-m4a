@@ -60,6 +60,11 @@ type Config struct {
 // EncodeInterleaved encodes interleaved little-endian PCM as a FLAC .mp4 to w. FLAC
 // is lossless and has no encoder priming, so no edit list is written and a decode
 // reproduces the input exactly.
+//
+// Frames stream straight into w as they are encoded, so on success w holds the
+// whole file, but on an encode or write error w may already hold a partial,
+// unfinalized file (the ftyp box, the mdat header, and any frames written before
+// the failure). A caller that reuses w should discard or truncate it on error.
 func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 	if cfg.Channels < 1 || cfg.Channels > 2 {
 		return fmt.Errorf("go-m4a/flacm4a: channels %d out of range, want 1 or 2", cfg.Channels)

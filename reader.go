@@ -724,9 +724,13 @@ func (rd *Reader) validateOffsets() error {
 	return nil
 }
 
-// resolveFormat prefers the ASC-derived sample rate and channel count, falling
-// back to the mp4a AudioSampleEntry fields when the ASC does not carry them (an
-// explicit-rate index or a zero channel configuration).
+// resolveFormat resolves the track's sample rate and channel count, per codec. For
+// AAC-LC it prefers the ASC-derived values, falling back to the mp4a
+// AudioSampleEntry fields when the ASC does not carry them (an explicit-rate index
+// or a zero channel configuration). For Opus the encapsulation fixes the rate at 48
+// kHz. For FLAC it takes the authoritative rate from the dfLa STREAMINFO, since the
+// sample entry holds only a reduced hint for rates above 65535 Hz, and falls back
+// to the sample entry when STREAMINFO is absent or declares 0.
 func resolveFormat(tr *track) (sampleRate, channels int) {
 	sampleRate = int(tr.seSampleRate)
 	channels = int(tr.seChannels)

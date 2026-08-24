@@ -380,12 +380,14 @@ func AppendFlacEntry(dst []byte, channels uint16, sampleRate uint32, dfla []byte
 
 // flacSampleEntryRate reduces a FLAC sample rate to one the 16.16 sample-entry
 // samplerate field can hold, by halving it until it is at most maxSampleEntryRate.
-// This is the power-of-two reduction the Xiph "Encapsulation of FLAC in ISOBMFF"
-// specification prescribes for rates above 65535 Hz, and the same thing ffmpeg's
-// MP4 muxer does (while (rate > 65535) rate >>= 1). For the standard high rates it
-// lands on a real base rate: 96000 and 192000 reduce to 48000, 88200 and 176400 to
-// 44100. A rate that already fits is returned unchanged. The result is only a
-// hint; a conforming reader takes the true rate from STREAMINFO.
+// This halving is what ffmpeg's MP4 muxer does (while (rate > 65535) rate >>= 1).
+// The Xiph "Encapsulation of FLAC in ISOBMFF" spec asks instead for the greatest
+// expressible regular division of the rate, which for the standard high rates is
+// exactly what halving produces: 96000 and 192000 reduce to 48000, 88200 and
+// 176400 to 44100. For an exotic rate with no power-of-two path down to a standard
+// rate the two methods can differ, but the field is only a hint, so matching
+// ffmpeg is the interoperable choice. A rate that already fits is returned
+// unchanged. A conforming reader takes the true rate from STREAMINFO regardless.
 func flacSampleEntryRate(rate uint32) uint32 {
 	for rate > maxSampleEntryRate {
 		rate >>= 1
