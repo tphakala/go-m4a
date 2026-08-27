@@ -315,6 +315,20 @@ func STREAMINFOSampleRate(si []byte) uint32 {
 	return uint32(si[10])<<12 | uint32(si[11])<<4 | uint32(si[12])>>4
 }
 
+// STREAMINFOChannels reads the 3-bit channel count from a FLAC STREAMINFO metadata
+// block body (the 34-byte dfLa payload) and returns it as a 1..8 value. The field
+// stores channels-1 in bits 3..1 of byte 12, which byte also carries the low nibble
+// of the sample rate (bits 7..4) and the high bit of bits-per-sample (bit 0), so
+// the three channel bits are isolated with (si[12]>>1)&0x07. It returns 0 when the
+// block is too short to hold the field, mirroring STREAMINFOSampleRate so a caller
+// can treat 0 as "unknown / not present".
+func STREAMINFOChannels(si []byte) int {
+	if len(si) < 13 {
+		return 0
+	}
+	return int((si[12]>>1)&0x07) + 1
+}
+
 // streamInfoBodyLen is the fixed byte length of a FLAC STREAMINFO metadata block
 // body, the payload a dfLa box carries.
 const streamInfoBodyLen = 34

@@ -390,6 +390,8 @@ func TestNewWriterErrors(t *testing.T) {
 		{"channel mismatch", WriterConfig{SampleRate: 48000, Channels: 2, ASC: ascMono48k}},
 		{"bad channels high", WriterConfig{SampleRate: 48000, Channels: 3, ASC: ascMono48k}},
 		{"bad channels zero", WriterConfig{SampleRate: 48000, Channels: 0, ASC: ascMono48k}},
+		{"opus channels above 2", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 3}},
+		{"flac channels above 8", WriterConfig{Codec: CodecFLAC, SampleRate: 48000, Channels: 9, EncoderDelay: NoEdit}},
 		{"asc too short", WriterConfig{SampleRate: 48000, Channels: 1, ASC: []byte{0x11}}},
 		{"unsupported rate", WriterConfig{SampleRate: 12345, Channels: 1, ASC: ascMono48k}},
 		{"negative media length", WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, MediaLength: -1}},

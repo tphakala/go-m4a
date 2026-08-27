@@ -84,6 +84,12 @@ const maxAudioSampleEntryRate = 0xFFFF
 // from STREAMINFO.
 const maxFLACSampleRate = 0xFFFFF
 
+// maxFLACChannels is the largest channel count a FLAC stream can declare. The
+// STREAMINFO channel field is 3 bits storing channels-1 (RFC 9639 section 8.2),
+// so the format caps a stream at 8 channels. AAC and Opus stay at 2 in this
+// package; only FLAC accepts up to this.
+const maxFLACChannels = 8
+
 // maxFrames caps the number of access units per file so the moov sample tables
 // and their enclosing box sizes cannot overflow the 32-bit box size field. At
 // this bound the stsz box alone is about 2 GiB, well under the 4 GiB ceiling,
@@ -129,8 +135,10 @@ type WriterConfig struct {
 	// comes from STREAMINFO, not from this field.
 	SampleRate int
 
-	// Channels is the channel count, 1 (mono) or 2 (stereo). Required, and for
-	// AAC-LC it must match the channel configuration encoded in ASC.
+	// Channels is the channel count. Required. AAC-LC and Opus accept 1 (mono) or
+	// 2 (stereo), and for AAC-LC it must match the channel configuration encoded in
+	// ASC. FLAC accepts 1..8; a FLAC config whose STREAMINFO declares a nonzero
+	// sample rate must agree with this count (see SetSTREAMINFO).
 	Channels int
 
 	// ASC is the MPEG-4 AudioSpecificConfig (two bytes for AAC-LC). Required for
@@ -410,6 +418,9 @@ func (w *Writer) SetSTREAMINFO(streamInfo []byte) error {
 	if len(streamInfo) != flacStreamInfoLen {
 		return fmt.Errorf("go-m4a: SetSTREAMINFO: STREAMINFO is %d bytes, want %d", len(streamInfo), flacStreamInfoLen)
 	}
+	if err := validateFlacStreamInfo(streamInfo, int(w.channels), int(w.sampleRate)); err != nil {
+		return fmt.Errorf("go-m4a: SetSTREAMINFO: %w", err)
+	}
 	w.streamInfo = append([]byte(nil), streamInfo...)
 	return nil
 }
@@ -663,9 +674,12 @@ func (m *trackMeta) resolveDelay(encoderDelay int) int {
 // Channels against the AudioSpecificConfig. All messages are prefixed
 // "go-m4a: " to match the package error convention.
 func validateConfig(cfg WriterConfig) error {
-	if cfg.Channels < 1 || cfg.Channels > 2 {
-		return fmt.Errorf("go-m4a: channels %d out of range, want 1 or 2", cfg.Channels)
+	if cfg.Channels < 1 {
+		return fmt.Errorf("go-m4a: channels %d out of range, want >= 1", cfg.Channels)
 	}
+	// The channel upper bound is per-codec: FLAC allows up to maxFLACChannels while
+	// AAC and Opus cap at 2. Each per-codec validator enforces its own maximum, so
+	// the shared guard only rejects a non-positive count here.
 	if cfg.MediaLength < 0 {
 		return fmt.Errorf("go-m4a: media length %d is negative", cfg.MediaLength)
 	}
@@ -698,6 +712,12 @@ func validateConfig(cfg WriterConfig) error {
 // validateAACConfig cross-checks the AAC-LC AudioSpecificConfig against SampleRate
 // and Channels.
 func validateAACConfig(cfg WriterConfig) error {
+	if cfg.Channels > 2 {
+		// AAC-LC in this package is limited to mono and stereo. The shared guard in
+		// validateConfig only checks the lower bound (FLAC allows more), so reject a
+		// surround count here rather than let a multichannel ASC through.
+		return fmt.Errorf("go-m4a: channels %d out of range for AAC, want 1 or 2", cfg.Channels)
+	}
 	if len(cfg.ASC) < 2 {
 		return fmt.Errorf("go-m4a: ASC too short: %d bytes, need at least 2", len(cfg.ASC))
 	}
@@ -739,6 +759,12 @@ func validateAACConfig(cfg WriterConfig) error {
 // validateOpusConfig checks the Opus-specific fields. The Opus encapsulation fixes
 // the container timescale at 48000, so SampleRate must be 48000.
 func validateOpusConfig(cfg WriterConfig) error {
+	if cfg.Channels > 2 {
+		// The Opus bridge and dOps writer emit a channel-mapping-family-0 header,
+		// which covers mono and stereo only. The shared guard in validateConfig
+		// checks the lower bound alone, so reject surround here.
+		return fmt.Errorf("go-m4a: channels %d out of range for Opus, want 1 or 2", cfg.Channels)
+	}
 	if cfg.SampleRate != opusTimescale {
 		return fmt.Errorf("go-m4a: Opus requires SampleRate %d, got %d", opusTimescale, cfg.SampleRate)
 	}
@@ -764,6 +790,9 @@ func validateOpusConfig(cfg WriterConfig) error {
 // the time the file is finalized (flacStreamInfoLen bytes), so an empty config
 // that never gets SetSTREAMINFO fails there rather than writing a malformed dfLa.
 func validateFLACConfig(cfg WriterConfig) error {
+	if cfg.Channels > maxFLACChannels {
+		return fmt.Errorf("go-m4a: channels %d out of range for FLAC, want 1..%d", cfg.Channels, maxFLACChannels)
+	}
 	if cfg.SampleRate > maxFLACSampleRate {
 		// FLAC's STREAMINFO sample-rate field is 20 bits, so the format cannot even
 		// declare a higher rate. Reject rather than write a truncated STREAMINFO.
@@ -771,6 +800,39 @@ func validateFLACConfig(cfg WriterConfig) error {
 	}
 	if len(cfg.STREAMINFO) != 0 && len(cfg.STREAMINFO) != flacStreamInfoLen {
 		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d or 0 (set later via SetSTREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
+	}
+	if err := validateFlacStreamInfo(cfg.STREAMINFO, cfg.Channels, cfg.SampleRate); err != nil {
+		return fmt.Errorf("go-m4a: %w", err)
+	}
+	return nil
+}
+
+// validateFlacStreamInfo cross-checks a FLAC STREAMINFO block against the sample
+// rate and channel count configured on the writer, so a caller cannot ship a dfLa
+// that disagrees with its sample entry and media timescale. It is a no-op for the
+// two cases the contract still allows: a block of any length other than the fixed
+// flacStreamInfoLen (length is validated at the call sites), and an all-zero or
+// otherwise rate-0 placeholder, which the streaming path writes before the real
+// block arrives via SetSTREAMINFO. Only a block declaring a nonzero sample rate is
+// checked, matching the "is this STREAMINFO real" signal resolveFormat uses on the
+// read side; a genuine rate or channel mismatch is rejected.
+//
+// Its messages are intentionally NOT "go-m4a:"-prefixed: both callers wrap them with
+// the package prefix (SetSTREAMINFO adds its own context too), so a new caller must
+// wrap as well to keep the package error convention.
+func validateFlacStreamInfo(streamInfo []byte, channels, sampleRate int) error {
+	if len(streamInfo) != flacStreamInfoLen {
+		return nil
+	}
+	siRate := box.STREAMINFOSampleRate(streamInfo)
+	if siRate == 0 {
+		return nil
+	}
+	if int(siRate) != sampleRate {
+		return fmt.Errorf("FLAC STREAMINFO sample rate %d Hz disagrees with configured %d Hz", siRate, sampleRate)
+	}
+	if siChannels := box.STREAMINFOChannels(streamInfo); siChannels != channels {
+		return fmt.Errorf("FLAC STREAMINFO channel count %d disagrees with configured %d", siChannels, channels)
 	}
 	return nil
 }

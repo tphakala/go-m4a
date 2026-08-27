@@ -60,7 +60,12 @@ func TestFLACStreamInfoLateSetRoundTrips(t *testing.T) {
 func TestFLACStreamInfoLateSetOverwrites(t *testing.T) {
 	t.Parallel()
 	early := flacStreamInfo(44100, 1)
-	late := flacStreamInfo(48000, 2)
+	// The late block must agree with the writer's configured rate and channel count
+	// (SetSTREAMINFO now cross-checks them), so it differs from early only in a
+	// non-validated field (a byte of the MD5 signature) to keep the overwrite
+	// observable.
+	late := flacStreamInfo(44100, 1)
+	late[20] = 0xAB
 	ws := &memWS{}
 	w, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: early, EncoderDelay: NoEdit})
 	if err != nil {
@@ -159,6 +164,81 @@ func TestFLACSetStreamInfoRejects(t *testing.T) {
 		w := newDeferredFLACWriter(t, ws)
 		if err := w.SetSTREAMINFO(make([]byte, 20)); err == nil {
 			t.Error("SetSTREAMINFO with 20 bytes returned nil, want an error")
+		}
+	})
+}
+
+// TestFLACStreamInfoValidation pins the #37 cross-check: a STREAMINFO whose declared
+// sample rate or channel count disagrees with the writer config is rejected at both
+// entry points (SetSTREAMINFO and the initial WriterConfig.STREAMINFO), an all-zero
+// placeholder still passes, and a matching block (including multichannel) is accepted.
+func TestFLACStreamInfoValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SetSTREAMINFO rejects a sample-rate mismatch", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
+		err := w.SetSTREAMINFO(flacStreamInfo(48000, 1))
+		if err == nil || !strings.Contains(err.Error(), "sample rate") {
+			t.Errorf("SetSTREAMINFO(48000/1) error = %v, want a sample-rate mismatch", err)
+		}
+	})
+
+	t.Run("SetSTREAMINFO rejects a channel mismatch", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
+		err := w.SetSTREAMINFO(flacStreamInfo(44100, 2))
+		if err == nil || !strings.Contains(err.Error(), "channel") {
+			t.Errorf("SetSTREAMINFO(44100/2) error = %v, want a channel mismatch", err)
+		}
+	})
+
+	t.Run("SetSTREAMINFO accepts an all-zero placeholder", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		w := newDeferredFLACWriter(t, ws)
+		// A rate-0 block carries no rate to check, so it passes: this is what the
+		// streaming path writes before the finalized block arrives.
+		if err := w.SetSTREAMINFO(make([]byte, flacStreamInfoLen)); err != nil {
+			t.Errorf("SetSTREAMINFO(placeholder) = %v, want nil", err)
+		}
+	})
+
+	t.Run("SetSTREAMINFO accepts a matching block", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		w := newDeferredFLACWriter(t, ws)
+		if err := w.SetSTREAMINFO(flacStreamInfo(44100, 1)); err != nil {
+			t.Errorf("SetSTREAMINFO(44100/1) = %v, want nil", err)
+		}
+	})
+
+	t.Run("NewWriter rejects a mismatched initial STREAMINFO", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		_, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: flacStreamInfo(48000, 1), EncoderDelay: NoEdit})
+		if err == nil || !strings.Contains(err.Error(), "sample rate") {
+			t.Errorf("NewWriter with mismatched STREAMINFO error = %v, want a sample-rate mismatch", err)
+		}
+	})
+
+	t.Run("NewWriter accepts a matching multichannel STREAMINFO at the 8-channel boundary", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		// 8 is the exact accepted FLAC boundary (maxFLACChannels); exercise it through
+		// validateFLACConfig so an off-by-one (> vs >=) regression is caught here, not
+		// only in the flacm4a bridge.
+		w, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 48000, Channels: 8, STREAMINFO: flacStreamInfo(48000, 8), EncoderDelay: NoEdit})
+		if err != nil {
+			t.Fatalf("NewWriter with a matching 8-channel STREAMINFO: %v", err)
+		}
+		if err := w.WriteFrameDuration(synthFrames(1)[0], 4096); err != nil {
+			t.Fatalf("WriteFrameDuration: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
 		}
 	})
 }

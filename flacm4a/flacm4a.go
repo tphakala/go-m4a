@@ -39,6 +39,10 @@ import (
 // correctness or a safety problem.
 const maxFLACBlockSize = 65535
 
+// maxFLACChannels is the largest channel count a FLAC stream can declare: the
+// STREAMINFO channel field is 3 bits storing channels-1 (RFC 9639 section 8.2).
+const maxFLACChannels = 8
+
 // The reservation ceiling (reservation.MaxPCMReservation) and the trim policy
 // (reservation.ShouldTrim, reservation.MaxRetainedSlack) live in internal/
 // reservation, shared with opusm4a; that package documents the general rule. The
@@ -49,7 +53,7 @@ const maxFLACBlockSize = 65535
 // per-claim estimate.
 
 // Config configures FLAC encoding. SampleRate is the audio rate in Hz; Channels is
-// 1 or 2; BitDepth is 16 or 24; CompressionLevel is 0 (fastest) to 8 (smallest).
+// 1..8; BitDepth is 16 or 24; CompressionLevel is 0 (fastest) to 8 (smallest).
 type Config struct {
 	SampleRate       int
 	Channels         int
@@ -66,8 +70,8 @@ type Config struct {
 // unfinalized file (the ftyp box, the mdat header, and any frames written before
 // the failure). A caller that reuses w should discard or truncate it on error.
 func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
-	if cfg.Channels < 1 || cfg.Channels > 2 {
-		return fmt.Errorf("go-m4a/flacm4a: channels %d out of range, want 1 or 2", cfg.Channels)
+	if cfg.Channels < 1 || cfg.Channels > maxFLACChannels {
+		return fmt.Errorf("go-m4a/flacm4a: channels %d out of range, want 1..%d", cfg.Channels, maxFLACChannels)
 	}
 	// Require a byte-aligned bit depth so the interleaved-PCM stride is exact; a
 	// non-byte-aligned depth (for example 20) would divide to the wrong stride and
@@ -352,21 +356,20 @@ func forEachFrame(rd *m4a.Reader, fd *flacpcm.FrameDecoder, fn func(pcm []byte) 
 // limit exists to prevent. It is a ceiling and never a floor: a limit above what
 // the stream declares leaves the reservation where the declaration put it.
 func pcmReservation(totalSamples uint64, frameCount, siChannels, seChannels, bitDepth, limit int) int {
-	// FLAC caps a stream at 8 channels and 32 bits per sample.
-	const (
-		maxFLACChannels = 8
-		maxFLACBitDepth = 32
-	)
+	// FLAC caps a stream at 32 bits per sample (and maxFLACChannels channels).
+	const maxFLACBitDepth = 32
 	if totalSamples == 0 || frameCount <= 0 || siChannels <= 0 || bitDepth <= 0 {
 		return 0
 	}
-	// The channel count is stated twice, by STREAMINFO and by the container's
-	// sample entry, and the mapping requires them to agree, so take the smaller: a
-	// file that inflates one to widen the reservation has to inflate both. Only a
-	// positive sample-entry count counts as a statement, though. Nothing validates
-	// that field, and a muxer that leaves it zero is saying nothing rather than
-	// saying none; letting a zero win the comparison would disable the reservation
-	// outright and hand the decode back the growth chain this exists to remove.
+	// siChannels is STREAMINFO's count and seChannels is the reader's resolved count
+	// (info.Channels). For a FLAC track the reader now takes that from STREAMINFO too
+	// (resolveFormat), so the two normally agree and this min() is a defensive
+	// tie-break rather than a cross-check of two independent sources: if a degenerate
+	// file makes them disagree, take the smaller. A zero seChannels counts as
+	// "unstated" rather than "none", since letting a zero win would disable the
+	// reservation outright and hand the decode back the growth chain this removes.
+	// The hard bounds are frameCount*maxFLACBlockSize and MaxPCMReservation below,
+	// not this channel factor.
 	channels := siChannels
 	if seChannels > 0 && seChannels < channels {
 		channels = seChannels

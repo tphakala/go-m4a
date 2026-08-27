@@ -414,3 +414,30 @@ func noPanicNewReader(t *testing.T, data []byte) (err error) {
 		}
 	}
 }
+
+// TestResolveFormatFLACChannelsFromStreamInfo pins that a FLAC track reports the
+// channel count from its dfLa STREAMINFO, not the AudioSampleEntry. A foreign muxer
+// may cap the sample-entry channelcount at 2 for a multichannel FLAC stream while
+// STREAMINFO carries the true count, so the block is authoritative for channels
+// exactly as it already is for the sample rate.
+func TestResolveFormatFLACChannelsFromStreamInfo(t *testing.T) {
+	t.Parallel()
+
+	// STREAMINFO declares 6 channels; the sample entry is capped at 2.
+	tr := &track{
+		codec:        fourccFlac,
+		codecConfig:  flacStreamInfo(48000, 6),
+		seChannels:   2,
+		seSampleRate: 48000,
+	}
+	if rate, ch := resolveFormat(tr); ch != 6 || rate != 48000 {
+		t.Errorf("resolveFormat = (%d Hz, %d ch), want (48000, 6) from STREAMINFO", rate, ch)
+	}
+
+	// With no STREAMINFO (absent/truncated), STREAMINFOChannels yields 0 and the
+	// sample-entry channel count stands.
+	trNoSI := &track{codec: fourccFlac, codecConfig: nil, seChannels: 2, seSampleRate: 48000}
+	if _, ch := resolveFormat(trNoSI); ch != 2 {
+		t.Errorf("resolveFormat channels with no STREAMINFO = %d, want 2 (sample-entry fallback)", ch)
+	}
+}
