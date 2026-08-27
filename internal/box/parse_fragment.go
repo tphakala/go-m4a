@@ -165,16 +165,6 @@ func ParseTrex(payload []byte) (Trex, error) {
 	}, nil
 }
 
-// ParseMfhd decodes the sequence_number from an mfhd (movie fragment header)
-// FullBox body. The demuxer does not require it for AU extraction; it is exposed
-// for symmetry with AppendMfhd and an optional monotonicity check.
-func ParseMfhd(payload []byte) (sequenceNumber uint32, err error) {
-	if len(payload) < 8 {
-		return 0, fmt.Errorf("mfhd: %d bytes, need 8: %w", len(payload), errParse)
-	}
-	return binary.BigEndian.Uint32(payload[4:]), nil
-}
-
 // ParseTkhd decodes the track_ID from a tkhd (track header) FullBox body,
 // honoring the version-0 (32-bit time fields) and version-1 (64-bit time fields)
 // layouts. The demuxer uses it to bind a track's movie fragments to its sample
