@@ -246,8 +246,8 @@ func benchFragSegments(frames [][]byte, framesPerSeg int) [][]fragAU {
 // BenchmarkOpenFragmented measures the one-time fragmented (CMAF) demux setup:
 // scanTopLevel plus buildFragmentGeometry walking every moof to lay out the
 // sample geometry. The stream is built once outside the timer; each iteration
-// runs NewReader over it. This is the baseline a size-only trun fast path (issue
-// #43 item 5) would have to beat, so it is measured with ReportAllocs. No
+// runs NewReader over it. This is the baseline a size-only trun fast path
+// (tracked in #44) would have to beat, so it is measured with ReportAllocs. No
 // SetBytes: the demux setup reads only the box headers and moof bodies, never
 // the mdat media payload, so a bytes-per-second figure would misreport it.
 func BenchmarkOpenFragmented(b *testing.B) {
