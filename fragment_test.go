@@ -252,7 +252,7 @@ func TestInitSegmentEditListVariants(t *testing.T) {
 // zero trim must produce no edit list at all rather than a degenerate one. flacm4a
 // suppresses it the same way on the non-fragmented path.
 func TestInitSegmentNoEditListWithoutPriming(t *testing.T) {
-	streamInfo := make([]byte, 34)
+	streamInfo := flacStreamInfo(44100, 1)
 	tests := []struct {
 		name     string
 		cfg      WriterConfig
@@ -285,7 +285,8 @@ func TestInitSegmentNoEditListWithoutPriming(t *testing.T) {
 }
 
 // TestInitSegmentBrandOverride covers the one WriterConfig field whose fragmented
-// behaviour differs from the documented non-fragmented default.
+// default value differs from the non-fragmented one (MediaLength and a deferred
+// STREAMINFO differ by being rejected, not by carrying a different default).
 func TestInitSegmentBrandOverride(t *testing.T) {
 	cfg := aacFragmentConfig()
 	cfg.Brand = "mp42"
@@ -537,7 +538,7 @@ func TestPendingDurationTracksBuffer(t *testing.T) {
 // not share a duration (FLAC's short final frame, a partial Opus packet) the
 // per-sample durations move into trun.
 func TestAppendSegmentVariableDurations(t *testing.T) {
-	streamInfo := make([]byte, 34)
+	streamInfo := flacStreamInfo(44100, 2)
 	f, err := NewFragmentWriter(WriterConfig{
 		Codec: CodecFLAC, SampleRate: 44100, Channels: 2, STREAMINFO: streamInfo,
 	})
@@ -579,7 +580,7 @@ func TestAppendSegmentVariableDurations(t *testing.T) {
 // TestFragmentCodecSampleEntries checks the init segment carries the same
 // codec-specific sample entry the non-fragmented writer emits.
 func TestFragmentCodecSampleEntries(t *testing.T) {
-	streamInfo := make([]byte, 34)
+	streamInfo := flacStreamInfo(44100, 1)
 	tests := []struct {
 		name  string
 		cfg   WriterConfig
@@ -710,6 +711,39 @@ func TestFragmentWriterErrors(t *testing.T) {
 	}
 	if _, err := InitSegment(WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1}); err == nil {
 		t.Error("InitSegment accepted FLAC with no STREAMINFO")
+	}
+}
+
+// TestFragmentRejectsDeferredFLACStreamInfo pins the #39 contract: the fragmented
+// path writes the dfLa up front and has no Close/SetSTREAMINFO step, so it must
+// reject an all-zero 34-byte placeholder (the deferred form the non-fragmented
+// Writer allows), not just an empty slice. Accepting the placeholder produced a
+// dfLa declaring rate 0 / 1 channel while the sample entry carried the configured
+// values, so the two disagreed.
+func TestFragmentRejectsDeferredFLACStreamInfo(t *testing.T) {
+	placeholder := make([]byte, flacStreamInfoLen) // all-zero deferred placeholder
+	cfg := WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: placeholder}
+
+	if _, err := InitSegment(cfg); err == nil {
+		t.Error("InitSegment accepted an all-zero placeholder STREAMINFO on the fragmented path")
+	} else if !strings.Contains(err.Error(), "placeholder") {
+		t.Errorf("error %q does not name the placeholder problem", err)
+	}
+	if _, err := NewFragmentWriter(cfg); err == nil {
+		t.Error("NewFragmentWriter accepted an all-zero placeholder STREAMINFO on the fragmented path")
+	} else if !strings.Contains(err.Error(), "placeholder") {
+		t.Errorf("error %q does not name the placeholder problem", err)
+	}
+
+	// A populated block is accepted and rides verbatim into the init segment's dfLa,
+	// so the emitted STREAMINFO agrees with the configured rate and channel count.
+	populated := flacStreamInfo(44100, 1)
+	init, err := InitSegment(WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: populated})
+	if err != nil {
+		t.Fatalf("InitSegment with a populated STREAMINFO: %v", err)
+	}
+	if !bytes.Contains(init, populated) {
+		t.Error("init segment does not carry the populated STREAMINFO block in its dfLa")
 	}
 }
 

@@ -61,10 +61,13 @@ const (
 // once per stream.
 //
 // cfg is the same WriterConfig the non-fragmented Writer takes, so the codec
-// selection, AudioSpecificConfig, STREAMINFO, Opus pre-skip and EncoderDelay all
-// carry over unchanged. Two fields behave differently here. MediaLength has no
-// meaning, because a live stream has no known total length, so a non-zero value is
-// rejected rather than silently ignored. Brand still overrides the ftyp major
+// selection, AudioSpecificConfig, Opus pre-skip and EncoderDelay all carry over
+// unchanged. Three fields behave differently here. MediaLength has no meaning,
+// because a live stream has no known total length, so a non-zero value is rejected
+// rather than silently ignored. A FLAC STREAMINFO cannot be deferred: the dfLa box
+// goes into this init segment up front and there is no Close or SetSTREAMINFO step
+// to fill it later, so a populated 34-byte block is required and both an empty slice
+// and an all-zero placeholder are rejected. Brand still overrides the ftyp major
 // brand, but the fragmented default is "cmfc" rather than "M4A ", so overriding it
 // moves the CMAF declaration out of the major-brand position (it stays in the
 // compatible-brand list, which is fixed); reusing a config written for the
@@ -397,19 +400,27 @@ func (f *FragmentWriter) discardPending() {
 }
 
 // validateFragmentConfig applies the shared WriterConfig validation, then rejects
-// the one field that cannot mean anything for a fragmented stream.
+// what cannot mean anything for a fragmented stream: a deferred FLAC STREAMINFO
+// (empty or the all-zero placeholder) and a nonzero MediaLength.
 func validateFragmentConfig(cfg WriterConfig) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	if cfg.Codec == CodecFLAC && len(cfg.STREAMINFO) != flacStreamInfoLen {
-		// The non-fragmented Writer accepts an empty STREAMINFO and lets the encoder
-		// supply the finalized block at Close via SetSTREAMINFO. The fragmented path
-		// cannot: it writes the dfLa box into the init segment up front, and there is
-		// no Close nor a SetSTREAMINFO equivalent, so the full block must be present
-		// now. Reject an empty (deferred) block here rather than emit a dfLa around a
-		// zero-length STREAMINFO.
-		return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d (fragmented output cannot defer STREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
+	if cfg.Codec == CodecFLAC {
+		// The non-fragmented Writer accepts a deferred STREAMINFO, empty or an all-zero
+		// 34-byte placeholder, and lets the encoder supply the finalized block at Close
+		// via SetSTREAMINFO. The fragmented path cannot: it writes the dfLa box into the
+		// init segment up front, and there is no Close nor a SetSTREAMINFO equivalent, so
+		// the full block must be present now. Reject both deferred forms here rather than
+		// emit a dfLa that disagrees with the audio sample entry (a zero-length block, or
+		// a placeholder declaring rate 0 / 1 channel while the sample entry carries the
+		// configured rate and channel count).
+		if len(cfg.STREAMINFO) != flacStreamInfoLen {
+			return fmt.Errorf("go-m4a: FLAC STREAMINFO is %d bytes, want %d (fragmented output cannot defer STREAMINFO)", len(cfg.STREAMINFO), flacStreamInfoLen)
+		}
+		if isDeferredFLACStreamInfo(cfg.STREAMINFO) {
+			return fmt.Errorf("go-m4a: FLAC STREAMINFO is an all-zero deferred placeholder; fragmented output cannot defer STREAMINFO and needs the finalized %d-byte block up front", flacStreamInfoLen)
+		}
 	}
 	if cfg.MediaLength != 0 {
 		// MediaLength pins the non-fragmented edit list to an exact source length,
