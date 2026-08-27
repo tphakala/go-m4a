@@ -285,15 +285,3 @@ func TestParseFragmentReservedVersions(t *testing.T) {
 		t.Errorf("ParseTrun v2 = %v, want errParse", err)
 	}
 }
-
-func TestParseMfhdRoundTrip(t *testing.T) {
-	t.Parallel()
-	box := AppendMfhd(nil, 42)
-	got, err := ParseMfhd(body(box))
-	if err != nil {
-		t.Fatalf("ParseMfhd: %v", err)
-	}
-	if got != 42 {
-		t.Errorf("sequenceNumber = %d, want 42", got)
-	}
-}

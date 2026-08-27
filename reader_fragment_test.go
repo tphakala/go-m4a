@@ -24,26 +24,26 @@ type fragAU struct {
 // init segment for cfg followed by one media segment per element of segments. It
 // is the natural fixture for the demuxer: the writer under test produces exactly
 // the moof/trun layout the reader must reverse.
-func buildFragmentedStream(t *testing.T, cfg WriterConfig, segments [][]fragAU) []byte {
-	t.Helper()
+func buildFragmentedStream(tb testing.TB, cfg WriterConfig, segments [][]fragAU) []byte {
+	tb.Helper()
 	init, err := InitSegment(cfg)
 	if err != nil {
-		t.Fatalf("InitSegment: %v", err)
+		tb.Fatalf("InitSegment: %v", err)
 	}
 	fw, err := NewFragmentWriter(cfg)
 	if err != nil {
-		t.Fatalf("NewFragmentWriter: %v", err)
+		tb.Fatalf("NewFragmentWriter: %v", err)
 	}
 	out := append([]byte(nil), init...)
 	for i, seg := range segments {
 		for _, s := range seg {
 			if err := fw.WriteFrameDuration(s.au, s.dur); err != nil {
-				t.Fatalf("segment %d WriteFrameDuration: %v", i, err)
+				tb.Fatalf("segment %d WriteFrameDuration: %v", i, err)
 			}
 		}
 		out, err = fw.AppendSegment(out)
 		if err != nil {
-			t.Fatalf("segment %d AppendSegment: %v", i, err)
+			tb.Fatalf("segment %d AppendSegment: %v", i, err)
 		}
 	}
 	return out

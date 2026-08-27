@@ -227,6 +227,42 @@ func BenchmarkRawStreamFresh(b *testing.B) {
 	}
 }
 
+// benchFragSegments splits frames into fixed-size media segments, recording a
+// constant per-sample duration, so buildFragmentedStream emits one moof per
+// segment. framesPerSeg controls the moof count the demux setup must walk.
+func benchFragSegments(frames [][]byte, framesPerSeg int) [][]fragAU {
+	segments := make([][]fragAU, 0, (len(frames)+framesPerSeg-1)/framesPerSeg)
+	for i := 0; i < len(frames); i += framesPerSeg {
+		end := min(i+framesPerSeg, len(frames))
+		seg := make([]fragAU, 0, end-i)
+		for _, au := range frames[i:end] {
+			seg = append(seg, fragAU{au: au, dur: 1024}) // 1024 samples per AAC-LC frame
+		}
+		segments = append(segments, seg)
+	}
+	return segments
+}
+
+// BenchmarkOpenFragmented measures the one-time fragmented (CMAF) demux setup:
+// scanTopLevel plus buildFragmentGeometry walking every moof to lay out the
+// sample geometry. The stream is built once outside the timer; each iteration
+// runs NewReader over it. This is the baseline a size-only trun fast path (issue
+// #43 item 5) would have to beat, so it is measured with ReportAllocs. No
+// SetBytes: the demux setup reads only the box headers and moof bodies, never
+// the mdat media payload, so a bytes-per-second figure would misreport it.
+func BenchmarkOpenFragmented(b *testing.B) {
+	frames := benchFrames(benchFrameCount)
+	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
+	data := buildFragmentedStream(b, cfg, benchFragSegments(frames, 50))
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := NewReader(bytes.NewReader(data)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkBuildMoov measures Close's moov assembly for a large frame count,
 // exercising the AppendContainer re-copies that carry the sample table up the
 // box tree (stbl -> minf -> mdia -> trak -> moov).

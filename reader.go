@@ -140,15 +140,15 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 		return nil, fmt.Errorf("go-m4a: negative stream length %d: %w", streamLen, ErrCorrupt)
 	}
 
-	brand, moovPayload, moofOffsets, err := scanTopLevel(r, streamLen)
+	brand, moovPayload, moofs, err := scanTopLevel(r, streamLen)
 	if err != nil {
 		return nil, err
 	}
 
 	rd := &Reader{r: r, streamLen: streamLen}
 	rd.info.Brand = brand
-	if len(moofOffsets) > 0 {
-		if err := rd.parseFragmented(moovPayload, moofOffsets); err != nil {
+	if len(moofs) > 0 {
+		if err := rd.parseFragmented(moovPayload, moofs); err != nil {
 			return nil, err
 		}
 	} else if err := rd.parseMoov(moovPayload); err != nil {
@@ -158,12 +158,22 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 	return rd, nil
 }
 
+// moofExtent locates one top-level moof box: its file offset (the base for
+// default-base-is-moof resolution) plus the body-slice bounds scanTopLevel
+// already parsed and bounds-checked, so the demux path reads each fragment body
+// without re-reading and re-parsing the moof header.
+type moofExtent struct {
+	offset    int64 // moof box start
+	bodyStart int64 // first byte after the moof header
+	bodyLen   int64 // moof body length
+}
+
 // scanTopLevel walks the top-level boxes of r, returning the ftyp major brand,
-// the moov box body, and the file offsets of every top-level moof box. A
-// non-empty moofOffsets marks fragmented (CMAF) input, which NewReader demuxes
-// through the movie fragments rather than the moov sample tables. styp, sidx, and
-// mfra are skipped; a missing moov is ErrCorrupt.
-func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, moofOffsets []int64, err error) {
+// the moov box body, and the extent of every top-level moof box. A non-empty
+// moofs slice marks fragmented (CMAF) input, which NewReader demuxes through the
+// movie fragments rather than the moov sample tables. styp, sidx, and mfra are
+// skipped; a missing moov is ErrCorrupt.
+func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
 	var moov []byte
 	for off := int64(0); off < streamLen; {
 		remaining := streamLen - off
@@ -192,7 +202,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 
 		switch h.Type {
 		case fourccMoof:
-			moofOffsets = append(moofOffsets, off)
+			moofs = append(moofs, moofExtent{offset: off, bodyStart: off + h.HeaderLen, bodyLen: total - h.HeaderLen})
 		case fourccFtyp:
 			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen)
 			if berr != nil {
@@ -213,7 +223,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 	if moov == nil {
 		return "", nil, nil, fmt.Errorf("go-m4a: no moov box: %w", ErrCorrupt)
 	}
-	return brand, moov, moofOffsets, nil
+	return brand, moov, moofs, nil
 }
 
 // readSection seeks to off and reads exactly n bytes. n is always a header size
@@ -269,9 +279,41 @@ type track struct {
 	elstMedia int64
 }
 
+// selectSounTrack keeps the first supported soun track while walking a moov's
+// trak children. chosen holds the pick (nil until found); sawSoun records that a
+// soun handler was seen at all, so the caller can tell an unsupported codec apart
+// from a file with no audio track. Shared by parseMoov and parseInitMoov so the
+// plain and fragmented selection paths cannot drift.
+func selectSounTrack(trak []byte, chosen **track, sawSoun *bool) error {
+	if *chosen != nil {
+		return nil // already have the track we want
+	}
+	tr, err := parseTrak(trak)
+	if err != nil {
+		return err
+	}
+	if tr.handler == fourccSoun {
+		*sawSoun = true
+		if isSupportedCodec(tr.codec) {
+			*chosen = tr
+		}
+	}
+	return nil
+}
+
+// errNoSupportedSoun builds the track-selection failure shared by parseMoov and
+// parseInitMoov. sawSoun distinguishes an audio track with an unsupported codec
+// from a file with no audio track; both cases wrap ErrUnsupported.
+func errNoSupportedSoun(sawSoun bool) error {
+	if sawSoun {
+		return fmt.Errorf("go-m4a: audio track codec is not mp4a, Opus, or fLaC: %w", ErrUnsupported)
+	}
+	return fmt.Errorf("go-m4a: no supported audio track: %w", ErrUnsupported)
+}
+
 // parseMoov walks the moov box, reads the movie header, rejects fragmented
-// files (an mvex box), then selects the first AAC-LC "soun" track and builds its
-// sample geometry.
+// files (an mvex box), then selects the first supported "soun" track (mp4a
+// AAC-LC, Opus, or fLaC) and builds its sample geometry.
 func (rd *Reader) parseMoov(moov []byte) error {
 	var movieTS uint32
 	var movieDur uint64
@@ -289,19 +331,7 @@ func (rd *Reader) parseMoov(moov []byte) error {
 		case fourccMvex:
 			return fmt.Errorf("go-m4a: fragmented input (mvex): %w", ErrUnsupported)
 		case fourccTrak:
-			if chosen != nil {
-				return nil // already have the track we want
-			}
-			tr, perr := parseTrak(body)
-			if perr != nil {
-				return perr
-			}
-			if tr.handler == fourccSoun {
-				sawSoun = true
-				if isSupportedCodec(tr.codec) {
-					chosen = tr
-				}
-			}
+			return selectSounTrack(body, &chosen, &sawSoun)
 		}
 		return nil
 	})
@@ -309,10 +339,7 @@ func (rd *Reader) parseMoov(moov []byte) error {
 		return wrapParse(err)
 	}
 	if chosen == nil {
-		if sawSoun {
-			return fmt.Errorf("go-m4a: audio track codec is not mp4a, Opus, or fLaC: %w", ErrUnsupported)
-		}
-		return fmt.Errorf("go-m4a: no supported audio track: %w", ErrUnsupported)
+		return errNoSupportedSoun(sawSoun)
 	}
 
 	if err := rd.applyTrack(chosen, movieTS, movieDur); err != nil {

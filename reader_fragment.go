@@ -19,11 +19,11 @@ var (
 )
 
 // parseFragmented builds the Reader from a fragmented (CMAF) stream: the init
-// segment's moov (metadata, no sample tables) plus the movie fragments at
-// moofOffsets. It selects the same first supported "soun" track the plain path
+// segment's moov (metadata, no sample tables) plus the movie fragments described
+// by moofs. It selects the same first supported "soun" track the plain path
 // would, fills Info from the sample entry, then walks every fragment's
 // tfhd/trun to lay out the shared per-chunk geometry the read path consumes.
-func (rd *Reader) parseFragmented(moov []byte, moofOffsets []int64) error {
+func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
 	tr, movieTS, movieDur, trex, err := parseInitMoov(moov)
 	if err != nil {
 		return err
@@ -32,7 +32,7 @@ func (rd *Reader) parseFragmented(moov []byte, moofOffsets []int64) error {
 		return err
 	}
 	rd.fillFormatInfo(tr, movieTS, movieDur)
-	if err := rd.buildFragmentGeometry(moofOffsets, tr, trex); err != nil {
+	if err := rd.buildFragmentGeometry(moofs, tr, trex); err != nil {
 		return err
 	}
 	rd.info.FrameCount = rd.sampleCount
@@ -70,19 +70,7 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 				return nil
 			})
 		case fourccTrak:
-			if chosen != nil {
-				return nil // already have the track we want
-			}
-			trk, perr := parseTrak(body)
-			if perr != nil {
-				return perr
-			}
-			if trk.handler == fourccSoun {
-				sawSoun = true
-				if isSupportedCodec(trk.codec) {
-					chosen = trk
-				}
-			}
+			return selectSounTrack(body, &chosen, &sawSoun)
 		}
 		return nil
 	})
@@ -90,10 +78,7 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 		return nil, 0, 0, box.Trex{}, wrapParse(walkErr)
 	}
 	if chosen == nil {
-		if sawSoun {
-			return nil, 0, 0, box.Trex{}, fmt.Errorf("go-m4a: audio track codec is not mp4a, Opus, or fLaC: %w", ErrUnsupported)
-		}
-		return nil, 0, 0, box.Trex{}, fmt.Errorf("go-m4a: no supported audio track: %w", ErrUnsupported)
+		return nil, 0, 0, box.Trex{}, errNoSupportedSoun(sawSoun)
 	}
 	return chosen, movieTS, movieDur, trexByID[chosen.trackID], nil
 }
@@ -103,14 +88,17 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 // consumes, modeling each trun run as one contiguous chunk. It reuses the plain
 // path's validateOffsets to confirm every access unit lies within the stream, and
 // sets Info.Duration from the summed sample durations at the media timescale.
-func (rd *Reader) buildFragmentGeometry(moofOffsets []int64, tr *track, trex box.Trex) error {
+func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) error {
 	var (
 		sizes        []uint32
-		chunkOffsets []int64
-		perChunk     []int64
 		totalSamples int64
 		totalDur     uint64
 	)
+	// One chunk per movie fragment is the common CMAF layout, so size to the
+	// fragment count; a fragment carrying several trun runs or none makes this an
+	// estimate, which is fine for a capacity hint.
+	chunkOffsets := make([]int64, 0, len(moofs))
+	perChunk := make([]int64, 0, len(moofs))
 	acc := &fragAccumulator{
 		streamLen: rd.streamLen,
 		track:     tr,
@@ -122,12 +110,15 @@ func (rd *Reader) buildFragmentGeometry(moofOffsets []int64, tr *track, trex box
 		duration:  &totalDur,
 	}
 
-	for _, moofOff := range moofOffsets {
-		moofBody, err := rd.readBox(moofOff)
+	for _, ext := range moofs {
+		// scanTopLevel already parsed and bounds-checked this moof's header, so
+		// read the body directly from the cached extent instead of re-reading and
+		// re-parsing the 16-byte header per fragment.
+		moofBody, err := readSection(rd.r, ext.bodyStart, ext.bodyLen)
 		if err != nil {
-			return err
+			return fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
 		}
-		acc.moofOffset = moofOff
+		acc.moofOffset = ext.offset
 		err = box.WalkChildren(moofBody, func(typ box.FourCC, body []byte) error {
 			if typ != fourccTraf {
 				return nil
@@ -164,30 +155,6 @@ func (rd *Reader) buildFragmentGeometry(moofOffsets []int64, tr *track, trex box
 		rd.info.Duration = ticksToDuration(totalDur, tr.mdhdTS)
 	}
 	return nil
-}
-
-// readBox reads the box at file offset off and returns its body (the bytes after
-// the header). off is a moof offset scanTopLevel already validated to start a
-// well-formed box within the stream; the header is re-read here to size the body.
-func (rd *Reader) readBox(off int64) ([]byte, error) {
-	remaining := rd.streamLen - off
-	hdrLen := min(remaining, int64(16))
-	head, err := readSection(rd.r, off, hdrLen)
-	if err != nil {
-		return nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, err)
-	}
-	h, err := box.ParseHeader(head)
-	if err != nil {
-		return nil, fmt.Errorf("go-m4a: %w: %w", err, ErrCorrupt)
-	}
-	total := h.Total
-	if h.ToEnd {
-		total = remaining
-	}
-	if total < h.HeaderLen || total > remaining {
-		return nil, fmt.Errorf("go-m4a: box %q at %d runs past stream: %w", h.Type, off, ErrCorrupt)
-	}
-	return readSection(rd.r, off+h.HeaderLen, total-h.HeaderLen)
 }
 
 // fragAccumulator threads the growing geometry and the fixed per-track context
