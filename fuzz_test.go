@@ -40,6 +40,33 @@ func writerSeed() (data []byte, ok bool) {
 	return ws.buf, true
 }
 
+// fragmentedSeed builds a valid fragmented (CMAF) stream, an init segment plus two
+// media segments, so the fuzz corpus reaches the moof/traf/tfhd/trun demux path
+// that a plain-file seed never constructs.
+func fragmentedSeed() (data []byte, ok bool) {
+	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
+	init, err := InitSegment(cfg)
+	if err != nil {
+		return nil, false
+	}
+	fw, err := NewFragmentWriter(cfg)
+	if err != nil {
+		return nil, false
+	}
+	out := append([]byte(nil), init...)
+	for _, seg := range [][]byte{{0x21, 0x22, 0x23}, {0x31, 0x32}} {
+		for range 3 {
+			if err := fw.WriteFrameDuration(seg, 1024); err != nil {
+				return nil, false
+			}
+		}
+		if out, err = fw.AppendSegment(out); err != nil {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
 // FuzzReader is the continuous demuxer fuzz target the CI workflow drives. It
 // asserts a single safety contract: over any input, NewReader plus a full
 // ReadFrame/RawStream drain never panics, and every error surfaced is a wrapped
@@ -65,6 +92,10 @@ func FuzzReader(f *testing.F) {
 	}
 	// Seed with one file the Writer produced from synthetic access units.
 	if b, ok := writerSeed(); ok {
+		f.Add(b)
+	}
+	// Seed with a fragmented (CMAF) stream so the fuzzer exercises the demux path.
+	if b, ok := fragmentedSeed(); ok {
 		f.Add(b)
 	}
 

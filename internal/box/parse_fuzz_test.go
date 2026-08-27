@@ -165,6 +165,52 @@ func FuzzParseDops(f *testing.F) {
 	})
 }
 
+func FuzzParseTfhd(f *testing.F) {
+	f.Add(body(AppendTfhd(nil, 1, 0)))
+	f.Add(body(AppendTfhd(nil, 1, 1024)))
+	f.Add([]byte{0, 0, 0}) // shorter than the 8-byte minimum
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		defer noPanic(t, payload)
+		tf, err := ParseTfhd(payload)
+		if err != nil {
+			mustParseSentinel(t, err)
+			return
+		}
+		// On a successful parse (payload was at least 8 bytes) the decoded Has*
+		// flags and DefaultBaseIsMoof must agree with the raw flag bits, so a
+		// gated field is never read without its flag set or skipped with it set.
+		flags := uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
+		if tf.HasBaseDataOffset != (flags&tfhdBaseDataOffsetPresent != 0) ||
+			tf.HasDefaultSampleDuration != (flags&tfhdDefaultSampleDurationPresent != 0) ||
+			tf.HasDefaultSampleSize != (flags&tfhdDefaultSampleSizePresent != 0) ||
+			tf.HasDefaultSampleFlags != (flags&tfhdDefaultSampleFlagsPresent != 0) ||
+			tf.DefaultBaseIsMoof != (flags&tfhdDefaultBaseIsMoof != 0) {
+			t.Fatalf("tfhd Has* flags disagree with raw flags %#x: %+v", flags, tf)
+		}
+	})
+}
+
+func FuzzParseTrun(f *testing.F) {
+	f.Add(body(AppendTrun(nil, 8, []uint32{10, 20, 30}, nil)))
+	f.Add(body(AppendTrun(nil, 8, []uint32{10, 20}, []uint32{960, 960})))
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 5}) // huge sample_count, no records
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		defer noPanic(t, payload)
+		tn, err := ParseTrun(payload)
+		if err != nil {
+			mustParseSentinel(t, err)
+			return
+		}
+		// When any per-sample field is present, the parser allocates exactly
+		// SampleCount records, and those records must fit within the payload.
+		if tn.Samples != nil && len(tn.Samples) != int(tn.SampleCount) {
+			t.Fatalf("trun: %d samples for sample_count %d", len(tn.Samples), tn.SampleCount)
+		}
+	})
+}
+
 // noPanic turns a parser panic into a test failure that names the input, so a
 // crasher lands in testdata/fuzz with the bytes that produced it.
 func noPanic(t *testing.T, payload []byte) {
