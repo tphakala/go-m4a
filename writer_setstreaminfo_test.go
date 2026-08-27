@@ -206,6 +206,19 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("SetSTREAMINFO rejects a non-placeholder zero-rate block", func(t *testing.T) {
+		t.Parallel()
+		ws := &memWS{}
+		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
+		// Only the all-zero block is the accepted placeholder. A block whose sample
+		// rate is 0 but which carries other data (here the channel field) is malformed
+		// and must not bypass the cross-check on its zero rate.
+		err := w.SetSTREAMINFO(flacStreamInfo(0, 2))
+		if err == nil || !strings.Contains(err.Error(), "sample rate") {
+			t.Errorf("SetSTREAMINFO(rate 0, 2 ch) error = %v, want a sample-rate mismatch", err)
+		}
+	})
+
 	t.Run("SetSTREAMINFO accepts a matching block", func(t *testing.T) {
 		t.Parallel()
 		ws := &memWS{}

@@ -756,17 +756,18 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		// to fit the 16.16 field. The authoritative rate is the 20-bit value in the
 		// dfLa STREAMINFO, so prefer it and fall back to the sample entry only when the
 		// block is absent or declares 0 (unknown).
+		//
+		// A nonzero rate is also the "this STREAMINFO is real" signal, so only then is
+		// the channel count taken from STREAMINFO too. Its channelcount is likewise
+		// authoritative (the AudioSampleEntry channelcount is only advisory, and a
+		// foreign muxer may cap it at 2 for a multichannel FLAC stream), but an
+		// all-zero placeholder block would decode as 1 channel and must not override a
+		// real sample-entry count, so the override rides with the rate.
 		if r := box.STREAMINFOSampleRate(tr.codecConfig); r > 0 {
 			sampleRate = int(r)
-		}
-		// The channel count is likewise authoritative in STREAMINFO. The
-		// AudioSampleEntry channelcount is only advisory, and a foreign muxer may cap
-		// it at 2 for a multichannel FLAC stream (the ISOBMFF legacy convention), so
-		// prefer the dfLa value. STREAMINFOChannels returns 1..8 for any present block
-		// (the field encodes channels-1, so it never yields 0) and 0 only when the
-		// block is absent or truncated, which is exactly when the sample entry stands.
-		if c := box.STREAMINFOChannels(tr.codecConfig); c > 0 {
-			channels = c
+			if c := box.STREAMINFOChannels(tr.codecConfig); c > 0 {
+				channels = c
+			}
 		}
 	}
 	return sampleRate, channels

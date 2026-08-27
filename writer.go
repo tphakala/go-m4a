@@ -127,12 +127,14 @@ type WriterConfig struct {
 	// power-of-two hint in the sample entry, while the true rate rides in STREAMINFO
 	// and the media timescale.
 	//
-	// For FLAC, SampleRate should agree with the rate inside STREAMINFO. NewWriter
-	// does not compare them, so keeping them in step is the caller's job; the value
-	// that matters on read is STREAMINFO's, which this package's Reader and a
-	// conforming decoder both take as authoritative (Xiph, Encapsulation of FLAC in
-	// ISOBMFF). A config where they disagree produces a file whose reported rate
-	// comes from STREAMINFO, not from this field.
+	// For FLAC, SampleRate must agree with the rate inside STREAMINFO when the block
+	// carries one: NewWriter and SetSTREAMINFO reject a STREAMINFO whose declared
+	// (nonzero) sample rate or channel count disagrees with this config, so an
+	// inconsistent dfLa cannot be written. An all-zero placeholder block (used by the
+	// deferred-STREAMINFO path) declares no rate and is accepted; the finalized block
+	// supplied later must still agree. The value that matters on read is STREAMINFO's,
+	// which this package's Reader and a conforming decoder both take as authoritative
+	// (Xiph, Encapsulation of FLAC in ISOBMFF).
 	SampleRate int
 
 	// Channels is the channel count. Required. AAC-LC and Opus accept 1 (mono) or
@@ -809,13 +811,14 @@ func validateFLACConfig(cfg WriterConfig) error {
 
 // validateFlacStreamInfo cross-checks a FLAC STREAMINFO block against the sample
 // rate and channel count configured on the writer, so a caller cannot ship a dfLa
-// that disagrees with its sample entry and media timescale. It is a no-op for the
-// two cases the contract still allows: a block of any length other than the fixed
-// flacStreamInfoLen (length is validated at the call sites), and an all-zero or
-// otherwise rate-0 placeholder, which the streaming path writes before the real
-// block arrives via SetSTREAMINFO. Only a block declaring a nonzero sample rate is
-// checked, matching the "is this STREAMINFO real" signal resolveFormat uses on the
-// read side; a genuine rate or channel mismatch is rejected.
+// that disagrees with its sample entry and media timescale. It is a no-op for two
+// allowed cases: a block of any length other than the fixed flacStreamInfoLen
+// (length is validated at the call sites), and the all-zero placeholder the
+// deferred-streaming path writes before the finalized block arrives via
+// SetSTREAMINFO. Any other 34-byte block is cross-checked, INCLUDING one whose
+// sample rate is 0 but which carries other data: that is a malformed block rather
+// than the placeholder, and its rate of 0 fails the check against the required
+// positive config rate. A genuine rate or channel mismatch is rejected.
 //
 // Its messages are intentionally NOT "go-m4a:"-prefixed: both callers wrap them with
 // the package prefix (SetSTREAMINFO adds its own context too), so a new caller must
@@ -824,11 +827,17 @@ func validateFlacStreamInfo(streamInfo []byte, channels, sampleRate int) error {
 	if len(streamInfo) != flacStreamInfoLen {
 		return nil
 	}
-	siRate := box.STREAMINFOSampleRate(streamInfo)
-	if siRate == 0 {
+	allZero := true
+	for _, b := range streamInfo {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
 		return nil
 	}
-	if int(siRate) != sampleRate {
+	if siRate := box.STREAMINFOSampleRate(streamInfo); int(siRate) != sampleRate {
 		return fmt.Errorf("FLAC STREAMINFO sample rate %d Hz disagrees with configured %d Hz", siRate, sampleRate)
 	}
 	if siChannels := box.STREAMINFOChannels(streamInfo); siChannels != channels {

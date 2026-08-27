@@ -440,4 +440,12 @@ func TestResolveFormatFLACChannelsFromStreamInfo(t *testing.T) {
 	if _, ch := resolveFormat(trNoSI); ch != 2 {
 		t.Errorf("resolveFormat channels with no STREAMINFO = %d, want 2 (sample-entry fallback)", ch)
 	}
+
+	// An all-zero placeholder block declares rate 0 (so it is not "real") but its
+	// channel field decodes as 1. The override is gated on a nonzero rate, so the
+	// sample-entry count must stand rather than being clobbered to mono.
+	trPlaceholder := &track{codec: fourccFlac, codecConfig: make([]byte, flacStreamInfoLen), seChannels: 6, seSampleRate: 48000}
+	if _, ch := resolveFormat(trPlaceholder); ch != 6 {
+		t.Errorf("resolveFormat channels with all-zero placeholder STREAMINFO = %d, want 6 (sample-entry, not overridden to 1)", ch)
+	}
 }
