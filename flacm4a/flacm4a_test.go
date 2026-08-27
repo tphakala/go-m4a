@@ -73,6 +73,8 @@ func TestFLACRoundTrip(t *testing.T) {
 		{"mono44k", 44100, 1, 9000},
 		{"stereo48k", 48000, 2, 12000},
 		{"mono48k_short", 48000, 1, 100},
+		{"5.1_48k", 48000, 6, 8000},
+		{"7.1_48k", 48000, 8, 4000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,7 +112,8 @@ func TestFLACEncodeErrors(t *testing.T) {
 		cfg  Config
 		pcm  []byte
 	}{
-		{"bad channels", Config{SampleRate: 44100, Channels: 3, BitDepth: 16}, make([]byte, 12)},
+		{"zero channels", Config{SampleRate: 44100, Channels: 0, BitDepth: 16}, make([]byte, 12)},
+		{"too many channels", Config{SampleRate: 44100, Channels: 9, BitDepth: 16}, make([]byte, 36)},
 		// A non-byte-aligned bit depth would compute the wrong stride and mis-parse.
 		{"non-byte-aligned bit depth", Config{SampleRate: 44100, Channels: 1, BitDepth: 20}, make([]byte, 12)},
 		{"partial trailing sample", Config{SampleRate: 44100, Channels: 2, BitDepth: 16}, make([]byte, 6)}, // stride 4, 6 bytes

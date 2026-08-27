@@ -183,6 +183,32 @@ func TestSTREAMINFOSampleRate(t *testing.T) {
 	}
 }
 
+func TestSTREAMINFOChannels(t *testing.T) {
+	// The 3-bit channel field stores channels-1 in bits 3..1 of byte 12, per RFC
+	// 9639 section 8.2. Use a rate whose low nibble is 0xF (0xBB8F) so byte 12's high
+	// nibble is all ones: that maximally stresses the (si[12]>>1)&0x07 mask, which a
+	// mutant dropping the mask would fail. Assert the rate reads back too, proving the
+	// two adjacent fields do not bleed into each other in either direction.
+	rate := uint32(0xBB8F)
+	for ch := 1; ch <= 8; ch++ {
+		si := make([]byte, StreamInfoBodyLen)
+		si[10] = byte(rate >> 12)
+		si[11] = byte(rate >> 4)
+		si[12] = byte(rate<<4) | byte((ch-1)<<1)
+		if got := STREAMINFOChannels(si); got != ch {
+			t.Errorf("STREAMINFOChannels(%d ch, rate %#x) = %d, want %d", ch, rate, got, ch)
+		}
+		if got := STREAMINFOSampleRate(si); got != rate {
+			t.Errorf("STREAMINFOSampleRate with %d ch packed = %#x, want %#x (channel bits bled into rate)", ch, got, rate)
+		}
+	}
+	// A block too short to hold byte 12 yields 0, mirroring STREAMINFOSampleRate so a
+	// caller can treat 0 as "unknown" rather than read past the slice.
+	if got := STREAMINFOChannels(make([]byte, 12)); got != 0 {
+		t.Errorf("STREAMINFOChannels(short) = %d, want 0", got)
+	}
+}
+
 func assertSampleEntry(t *testing.T, entry []byte, wantType FourCC, wantCh uint16, wantRate uint32, wantChild FourCC) {
 	t.Helper()
 	h, err := ParseHeader(entry)
