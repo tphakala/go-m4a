@@ -55,11 +55,13 @@ type Info struct {
 	Brand string
 }
 
-// Reader demuxes a non-fragmented MP4/M4A file (AAC-LC, Opus, or FLAC) into its
-// access units. NewReader parses the moov metadata up front; ReadFrame then returns each
-// access unit in order by seeking to its computed (offset, size). The reader is
-// not safe for concurrent use, and ReadFrame, RawStream, and their shared cursor
-// advance together.
+// Reader demuxes an MP4/M4A file (AAC-LC, Opus, or FLAC) into its access units,
+// handling both a plain file (ftyp/moov/mdat) and a fragmented (CMAF) stream (an
+// init segment followed by moof/mdat media segments). NewReader parses the moov
+// metadata up front, and for a fragmented stream also lays out the samples the
+// movie fragments carry; ReadFrame then returns each access unit in order by
+// seeking to its computed (offset, size). The reader is not safe for concurrent
+// use, and ReadFrame, RawStream, and their shared cursor advance together.
 type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
@@ -87,6 +89,7 @@ type Reader struct {
 var (
 	fourccMoov = box.NewFourCC("moov")
 	fourccTrak = box.NewFourCC("trak")
+	fourccTkhd = box.NewFourCC("tkhd")
 	fourccMvhd = box.NewFourCC("mvhd")
 	fourccMvex = box.NewFourCC("mvex")
 	fourccEdts = box.NewFourCC("edts")
@@ -114,19 +117,17 @@ var (
 
 	fourccFtyp = box.NewFourCC("ftyp")
 	fourccMoof = box.NewFourCC("moof")
-	fourccStyp = box.NewFourCC("styp")
-	fourccSidx = box.NewFourCC("sidx")
-	fourccMfra = box.NewFourCC("mfra")
 )
 
 // NewReader reads and parses the moov metadata from r and returns a Reader
 // positioned at the first access unit. It locates moov whether it precedes or
 // follows mdat, selects the first "soun" track carrying a supported sample entry
 // (mp4a AAC-LC, Opus, or fLaC), and builds the sample geometry from the
-// stsc/stsz/stco tables. It returns a wrapped ErrCorrupt for malformed input and a
-// wrapped ErrUnsupported for well-formed input outside scope (fragmented files, no
-// supported audio track, an unsupported codec, or an AAC object type that is not
-// MPEG-4 Audio).
+// stsc/stsz/stco tables. When r is a fragmented (CMAF) stream (moof boxes present),
+// it instead reads the init segment's sample entry and lays out the samples the
+// movie fragments carry. It returns a wrapped ErrCorrupt for malformed input and a
+// wrapped ErrUnsupported for well-formed input outside scope (no supported audio
+// track, an unsupported codec, or an AAC object type that is not MPEG-4 Audio).
 func NewReader(r io.ReadSeeker) (*Reader, error) {
 	if r == nil {
 		return nil, fmt.Errorf("go-m4a: nil reader")
@@ -139,24 +140,30 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 		return nil, fmt.Errorf("go-m4a: negative stream length %d: %w", streamLen, ErrCorrupt)
 	}
 
-	brand, moovPayload, err := scanTopLevel(r, streamLen)
+	brand, moovPayload, moofOffsets, err := scanTopLevel(r, streamLen)
 	if err != nil {
 		return nil, err
 	}
 
 	rd := &Reader{r: r, streamLen: streamLen}
 	rd.info.Brand = brand
-	if err := rd.parseMoov(moovPayload); err != nil {
+	if len(moofOffsets) > 0 {
+		if err := rd.parseFragmented(moovPayload, moofOffsets); err != nil {
+			return nil, err
+		}
+	} else if err := rd.parseMoov(moovPayload); err != nil {
 		return nil, err
 	}
 	rd.resetCursor()
 	return rd, nil
 }
 
-// scanTopLevel walks the top-level boxes of r, returning the ftyp major brand
-// and the moov box body. It rejects fragmented input (moof/styp/sidx/mfra) as
-// ErrUnsupported and a missing moov as ErrCorrupt.
-func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, err error) {
+// scanTopLevel walks the top-level boxes of r, returning the ftyp major brand,
+// the moov box body, and the file offsets of every top-level moof box. A
+// non-empty moofOffsets marks fragmented (CMAF) input, which NewReader demuxes
+// through the movie fragments rather than the moov sample tables. styp, sidx, and
+// mfra are skipped; a missing moov is ErrCorrupt.
+func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, moofOffsets []int64, err error) {
 	var moov []byte
 	for off := int64(0); off < streamLen; {
 		remaining := streamLen - off
@@ -169,27 +176,27 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 		}
 		head, rerr := readSection(r, off, hdrLen)
 		if rerr != nil {
-			return "", nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
+			return "", nil, nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
 		}
 		h, perr := box.ParseHeader(head)
 		if perr != nil {
-			return "", nil, fmt.Errorf("go-m4a: %w: %w", perr, ErrCorrupt)
+			return "", nil, nil, fmt.Errorf("go-m4a: %w: %w", perr, ErrCorrupt)
 		}
 		total := h.Total
 		if h.ToEnd {
 			total = remaining
 		}
 		if total < h.HeaderLen || total > remaining {
-			return "", nil, fmt.Errorf("go-m4a: box %q at %d runs past stream: %w", h.Type, off, ErrCorrupt)
+			return "", nil, nil, fmt.Errorf("go-m4a: box %q at %d runs past stream: %w", h.Type, off, ErrCorrupt)
 		}
 
 		switch h.Type {
-		case fourccMoof, fourccStyp, fourccSidx, fourccMfra:
-			return "", nil, fmt.Errorf("go-m4a: fragmented input (%q): %w", h.Type, ErrUnsupported)
+		case fourccMoof:
+			moofOffsets = append(moofOffsets, off)
 		case fourccFtyp:
 			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen)
 			if berr != nil {
-				return "", nil, fmt.Errorf("go-m4a: read ftyp: %w", berr)
+				return "", nil, nil, fmt.Errorf("go-m4a: read ftyp: %w", berr)
 			}
 			if len(body) >= 4 {
 				brand = string(body[:4])
@@ -197,16 +204,16 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 		case fourccMoov:
 			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen)
 			if berr != nil {
-				return "", nil, fmt.Errorf("go-m4a: read moov: %w", berr)
+				return "", nil, nil, fmt.Errorf("go-m4a: read moov: %w", berr)
 			}
 			moov = body
 		}
 		off += total
 	}
 	if moov == nil {
-		return "", nil, fmt.Errorf("go-m4a: no moov box: %w", ErrCorrupt)
+		return "", nil, nil, fmt.Errorf("go-m4a: no moov box: %w", ErrCorrupt)
 	}
-	return brand, moov, nil
+	return brand, moov, moofOffsets, nil
 }
 
 // readSection seeks to off and reads exactly n bytes. n is always a header size
@@ -238,6 +245,7 @@ type track struct {
 	handler box.FourCC
 	codec   box.FourCC // first stsd sample-entry type
 	haveSE  bool       // a first sample entry was parsed
+	trackID uint32     // tkhd track_ID, used to bind movie fragments to this track
 
 	asc          []byte // AAC-LC AudioSpecificConfig (esds); nil for Opus/FLAC
 	objectType   byte   // AAC-LC esds objectTypeIndication
@@ -319,6 +327,12 @@ func parseTrak(trak []byte) (*track, error) {
 	tr := &track{}
 	err := box.WalkChildren(trak, func(typ box.FourCC, body []byte) error {
 		switch typ {
+		case fourccTkhd:
+			id, perr := box.ParseTkhd(body)
+			if perr != nil {
+				return perr
+			}
+			tr.trackID = id
 		case fourccEdts:
 			return parseEdts(body, tr)
 		case fourccMdia:
@@ -495,27 +509,8 @@ func parseStsd(stsd []byte, tr *track) error {
 func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 	// Codec-specific configuration must be present and, for AAC, the object type
 	// must be MPEG-4 Audio. The sample geometry below is codec-agnostic.
-	switch tr.codec {
-	case fourccMp4a:
-		if tr.asc == nil {
-			return fmt.Errorf("go-m4a: mp4a track has no esds AudioSpecificConfig: %w", ErrCorrupt)
-		}
-		if tr.objectType != objectTypeMP4Audio {
-			return fmt.Errorf("go-m4a: object type %#x is not AAC: %w", tr.objectType, ErrUnsupported)
-		}
-		rd.info.Codec = CodecAACLC
-	case fourccOpus:
-		if tr.codecConfig == nil {
-			return fmt.Errorf("go-m4a: Opus track has no dOps OpusSpecificBox: %w", ErrCorrupt)
-		}
-		rd.info.Codec = CodecOpus
-	case fourccFlac:
-		if tr.codecConfig == nil {
-			return fmt.Errorf("go-m4a: fLaC track has no dfLa STREAMINFO: %w", ErrCorrupt)
-		}
-		rd.info.Codec = CodecFLAC
-	default:
-		return fmt.Errorf("go-m4a: unsupported codec %q: %w", tr.codec, ErrUnsupported)
+	if err := rd.validateCodec(tr); err != nil {
+		return err
 	}
 	if tr.seen.stz2 && !tr.seen.stsz {
 		return fmt.Errorf("go-m4a: stz2 sample sizes are unsupported: %w", ErrUnsupported)
@@ -548,13 +543,52 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 		}
 	}
 
+	rd.fillFormatInfo(tr, movieTS, movieDur)
+	rd.info.FrameCount = rd.sampleCount
+	return nil
+}
+
+// validateCodec confirms the selected track carries a supported codec with its
+// codec-specific configuration present, and records the codec in Info. For AAC
+// the esds object type must be MPEG-4 Audio. It is shared by the plain and
+// fragmented paths, which both select a track before building any geometry.
+func (rd *Reader) validateCodec(tr *track) error {
+	switch tr.codec {
+	case fourccMp4a:
+		if tr.asc == nil {
+			return fmt.Errorf("go-m4a: mp4a track has no esds AudioSpecificConfig: %w", ErrCorrupt)
+		}
+		if tr.objectType != objectTypeMP4Audio {
+			return fmt.Errorf("go-m4a: object type %#x is not AAC: %w", tr.objectType, ErrUnsupported)
+		}
+		rd.info.Codec = CodecAACLC
+	case fourccOpus:
+		if tr.codecConfig == nil {
+			return fmt.Errorf("go-m4a: Opus track has no dOps OpusSpecificBox: %w", ErrCorrupt)
+		}
+		rd.info.Codec = CodecOpus
+	case fourccFlac:
+		if tr.codecConfig == nil {
+			return fmt.Errorf("go-m4a: fLaC track has no dfLa STREAMINFO: %w", ErrCorrupt)
+		}
+		rd.info.Codec = CodecFLAC
+	default:
+		return fmt.Errorf("go-m4a: unsupported codec %q: %w", tr.codec, ErrUnsupported)
+	}
+	return nil
+}
+
+// fillFormatInfo copies the codec configuration into the Reader and fills the
+// format fields that do not depend on the sample geometry: sample rate, channel
+// count, encoder delay, and presentation duration. It is shared by the plain and
+// fragmented paths; the caller sets FrameCount once the geometry is built.
+func (rd *Reader) fillFormatInfo(tr *track, movieTS uint32, movieDur uint64) {
 	// Copy the codec config (and the ASC for AAC) so the Reader is independent of
 	// the moov buffer. tr.asc is nil for Opus and FLAC, so ASC stays nil there.
 	if tr.asc != nil {
 		rd.info.ASC = append([]byte(nil), tr.asc...)
 	}
 	rd.info.CodecConfig = append([]byte(nil), tr.codecConfig...)
-	rd.info.FrameCount = rd.sampleCount
 	rd.info.SampleRate, rd.info.Channels = resolveFormat(tr)
 
 	if tr.hasElst && tr.elstMedia >= 0 {
@@ -566,7 +600,6 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 		rd.info.EncoderDelay = int64(tr.opusPreSkip)
 	}
 	rd.info.Duration = presentationDuration(tr, movieTS, movieDur)
-	return nil
 }
 
 // buildGeometry decodes the size and chunk tables, cross-checks their counts,

@@ -798,10 +798,12 @@ func TestAppendSegmentSteadyStateAllocations(t *testing.T) {
 	}
 }
 
-// TestFragmentedOutputIsRejectedByReader pins the documented split: this package
-// writes fragmented output but does not read it, and the reader says so with a
-// typed error rather than misparsing.
-func TestFragmentedOutputIsRejectedByReader(t *testing.T) {
+// TestFragmentedReaderInputContract pins the fragmented-input contract the reader
+// now honors: a full stream (init segment plus media segments) is demuxed back to
+// its access units, an init segment on its own is ErrUnsupported because it
+// carries no media, and a media segment without its init segment is ErrCorrupt
+// because it has no moov.
+func TestFragmentedReaderInputContract(t *testing.T) {
 	init, err := InitSegment(aacFragmentConfig())
 	if err != nil {
 		t.Fatalf("InitSegment: %v", err)
@@ -810,26 +812,32 @@ func TestFragmentedOutputIsRejectedByReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFragmentWriter: %v", err)
 	}
-	stream := segmentFrames(t, f, init, synthFrames(4))
+	frames := synthFrames(4)
+	stream := segmentFrames(t, f, init, frames)
 
-	tests := []struct {
-		name string
-		data []byte
-	}{
-		// The init segment on its own is the artefact an EXT-X-MAP serves, so it is
-		// the one most likely to reach NewReader by mistake. It has no styp, so it
-		// exercises the mvex rejection rather than the top-level scan.
-		{"init segment (mvex)", init},
-		{"media segment (styp)", stream[len(init):]},
-		{"init and media segments", stream},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewReader(bytes.NewReader(tc.data)); !errors.Is(err, ErrUnsupported) {
-				t.Fatalf("NewReader returned %v, want ErrUnsupported", err)
-			}
-		})
-	}
+	t.Run("init and media segments are demuxed", func(t *testing.T) {
+		rd, err := NewReader(bytes.NewReader(stream))
+		if err != nil {
+			t.Fatalf("NewReader: %v", err)
+		}
+		if rd.Info().FrameCount != len(frames) {
+			t.Errorf("FrameCount = %d, want %d", rd.Info().FrameCount, len(frames))
+		}
+	})
+	t.Run("init segment alone is unsupported", func(t *testing.T) {
+		// An init segment has an mvex but no media segments (no moof), so there is
+		// nothing to read; the mvex-only moov is not a plain file either.
+		if _, err := NewReader(bytes.NewReader(init)); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("NewReader(init) = %v, want ErrUnsupported", err)
+		}
+	})
+	t.Run("media segment without init is corrupt", func(t *testing.T) {
+		// A media segment carries styp/moof/mdat but no moov, so the reader cannot
+		// resolve a sample entry and reports corruption.
+		if _, err := NewReader(bytes.NewReader(stream[len(init):])); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("NewReader(media) = %v, want ErrCorrupt", err)
+		}
+	})
 }
 
 // BenchmarkFragmentWriteFrame measures the per-access-unit hot path: one call per
