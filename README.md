@@ -40,11 +40,14 @@ and its codec-specific box differ.
   extra boxes real encoders emit (`free`, `udta`, `meta`, `sgpd`, `sbgp`), expands
   arbitrary multi-chunk `stsc` tables, and reads ffmpeg and Apple `afconvert` files.
 - **Opus** (`Opus` + `dOps`): each MP4 sample is one Opus packet; the `dOps`
-  pre-skip drives the same edit-list priming trim as AAC. The emitted `dOps` is
+  pre-skip drives the same edit-list priming trim as AAC. The container timescale is
+  fixed at 48 kHz, and the encoder bridge accepts source audio at 8, 12, 16, 24, or
+  48 kHz (the true source rate is recorded in `dOps`). The emitted `dOps` is
   byte-identical to ffmpeg's, ffmpeg reads the container, and an encode/decode
   round-trip through go-opus preserves the signal.
 - **FLAC** (`fLaC` + `dfLa`): each MP4 sample is one native FLAC frame, with the
-  34-byte STREAMINFO in `dfLa`; no edit list (FLAC has no priming). Reads
+  34-byte STREAMINFO in `dfLa`; no edit list (FLAC has no priming). Handles 1 to 8
+  channels and sample rates up to 1048575 Hz (the 20-bit STREAMINFO maximum). Reads
   ffmpeg-produced files and round-trips bit-exact (lossless) through go-flac.
 
 Parsing is bounds-checked throughout and never panics on malformed input, and the
@@ -79,26 +82,30 @@ a byte slice or a socket, and it reuses its buffers, so a steady-state segment
 allocates nothing. It is codec-generic like the rest of the writer. See
 [Fragmented output for HLS](#fragmented-output-for-hls).
 
-Scope: a single audio track, mono or stereo. The sample rate depends on the
-codec, because each one constrains it differently: **AAC-LC** takes the eleven
-MPEG-4 sampling-frequency table rates that the 16-bit sample-entry field can hold
-(7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000 Hz;
-88.2 and 96 kHz are in the table but are rejected rather than written wrong);
-**Opus** is always 48 kHz, which its encapsulation fixes as the container
-timescale; **FLAC** has no rate table, so any rate up to 65535 Hz. 44.1 and
-48 kHz are the best-trodden paths; every AAC rate above is covered by a round
-trip rather than only by the validator letting it past.
+Scope: a single audio track. Channel counts are per codec: **AAC-LC** and **Opus**
+are mono or stereo, **FLAC** is 1 to 8 channels. The sample rate is also per codec,
+because each one constrains it differently: **AAC-LC** takes the eleven MPEG-4
+sampling-frequency table rates that the 16-bit sample-entry field can hold (7350,
+8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000 Hz; 88.2 and
+96 kHz are in the table but are rejected rather than written wrong); **Opus** fixes
+the container timescale at 48 kHz but accepts source audio at 8, 12, 16, 24, or
+48 kHz, recording the true source rate in the `dOps` box; **FLAC** has no rate
+table, so any rate up to 1048575 Hz (the 20-bit STREAMINFO maximum). A FLAC rate
+above the 16-bit sample-entry field carries a reduced hint there and the true rate
+in STREAMINFO, following the Xiph FLAC-in-ISOBMFF fallback. 44.1 and 48 kHz are the
+best-trodden paths; every AAC rate above is covered by a round trip rather than
+only by the validator letting it past.
 
-Two caveats on that. The `aacm4a` convenience bridge is narrower than the core
-writer, because go-aac's encoder accepts only 44100 and 48000. And for FLAC the
-65535 Hz ceiling is this package's limit rather than the format's: the Xiph
-encapsulation defines a fallback for higher rates that go-m4a does not implement
-(see [#4](https://github.com/tphakala/go-m4a/issues/4)).
-Fragmented MP4 is write-only: the reader is for plain files and returns a typed
-`ErrUnsupported` for fragmented input. Also out of scope (again `ErrUnsupported`,
-never a crash): video or multiple audio tracks, other codecs, HE-AAC, surround,
-and writing metadata tags. See the open issues for the tracked extensions
-(non-48 kHz Opus input, high sample rates, more than two channels).
+One caveat: the `aacm4a` convenience bridge is narrower than the core writer,
+because go-aac's encoder accepts only 44100 and 48000 Hz. Fragmented MP4 is
+write-only: the reader is for plain files and returns a typed `ErrUnsupported` for
+fragmented input (demux is tracked in
+[#41](https://github.com/tphakala/go-m4a/issues/41)). Also out of scope (again
+`ErrUnsupported`, never a crash): video or multiple audio tracks, other codecs,
+HE-AAC, and writing metadata tags. Surround is partly covered now (FLAC up to 8
+channels); more-than-stereo **Opus** is the one tracked codec extension still open
+([#5](https://github.com/tphakala/go-m4a/issues/5)), blocked upstream on a go-opus
+multistream API.
 
 ## Install
 
@@ -191,8 +198,8 @@ channel) and discard the rest.
 
 ### opusm4a and flacm4a: the go-opus and go-flac bridges
 
-The same one-call shape wraps Opus (48 kHz interleaved S16) and FLAC (interleaved
-16- or 24-bit):
+The same one-call shape wraps Opus (interleaved S16 at 8, 12, 16, 24, or 48 kHz,
+mono or stereo) and FLAC (interleaved 16- or 24-bit, 1 to 8 channels):
 
 ```go
 import (
