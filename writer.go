@@ -107,9 +107,10 @@ var samplingFrequencyTable = [...]int{
 
 // WriterConfig configures a Writer, and also the fragmented writers InitSegment
 // and NewFragmentWriter. SampleRate and Channels must agree with ASC; the
-// constructors validate them against it and refuse a mismatch. Two fields mean
+// constructors validate them against it and refuse a mismatch. Three fields mean
 // something different on the fragmented path, noted on the fields themselves:
-// MediaLength is rejected there, and Brand has a different default.
+// MediaLength is rejected there, Brand has a different default, and a FLAC
+// STREAMINFO cannot be deferred (a populated 34-byte block is required up front).
 type WriterConfig struct {
 	// Codec selects the audio codec. The zero value is CodecAACLC, so a config
 	// that sets only ASC keeps muxing AAC-LC. For CodecOpus set OpusPreSkip and
@@ -130,11 +131,11 @@ type WriterConfig struct {
 	// For FLAC, SampleRate must agree with the rate inside STREAMINFO when the block
 	// carries one: NewWriter and SetSTREAMINFO reject a STREAMINFO whose declared
 	// (nonzero) sample rate or channel count disagrees with this config, so an
-	// inconsistent dfLa cannot be written. An all-zero placeholder block (used by the
-	// deferred-STREAMINFO path) declares no rate and is accepted; the finalized block
-	// supplied later must still agree. The value that matters on read is STREAMINFO's,
-	// which this package's Reader and a conforming decoder both take as authoritative
-	// (Xiph, Encapsulation of FLAC in ISOBMFF).
+	// inconsistent dfLa cannot be written. On the non-fragmented Writer an all-zero
+	// placeholder block (used by the deferred-STREAMINFO path) declares no rate and is
+	// accepted; the finalized block supplied later must still agree. The value that
+	// matters on read is STREAMINFO's, which this package's Reader and a conforming
+	// decoder both take as authoritative (Xiph, Encapsulation of FLAC in ISOBMFF).
 	SampleRate int
 
 	// Channels is the channel count. Required. AAC-LC and Opus accept 1 (mono) or
@@ -165,6 +166,12 @@ type WriterConfig struct {
 	// frames first and provide the finalized block (with its measured frame sizes
 	// and MD5) at the end. Whether given here or later, a CodecFLAC track must have
 	// a 34-byte block by Close, which errors otherwise.
+	//
+	// Deferral is a non-fragmented Writer feature. The fragmented path writes the dfLa
+	// into the init segment up front (InitSegment) and has no Close or SetSTREAMINFO
+	// step, so its constructors (InitSegment, NewFragmentWriter, and
+	// FragmentWriter.Reset) require a populated 34-byte block here and reject both an
+	// empty slice and an all-zero placeholder.
 	STREAMINFO []byte
 
 	// EncoderDelay is the number of leading priming samples to trim with an edit
@@ -809,6 +816,24 @@ func validateFLACConfig(cfg WriterConfig) error {
 	return nil
 }
 
+// isDeferredFLACStreamInfo reports whether streamInfo is the all-zero 34-byte
+// deferred-streaming placeholder, the block the non-fragmented path writes before
+// SetSTREAMINFO supplies the finalized bytes at Close. Both the plain-path accept
+// site (validateFlacStreamInfo) and the fragmented-path reject site
+// (validateFragmentConfig) branch on this exact condition, so it lives in one place
+// to keep the two opposite decisions from drifting.
+func isDeferredFLACStreamInfo(streamInfo []byte) bool {
+	if len(streamInfo) != flacStreamInfoLen {
+		return false
+	}
+	for _, b := range streamInfo {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // validateFlacStreamInfo cross-checks a FLAC STREAMINFO block against the sample
 // rate and channel count configured on the writer, so a caller cannot ship a dfLa
 // that disagrees with its sample entry and media timescale. It is a no-op for two
@@ -827,14 +852,7 @@ func validateFlacStreamInfo(streamInfo []byte, channels, sampleRate int) error {
 	if len(streamInfo) != flacStreamInfoLen {
 		return nil
 	}
-	allZero := true
-	for _, b := range streamInfo {
-		if b != 0 {
-			allZero = false
-			break
-		}
-	}
-	if allZero {
+	if isDeferredFLACStreamInfo(streamInfo) {
 		return nil
 	}
 	if siRate := box.STREAMINFOSampleRate(streamInfo); int(siRate) != sampleRate {
