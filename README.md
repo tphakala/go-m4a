@@ -97,12 +97,12 @@ best-trodden paths; every AAC rate above is covered by a round trip rather than
 only by the validator letting it past.
 
 One caveat: the `aacm4a` convenience bridge is narrower than the core writer,
-because go-aac's encoder accepts only 44100 and 48000 Hz. Fragmented MP4 is
-write-only: the reader is for plain files and returns a typed `ErrUnsupported` for
-fragmented input (demux is tracked in
-[#41](https://github.com/tphakala/go-m4a/issues/41)). Also out of scope (again
-`ErrUnsupported`, never a crash): video or multiple audio tracks, other codecs,
-HE-AAC, and writing metadata tags. Surround is partly covered now (FLAC up to 8
+because go-aac's encoder accepts only 44100 and 48000 Hz. The reader now handles
+both plain files and fragmented (CMAF) input: `NewReader` auto-detects a
+`moof`-based stream (an initialization segment followed by `moof`/`mdat` media
+segments) and demuxes its access units through the same API. Also out of scope
+(again `ErrUnsupported`, never a crash): video or multiple audio tracks, other
+codecs, HE-AAC, and writing metadata tags. Surround is partly covered now (FLAC up to 8
 channels); more-than-stereo **Opus** is the one tracked codec extension still open
 ([#5](https://github.com/tphakala/go-m4a/issues/5)), blocked upstream on a go-opus
 multistream API.
@@ -161,6 +161,11 @@ for {
     // hand au to your AAC decoder
 }
 ```
+
+`NewReader` reads a fragmented (CMAF) stream the same way: pass an `io.ReadSeeker`
+over the initialization segment concatenated with its `moof`/`mdat` media segments
+and `ReadFrame` yields the access units across every fragment in order. Detection
+is automatic, so the same code path reads plain and fragmented input alike.
 
 `Reader.RawStream()` returns an `io.Reader` that frames each access unit exactly
 as go-aac's `pcm.WithRawStream` expects, so the two libraries plug together with

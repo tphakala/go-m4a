@@ -180,7 +180,7 @@ jobs:
       # parser body directly, and run at millions of executions per second.
       - name: Fuzz box parsers
         run: |
-          for target in FuzzParseStsz FuzzParseStsc FuzzParseStco FuzzParseCo64 FuzzParseStts FuzzParseDfla FuzzParseDops; do
+          for target in FuzzParseStsz FuzzParseStsc FuzzParseStco FuzzParseCo64 FuzzParseStts FuzzParseDfla FuzzParseDops FuzzParseTfhd FuzzParseTrun; do
             go test -run='^$' -fuzz="$target" -fuzztime=10s ./internal/box
           done
       # The bridges hand attacker-controlled container bytes to third-party codecs.

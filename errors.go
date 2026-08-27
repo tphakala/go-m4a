@@ -22,10 +22,11 @@ var (
 	ErrCorrupt = errors.New("go-m4a: corrupt container")
 
 	// ErrUnsupported indicates a well-formed MP4 that falls outside the reader's
-	// scope: fragmented input, no audio track, a codec other than AAC-LC, Opus or
-	// FLAC, or an esds object type that is not AAC. Fragmented input is the
-	// asymmetric case: this package writes it (InitSegment, FragmentWriter) but
-	// deliberately does not read it back.
+	// scope: no audio track, a codec other than AAC-LC, Opus or FLAC, an esds
+	// object type that is not AAC, or a movie fragment whose base offset is neither
+	// default-base-is-moof nor an explicit base_data_offset. Both plain and
+	// fragmented (CMAF) input are read; an init segment on its own, carrying an
+	// mvex but no media fragments, is unsupported because it holds no samples.
 	//
 	// The codec bridges return it for the narrower scope they accept, which is a
 	// subset of the reader's: a track whose codec is not the one that bridge
