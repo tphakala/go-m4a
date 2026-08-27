@@ -142,6 +142,14 @@ func (rd *Reader) buildFragmentGeometry(moofOffsets []int64, tr *track, trex box
 	if totalSamples > maxInt {
 		return fmt.Errorf("go-m4a: fragmented sample count %d exceeds addressable memory: %w", totalSamples, ErrCorrupt)
 	}
+	// The stream carried moof boxes (that is why this path runs), so no sample
+	// matching the selected track means the fragments belong to another track or
+	// the init segment's tkhd was missing and the track_ID never bound. Reject it
+	// rather than hand back a reader that reports zero frames, which a caller cannot
+	// tell apart from a genuine track-binding failure.
+	if totalSamples == 0 {
+		return fmt.Errorf("go-m4a: no movie fragment carries samples for track_ID %d: %w", tr.trackID, ErrCorrupt)
+	}
 	rd.sizes = sizes
 	rd.sampleCount = int(totalSamples)
 	rd.chunkOffsets = chunkOffsets

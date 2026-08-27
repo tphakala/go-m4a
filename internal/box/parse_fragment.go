@@ -120,16 +120,22 @@ func ParseTfdt(payload []byte) (baseMediaDecodeTime uint64, err error) {
 	if len(payload) < 4 {
 		return 0, fmt.Errorf("tfdt: %d bytes: %w", len(payload), errParse)
 	}
-	if payload[0] == 1 {
+	switch payload[0] {
+	case 1:
 		if len(payload) < 12 {
 			return 0, fmt.Errorf("tfdt v1: %d bytes, need 12: %w", len(payload), errParse)
 		}
 		return binary.BigEndian.Uint64(payload[4:]), nil
+	case 0:
+		if len(payload) < 8 {
+			return 0, fmt.Errorf("tfdt v0: %d bytes, need 8: %w", len(payload), errParse)
+		}
+		return uint64(binary.BigEndian.Uint32(payload[4:])), nil
+	default:
+		// A reserved version defines a layout this parser does not know; reading it
+		// as v0 would decode the wrong field, so reject it rather than guess.
+		return 0, fmt.Errorf("tfdt version %d unsupported: %w", payload[0], errParse)
 	}
-	if len(payload) < 8 {
-		return 0, fmt.Errorf("tfdt v0: %d bytes, need 8: %w", len(payload), errParse)
-	}
-	return uint64(binary.BigEndian.Uint32(payload[4:])), nil
 }
 
 // Trex holds the decoded track extends (trex) defaults, which a movie fragment
@@ -179,17 +185,23 @@ func ParseTkhd(payload []byte) (trackID uint32, err error) {
 		return 0, fmt.Errorf("tkhd: %d bytes: %w", len(payload), errParse)
 	}
 	// version/flags(4), creation_time, modification_time, track_ID. The two time
-	// fields are 4 bytes each in version 0 and 8 bytes each in version 1.
-	if payload[0] == 1 {
+	// fields are 4 bytes each in version 0 and 8 bytes each in version 1, which
+	// moves track_ID; a reserved version has an unknown layout, so reject it rather
+	// than read track_ID from the wrong offset.
+	switch payload[0] {
+	case 1:
 		if len(payload) < 24 {
 			return 0, fmt.Errorf("tkhd v1: %d bytes, need 24: %w", len(payload), errParse)
 		}
 		return binary.BigEndian.Uint32(payload[20:]), nil
+	case 0:
+		if len(payload) < 16 {
+			return 0, fmt.Errorf("tkhd v0: %d bytes, need 16: %w", len(payload), errParse)
+		}
+		return binary.BigEndian.Uint32(payload[12:]), nil
+	default:
+		return 0, fmt.Errorf("tkhd version %d unsupported: %w", payload[0], errParse)
 	}
-	if len(payload) < 16 {
-		return 0, fmt.Errorf("tkhd v0: %d bytes, need 16: %w", len(payload), errParse)
-	}
-	return binary.BigEndian.Uint32(payload[12:]), nil
 }
 
 // TrunSample is one decoded per-sample record from a trun run. A field absent
@@ -231,6 +243,12 @@ func ParseTrun(payload []byte) (Trun, error) {
 		return Trun{}, fmt.Errorf("trun: %d bytes, need 8: %w", len(payload), errParse)
 	}
 	version := payload[0]
+	if version > 1 {
+		// Only versions 0 and 1 are defined (they differ only in the composition
+		// offset's sign); a reserved version signals a layout this parser does not
+		// understand, so reject it.
+		return Trun{}, fmt.Errorf("trun version %d unsupported: %w", version, errParse)
+	}
 	flags := uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
 	var t Trun
 	t.SampleCount = binary.BigEndian.Uint32(payload[4:])

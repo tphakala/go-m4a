@@ -519,6 +519,32 @@ func concatBytes(parts ...[]byte) []byte {
 	return out
 }
 
+// TestFragmentNoMatchingTrack checks that a fragmented stream whose fragments all
+// belong to a different track than the selected audio track is rejected as
+// ErrCorrupt, rather than opening as a reader that silently reports zero frames.
+func TestFragmentNoMatchingTrack(t *testing.T) {
+	t.Parallel()
+	init, err := InitSegment(aacFragmentConfig()) // audio track_ID 1
+	if err != nil {
+		t.Fatalf("InitSegment: %v", err)
+	}
+	sizes := []uint32{10}
+	buildMoof := func(dataOffset int32) []byte {
+		traf := handContainer("traf", concatBytes(
+			box.AppendTfhd(nil, 2, 0), // track_ID 2, not the selected audio track 1
+			box.AppendTrun(nil, dataOffset, sizes, nil),
+		))
+		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), traf))
+	}
+	moofLen := int64(len(buildMoof(0)))
+	moof := buildMoof(int32(moofLen + box.MdatShortHeaderSize))
+	stream := concatBytes(init, moof, box.AppendMdat(nil, make([]byte, 10)))
+
+	if _, err := NewReader(bytes.NewReader(stream)); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+}
+
 // TestFragmentTruncated checks a stream cut mid-segment is rejected as ErrCorrupt
 // (or ErrUnsupported), never a panic.
 func TestFragmentTruncated(t *testing.T) {

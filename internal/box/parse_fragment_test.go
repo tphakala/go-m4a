@@ -271,6 +271,21 @@ func TestParseTkhdTruncated(t *testing.T) {
 	}
 }
 
+// TestParseFragmentReservedVersions checks that the version-dependent parsers
+// reject a reserved FullBox version rather than decoding it with a guessed layout.
+func TestParseFragmentReservedVersions(t *testing.T) {
+	t.Parallel()
+	if _, err := ParseTfdt(fullBox(2, 0, make([]byte, 8))); !errors.Is(err, errParse) {
+		t.Errorf("ParseTfdt v2 = %v, want errParse", err)
+	}
+	if _, err := ParseTkhd(fullBox(2, 0, make([]byte, 20))); !errors.Is(err, errParse) {
+		t.Errorf("ParseTkhd v2 = %v, want errParse", err)
+	}
+	if _, err := ParseTrun(fullBox(2, trunDataOffsetPresent, make([]byte, 8))); !errors.Is(err, errParse) {
+		t.Errorf("ParseTrun v2 = %v, want errParse", err)
+	}
+}
+
 func TestParseMfhdRoundTrip(t *testing.T) {
 	t.Parallel()
 	box := AppendMfhd(nil, 42)
