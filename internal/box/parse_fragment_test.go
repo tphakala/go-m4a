@@ -168,12 +168,14 @@ func TestParseTrunRoundTripSizesOnly(t *testing.T) {
 	if !got.HasSampleSize || got.HasSampleDuration {
 		t.Errorf("HasSampleSize=%v HasSampleDuration=%v, want true/false", got.HasSampleSize, got.HasSampleDuration)
 	}
-	if len(got.Samples) != 3 {
-		t.Fatalf("len(Samples) = %d, want 3", len(got.Samples))
-	}
-	for i, s := range got.Samples {
-		if s.Size != sizes[i] {
-			t.Errorf("Samples[%d].Size = %d, want %d", i, s.Size, sizes[i])
+	for i := range sizes {
+		if got.SampleSize(i) != sizes[i] {
+			t.Errorf("SampleSize(%d) = %d, want %d", i, got.SampleSize(i), sizes[i])
+		}
+		// The run carries no durations, so the accessor reports 0 and the caller
+		// falls back to the tfhd or trex default.
+		if got.SampleDuration(i) != 0 {
+			t.Errorf("SampleDuration(%d) = %d, want 0 for a run without durations", i, got.SampleDuration(i))
 		}
 	}
 }
@@ -193,16 +195,19 @@ func TestParseTrunRoundTripWithDurations(t *testing.T) {
 	if !got.HasSampleSize || !got.HasSampleDuration {
 		t.Errorf("HasSampleSize=%v HasSampleDuration=%v, want true/true", got.HasSampleSize, got.HasSampleDuration)
 	}
-	for i := range got.Samples {
-		if got.Samples[i].Size != sizes[i] || got.Samples[i].Duration != durs[i] {
-			t.Errorf("Samples[%d] = %+v, want size=%d dur=%d", i, got.Samples[i], sizes[i], durs[i])
+	for i := range sizes {
+		if got.SampleSize(i) != sizes[i] || got.SampleDuration(i) != durs[i] {
+			t.Errorf("sample %d = size %d dur %d, want size=%d dur=%d",
+				i, got.SampleSize(i), got.SampleDuration(i), sizes[i], durs[i])
 		}
 	}
 }
 
 // TestParseTrunNoPerSampleFields builds a trun with only data_offset present and
-// no per-sample field flags, so sample_count alone describes the run and Samples
-// is nil. The demuxer resolves every size from tfhd/trex defaults in this case.
+// no per-sample field flags, so sample_count alone describes the run and there
+// are no records to read. The demuxer resolves every size from tfhd/trex defaults
+// in this case, and every accessor must report 0 rather than index a record that
+// is not there.
 func TestParseTrunNoPerSampleFields(t *testing.T) {
 	t.Parallel()
 	var p []byte
@@ -213,16 +218,110 @@ func TestParseTrunNoPerSampleFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTrun: %v", err)
 	}
-	if got.SampleCount != 3 || got.Samples != nil {
-		t.Errorf("SampleCount=%d Samples=%v, want 3/nil", got.SampleCount, got.Samples)
+	if got.SampleCount != 3 {
+		t.Errorf("SampleCount = %d, want 3", got.SampleCount)
 	}
 	if got.HasSampleSize {
 		t.Errorf("HasSampleSize = true, want false")
 	}
+	// A zero-width record means no records at all, so every accessor answers from
+	// the absent-field path instead of indexing into an empty slice.
+	for i := range int(got.SampleCount) {
+		if got.SampleSize(i) != 0 || got.SampleDuration(i) != 0 || got.SampleFlags(i) != 0 {
+			t.Errorf("sample %d = size %d dur %d flags %d, want all 0",
+				i, got.SampleSize(i), got.SampleDuration(i), got.SampleFlags(i))
+		}
+		if got.SampleCompositionOffset(i) != 0 {
+			t.Errorf("SampleCompositionOffset(%d) = %d, want 0", i, got.SampleCompositionOffset(i))
+		}
+	}
+}
+
+// TestParseTrunAllFieldsPresent builds a run carrying every per-sample field, the
+// widest record layout, and reads each one back. It is the test that pins the
+// field order inside a record (duration, size, flags, composition_time_offset):
+// a wrong offset silently returns a neighbouring field rather than failing.
+func TestParseTrunAllFieldsPresent(t *testing.T) {
+	t.Parallel()
+	const flags = trunDataOffsetPresent | trunSampleDurationPresent |
+		trunSampleSizePresent | trunSampleFlagsPresent | trunSampleCompositionTimeOffsetsPresent
+	type record struct {
+		dur, size, flags uint32
+		composition      int32
+	}
+	records := []record{
+		{dur: 960, size: 11, flags: 0x0100_0000, composition: 5},
+		{dur: 1024, size: 22, flags: 0x0200_0000, composition: -7},
+	}
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, uint32(len(records)))
+	p = binary.BigEndian.AppendUint32(p, 64) // data_offset
+	for _, r := range records {
+		p = binary.BigEndian.AppendUint32(p, r.dur)
+		p = binary.BigEndian.AppendUint32(p, r.size)
+		p = binary.BigEndian.AppendUint32(p, r.flags)
+		p = binary.BigEndian.AppendUint32(p, uint32(r.composition))
+	}
+
+	// Version 1 signs the composition offset, so the negative one round-trips.
+	got, err := ParseTrun(fullBox(1, flags, p))
+	if err != nil {
+		t.Fatalf("ParseTrun: %v", err)
+	}
+	if !got.HasSampleDuration || !got.HasSampleSize || !got.HasSampleFlags || !got.HasCompositionTime {
+		t.Fatalf("Has* = %v/%v/%v/%v, want all true",
+			got.HasSampleDuration, got.HasSampleSize, got.HasSampleFlags, got.HasCompositionTime)
+	}
+	for i, want := range records {
+		if got.SampleDuration(i) != want.dur {
+			t.Errorf("SampleDuration(%d) = %d, want %d", i, got.SampleDuration(i), want.dur)
+		}
+		if got.SampleSize(i) != want.size {
+			t.Errorf("SampleSize(%d) = %d, want %d", i, got.SampleSize(i), want.size)
+		}
+		if got.SampleFlags(i) != want.flags {
+			t.Errorf("SampleFlags(%d) = %#x, want %#x", i, got.SampleFlags(i), want.flags)
+		}
+		if got.SampleCompositionOffset(i) != int64(want.composition) {
+			t.Errorf("SampleCompositionOffset(%d) = %d, want %d", i, got.SampleCompositionOffset(i), want.composition)
+		}
+	}
+
+	// The same bytes read as version 0 take the composition offset as unsigned, so
+	// the negative record reads back as its two's complement.
+	v0, err := ParseTrun(fullBox(0, flags, p))
+	if err != nil {
+		t.Fatalf("ParseTrun v0: %v", err)
+	}
+	if want := int64(uint32(records[1].composition)); v0.SampleCompositionOffset(1) != want {
+		t.Errorf("v0 SampleCompositionOffset(1) = %d, want %d", v0.SampleCompositionOffset(1), want)
+	}
+}
+
+// TestParseTrunRecordsExcludeTrailingBytes checks that a run retains only its own
+// records and not whatever follows them in the buffer. A trun body sized past its
+// records is legal padding, and an accessor must not be able to read into it.
+func TestParseTrunRecordsExcludeTrailingBytes(t *testing.T) {
+	t.Parallel()
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, 1)           // sample_count
+	p = binary.BigEndian.AppendUint32(p, 0xDEAD_BEEF) // the one size record
+	p = append(p, 0xFF, 0xFF, 0xFF, 0xFF)             // trailing bytes past the records
+	got, err := ParseTrun(fullBox(0, trunSampleSizePresent, p))
+	if err != nil {
+		t.Fatalf("ParseTrun: %v", err)
+	}
+	if got.SampleSize(0) != 0xDEAD_BEEF {
+		t.Errorf("SampleSize(0) = %#x, want 0xDEADBEEF", got.SampleSize(0))
+	}
+	if len(got.records) != 4 {
+		t.Errorf("len(records) = %d, want 4 (the trailing bytes must not be retained)", len(got.records))
+	}
 }
 
 // TestParseTrunSampleCountOverrun sets a huge sample_count with no room for the
-// records, which must be rejected before any allocation.
+// records. Nothing here allocates, so what this rejection protects is the index
+// arithmetic: accepting it would leave the accessors reading past the box.
 func TestParseTrunSampleCountOverrun(t *testing.T) {
 	t.Parallel()
 	var p []byte
@@ -283,5 +382,94 @@ func TestParseFragmentReservedVersions(t *testing.T) {
 	}
 	if _, err := ParseTrun(fullBox(2, trunDataOffsetPresent, make([]byte, 8))); !errors.Is(err, errParse) {
 		t.Errorf("ParseTrun v2 = %v, want errParse", err)
+	}
+}
+
+// TestParseTrunZeroValueIsInert pins the one Trun no constructor produced. Every
+// ParseTrun error path returns Trun{}, whose offsets are a zero value rather than
+// the -1 absent-field sentinel and whose records are nil, so a caller that ignored
+// the error would index a nil slice at offset 0. The accessors treat a zero
+// recordWidth as "no records" precisely so that value reads as empty instead of
+// panicking. Deleting that half of the guard makes this test panic.
+func TestParseTrunZeroValueIsInert(t *testing.T) {
+	t.Parallel()
+	var z Trun
+	for _, i := range []int{0, 1, 1 << 20} {
+		if got := z.SampleSize(i); got != 0 {
+			t.Errorf("zero Trun SampleSize(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleDuration(i); got != 0 {
+			t.Errorf("zero Trun SampleDuration(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleFlags(i); got != 0 {
+			t.Errorf("zero Trun SampleFlags(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleCompositionOffset(i); got != 0 {
+			t.Errorf("zero Trun SampleCompositionOffset(%d) = %d, want 0", i, got)
+		}
+	}
+
+	// The same holds for what an error path actually hands back.
+	errored, err := ParseTrun([]byte{2, 0, 0, 0, 0, 0, 0, 1}) // reserved version
+	if err == nil {
+		t.Fatal("ParseTrun accepted a reserved version")
+	}
+	if got := errored.SampleSize(0); got != 0 {
+		t.Errorf("SampleSize on an error return = %d, want 0", got)
+	}
+}
+
+// TestParseTrunAllocFree pins the property the whole record-retaining design
+// exists for: parsing a run costs nothing per sample, however many it declares.
+// A well-meaning defensive copy of the records would restore correctness-neutral
+// behaviour and silently undo the change, and no other test would notice.
+func TestParseTrunAllocFree(t *testing.T) {
+	// No t.Parallel: testing.AllocsPerRun panics if called from a parallel test.
+	const samples = 4096
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, samples)
+	p = binary.BigEndian.AppendUint32(p, 0) // data_offset
+	for i := range samples {
+		p = binary.BigEndian.AppendUint32(p, uint32(i))   // duration
+		p = binary.BigEndian.AppendUint32(p, uint32(i)+1) // size
+	}
+	body := fullBox(0, trunDataOffsetPresent|trunSampleDurationPresent|trunSampleSizePresent, p)
+
+	if got := testing.AllocsPerRun(50, func() {
+		tn, err := ParseTrun(body)
+		if err != nil {
+			t.Fatalf("ParseTrun: %v", err)
+		}
+		if tn.SampleSize(samples-1) != samples {
+			t.Fatalf("SampleSize(last) = %d", tn.SampleSize(samples-1))
+		}
+	}); got != 0 {
+		t.Errorf("ParseTrun of a %d-sample run allocated %v times, want 0", samples, got)
+	}
+}
+
+// TestParseTrunRecordsAliasPayload pins the other half of that design: the
+// records are read through to the caller's buffer rather than copied out of it.
+// This is the contract that makes a Trun unsafe to outlive its payload, so it is
+// asserted rather than left implicit.
+func TestParseTrunRecordsAliasPayload(t *testing.T) {
+	t.Parallel()
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, 1)
+	p = binary.BigEndian.AppendUint32(p, 0x1111_1111) // the one size record
+	body := fullBox(0, trunSampleSizePresent, p)
+
+	tn, err := ParseTrun(body)
+	if err != nil {
+		t.Fatalf("ParseTrun: %v", err)
+	}
+	if got := tn.SampleSize(0); got != 0x1111_1111 {
+		t.Fatalf("SampleSize(0) = %#x, want 0x11111111", got)
+	}
+	// Mutating the source after the parse must show through, which it can only do
+	// if nothing was copied.
+	binary.BigEndian.PutUint32(body[len(body)-4:], 0x2222_2222)
+	if got := tn.SampleSize(0); got != 0x2222_2222 {
+		t.Errorf("SampleSize(0) after mutating the payload = %#x, want 0x22222222 (records must alias, not copy)", got)
 	}
 }
