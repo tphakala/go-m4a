@@ -3,7 +3,7 @@ module github.com/tphakala/go-m4a
 go 1.26
 
 require (
-	github.com/tphakala/go-aac v0.5.0
+	github.com/tphakala/go-aac v0.6.0
 	github.com/tphakala/go-flac v1.1.0
 	github.com/tphakala/go-opus v1.1.0
 )
