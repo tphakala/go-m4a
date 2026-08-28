@@ -748,7 +748,9 @@ func TestFragmentSelectedTrafMalformedTfdtRejected(t *testing.T) {
 		})
 	}
 
-	if _, err := NewReader(bytes.NewReader(build(box.AppendTfdt(nil, 0)))); err != nil {
+	// The control differs from the subject in the version byte alone, same box
+	// length and same body width, so the rejection below can only be the version.
+	if _, err := NewReader(bytes.NewReader(build(handTfdtVersion(0)))); err != nil {
 		t.Fatalf("NewReader with a well-formed tfdt: %v, want success", err)
 	}
 
@@ -845,5 +847,37 @@ func TestFragmentDurationIsEmptyTrafStillValidated(t *testing.T) {
 	_, err := NewReader(bytes.NewReader(stream))
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFragmentForeignTrafBrokenFramingRejected pins the reason trafHeader walks a
+// traf to the end rather than stopping once it has the tfhd. Completing the walk
+// is what still checks the framing of every child box in a traf whose body is
+// otherwise skipped, so a foreign traf carrying a child that runs past its parent
+// is rejected even though that child is never parsed.
+//
+// Without this test an early exit from that walk looks like a free optimisation:
+// it passes the whole suite while quietly dropping the last structural check
+// applied to foreign fragments.
+func TestFragmentForeignTrafBrokenFramingRejected(t *testing.T) {
+	t.Parallel()
+	// A tfdt header declaring a length far past the traf that contains it. The box
+	// is never parsed, since it belongs to a foreign track; only the walk sees it.
+	overlong := make([]byte, 12)
+	binary.BigEndian.PutUint32(overlong, 0xFFFF)
+	copy(overlong[4:], "tfdt")
+
+	stream, _ := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(handTfhd(2, base), overlong))
+	})
+	_, err := NewReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt (a foreign traf's child framing is still checked)", err)
+	}
+	// Match the message too, as the neighbouring tests do. This fixture could reach
+	// ErrCorrupt by other routes, the zero-sample backstop among them, and the point
+	// of the test is that the walk's framing check is what rejects it.
+	if !strings.Contains(err.Error(), "runs past parent") {
+		t.Errorf("error = %q, want the framing check to be what rejects it", err)
 	}
 }

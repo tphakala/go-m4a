@@ -244,11 +244,16 @@ type Trun struct {
 // The accessors below share one contract.
 //
 // A field the run does not carry reads as 0 for every i, including an i outside
-// [0, SampleCount). A field it does carry panics for such an i, exactly as
-// indexing the record slice would. So 0 does not distinguish an absent field from
-// a present zero, and it must not be read as one: a trun may legitimately encode
-// sample_duration 0, and this package draws that distinction with the Has* flags
-// precisely because 0 is a legal value (see Tfhd). A caller reads the Has* flag
+// [0, SampleCount). A field it does carry does not validate i at all: keeping it
+// below SampleCount is the caller's contract. Exceeding it usually panics, the
+// index landing outside the records, but that is a consequence rather than a
+// guarantee, because the index arithmetic is int-sized and a large enough i wraps
+// on a 32-bit build and reads another sample's field instead.
+//
+// Either way 0 does not distinguish an absent field from a present zero, and it
+// must not be read as one: a trun may legitimately encode sample_duration 0, and
+// this package draws that distinction with the Has* flags precisely because 0 is
+// a legal value (see Tfhd). A caller reads the Has* flag
 // first and falls through to the tfhd and trex defaults when it is clear;
 // resolveSampleSize and resolveSampleDuration in the demuxer are the worked
 // example.
@@ -311,11 +316,12 @@ func (t *Trun) field(i, off int) uint32 {
 // sample's sync state, which does not affect extraction of audio.
 //
 // The per-record width times sample_count is bounded against the remaining body
-// before the records are retained. Nothing here allocates, so that bound is not
-// an allocation guard: it is what makes every accessor index safe, since it
-// proves the retained slice holds a whole record for every sample below
-// sample_count. Removing it would not save an allocation, it would let a hostile
-// sample_count read past the box.
+// before the records are retained. Parsing a run allocates nothing on the success
+// path however many samples it declares, so that bound is not an allocation
+// guard: it is what makes every accessor index safe, since it proves the retained
+// slice holds a whole record for every sample below sample_count. Removing it
+// would not save an allocation, it would let a hostile sample_count read past the
+// box.
 func ParseTrun(payload []byte) (Trun, error) {
 	if len(payload) < 8 {
 		return Trun{}, fmt.Errorf("trun: %d bytes, need 8: %w", len(payload), errParse)

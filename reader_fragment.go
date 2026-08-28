@@ -183,12 +183,24 @@ type fragAccumulator struct {
 //
 // The traf is walked twice: once for the tfhd alone, and again for the runs, only
 // once the tfhd has bound the fragment to this track. A moof in a muxed stream
-// carries a traf per track, and decoding a video track's runs to discard them is
-// work this demuxer never needs. A walk decodes no box bodies, so the second pass
-// costs a header scan over one traf. Measured, that trade wins wherever a run
-// carries per-sample records or a foreign traf is present, and is a wash in the
-// one shape where neither holds (a selected traf whose runs carry no records at
-// all, so the base version had nothing to decode either). It does not lose.
+// carries a traf per track, and reading a video track's boxes to discard them is
+// work this demuxer never needs.
+//
+// Two things pay for the extra walk, and the smaller one is the obvious one.
+// Skipping a foreign traf saves its ParseTrun and ParseTfdt, which is a fixed
+// cost per traf rather than a per-sample one: ParseTrun bounds-checks and slices
+// and does not decode records, so it runs in the same dozen nanoseconds for a
+// run of one sample and a run of a million. That saving scales with how many
+// foreign trafs a moof carries, which for this package's own output is none.
+//
+// What the two-pass form actually buys on that output is an allocation. Deciding
+// the track before the runs are read means each run can be handed to addRun as it
+// is parsed; a single pass has to buffer the runs in a []box.Trun until the tfhd
+// is known, and that slice is one allocation per traf. Measured on
+// BenchmarkOpenFragmented against a single-pass version of this function, it is
+// 534 allocations against 434 over 100 fragments, with the wall time a wash. So
+// the walk is not free and this benchmark credits none of the skip, yet the trade
+// is still worth making on the one shape the package emits itself.
 //
 // Skipping a foreign traf before its body is read means its tfdt and trun are no
 // longer structurally validated: a malformed one in a video traf used to fail the
