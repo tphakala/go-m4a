@@ -582,3 +582,217 @@ func TestFragmentTruncated(t *testing.T) {
 		}()
 	}
 }
+
+// handTrunVersion builds a trun with a chosen version byte and no per-sample
+// records, so a test can emit the reserved version ParseTrun rejects.
+func handTrunVersion(version uint8, sampleCount uint32, dataOffset int32) []byte {
+	body := binary.BigEndian.AppendUint32(nil, sampleCount)
+	body = binary.BigEndian.AppendUint32(body, uint32(dataOffset))
+	return fragBox("trun", version, 0x000001, body) // data-offset-present
+}
+
+// handTfdtVersion builds a tfdt with a chosen version byte, so a test can emit
+// the reserved version ParseTfdt rejects.
+func handTfdtVersion(version uint8) []byte {
+	return fragBox("tfdt", version, 0, binary.BigEndian.AppendUint32(nil, 0))
+}
+
+// handTfhdDurationIsEmpty builds a tfhd with default-base-is-moof and the
+// duration-is-empty flag, which declares a fragment carrying no samples.
+func handTfhdDurationIsEmpty(trackID uint32) []byte {
+	const flags = 0x020000 | 0x010000 // default-base-is-moof | duration-is-empty
+	return fragBox("tfhd", 0, flags, binary.BigEndian.AppendUint32(nil, trackID))
+}
+
+// fragmentedStreamWithExtraTraf hand-builds a fragmented stream whose single moof
+// carries extraTraf (given the absolute file offset of its data) ahead of a
+// well-formed audio traf for track_ID 1, and whose mdat carries that traf's data
+// followed by the audio. It returns the stream and the access units a reader must
+// demux from it. extraTraf must return the same number of bytes whatever base it
+// is given, since the moof is built twice to measure its length.
+func fragmentedStreamWithExtraTraf(tb testing.TB, extraTraf func(base uint64) []byte) (stream []byte, audio [][]byte) {
+	tb.Helper()
+	init, err := InitSegment(aacFragmentConfig()) // audio track_ID is 1
+	if err != nil {
+		tb.Fatalf("InitSegment: %v", err)
+	}
+	audio = synthFrames(3)
+	var audioBytes []byte
+	audioSizes := make([]uint32, len(audio))
+	audioDurs := make([]uint32, len(audio))
+	for i, f := range audio {
+		audioBytes = append(audioBytes, f...)
+		audioSizes[i] = uint32(len(f))
+		audioDurs[i] = 1024
+	}
+	extraBytes := []byte("VIDEODATA-not-audio-and-must-be-skipped")
+
+	buildMoof := func(extraBase, audioBase uint64) []byte {
+		audioTraf := handContainer("traf", concatBytes(
+			handTfhd(1, audioBase),
+			box.AppendTfdt(nil, 0),
+			box.AppendTrun(nil, 0, audioSizes, audioDurs),
+		))
+		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), extraTraf(extraBase), audioTraf))
+	}
+	// base_data_offset is an absolute file position pointing past the moof into the
+	// mdat, so build the moof once to measure it, then rebuild with real offsets.
+	moofLen := int64(len(buildMoof(0, 0)))
+	mdatPayloadAbs := uint64(int64(len(init)) + moofLen + box.MdatShortHeaderSize)
+	moof := buildMoof(mdatPayloadAbs, mdatPayloadAbs+uint64(len(extraBytes)))
+	stream = concatBytes(init, moof, box.AppendMdat(nil, concatBytes(extraBytes, audioBytes)))
+	return stream, audio
+}
+
+// TestFragmentForeignTrafMalformedTrunIgnored pins the strictness contract the
+// track_ID check buys by running before the runs are parsed: a foreign track's
+// trun is never decoded, so a malformed one no longer fails the open. The audio
+// track must still demux exactly.
+func TestFragmentForeignTrafMalformedTrunIgnored(t *testing.T) {
+	t.Parallel()
+	stream, audio := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhd(2, base),
+			box.AppendTfdt(nil, 0),
+			handTrunVersion(2, 1, 0), // reserved version: ParseTrun rejects it
+		))
+	})
+	rd, err := NewReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewReader: %v, want success (a foreign track's trun is not this demuxer's to validate)", err)
+	}
+	assertFramesEqual(t, drainFrames(t, rd), audio)
+}
+
+// TestFragmentForeignTrafMalformedTfdtIgnored is the same contract for the other
+// box the selected track's walk parses for validation.
+func TestFragmentForeignTrafMalformedTfdtIgnored(t *testing.T) {
+	t.Parallel()
+	stream, audio := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhd(2, base),
+			handTfdtVersion(2), // reserved version: ParseTfdt rejects it
+			box.AppendTrun(nil, 0, []uint32{1}, nil),
+		))
+	})
+	rd, err := NewReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewReader: %v, want success (a foreign track's tfdt is not this demuxer's to validate)", err)
+	}
+	assertFramesEqual(t, drainFrames(t, rd), audio)
+}
+
+// TestFragmentSelectedTrafMalformedTrunRejected is the other half of the
+// contract: the relaxation is scoped to foreign tracks, and a malformed trun in
+// the selected track's own traf still fails the open. Without this the track_ID
+// check could be moved far enough to skip validating the audio runs too.
+func TestFragmentSelectedTrafMalformedTrunRejected(t *testing.T) {
+	t.Parallel()
+	stream, _ := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhd(1, base), // the selected audio track
+			box.AppendTfdt(nil, 0),
+			handTrunVersion(2, 1, 0),
+		))
+	})
+	_, err := NewReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFragmentForeignTrafMalformedTfhdRejected pins the one box a foreign traf
+// must still get right: track binding reads the tfhd, so an unparsable one leaves
+// the demuxer unable to tell whose fragment it is rather than free to skip it.
+func TestFragmentForeignTrafMalformedTfhdRejected(t *testing.T) {
+	t.Parallel()
+	stream, _ := fragmentedStreamWithExtraTraf(t, func(_ uint64) []byte {
+		// A tfhd body too short to hold even track_ID.
+		return handContainer("traf", fragBox("tfhd", 0, 0, []byte{0, 0, 0}))
+	})
+	_, err := NewReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFragmentDurationIsEmptyTrafContributesNothing checks that a selected-track
+// traf flagged duration-is-empty adds no samples even though it carries a
+// well-formed run, which is what the flag declares.
+func TestFragmentDurationIsEmptyTrafContributesNothing(t *testing.T) {
+	t.Parallel()
+	stream, audio := fragmentedStreamWithExtraTraf(t, func(_ uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhdDurationIsEmpty(1),
+			box.AppendTrun(nil, 0, []uint32{4}, nil),
+		))
+	})
+	rd, err := NewReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if rd.Info().FrameCount != len(audio) {
+		t.Errorf("FrameCount = %d, want %d (a duration-is-empty traf carries no samples)", rd.Info().FrameCount, len(audio))
+	}
+	assertFramesEqual(t, drainFrames(t, rd), audio)
+}
+
+// TestFragmentDurationIsEmptyTrafStillValidated guards the other half of that
+// early return: an empty fragment contributes no samples but is still the
+// selected track's own box, so its runs are parsed and a malformed one fails.
+func TestFragmentDurationIsEmptyTrafStillValidated(t *testing.T) {
+	t.Parallel()
+	stream, _ := fragmentedStreamWithExtraTraf(t, func(_ uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhdDurationIsEmpty(1),
+			handTrunVersion(2, 1, 0),
+		))
+	})
+	_, err := NewReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+}
+
+// TestFragmentTfhdAfterTrun places the tfhd last in the traf, after the run it
+// governs. ISO/IEC 14496-12 puts the track fragment header first and every muxer
+// writes it there, but nothing in the walk depends on that, and the track_ID
+// check now runs before the runs are read. This proves the header is still found
+// wherever it sits, so a run is never skipped for want of a header that was
+// simply written later.
+func TestFragmentTfhdAfterTrun(t *testing.T) {
+	t.Parallel()
+	init, err := InitSegment(aacFragmentConfig()) // audio track_ID 1
+	if err != nil {
+		t.Fatalf("InitSegment: %v", err)
+	}
+	const n, sz = 4, 20
+	payload := make([]byte, n*sz)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	buildMoof := func(dataOffset int32) []byte {
+		traf := handContainer("traf", concatBytes(
+			handTrunDataOffsetOnly(n, dataOffset),
+			handTfhdDefaultSize(1, sz),
+		))
+		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), traf))
+	}
+	moofLen := int64(len(buildMoof(0)))
+	moof := buildMoof(int32(moofLen + box.MdatShortHeaderSize))
+	stream := concatBytes(init, moof, box.AppendMdat(nil, payload))
+
+	rd, err := NewReader(bytes.NewReader(stream))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	frames := drainFrames(t, rd)
+	if len(frames) != n {
+		t.Fatalf("got %d frames, want %d", len(frames), n)
+	}
+	for i, f := range frames {
+		if !bytes.Equal(f, payload[i*sz:(i+1)*sz]) {
+			t.Errorf("frame %d differs from the payload slice at that offset", i)
+		}
+	}
+}

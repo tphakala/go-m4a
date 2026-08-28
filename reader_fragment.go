@@ -173,40 +173,30 @@ type fragAccumulator struct {
 	duration *uint64
 }
 
-// addTraf decodes one track fragment: it reads the tfhd and every trun, skips
-// fragments for other tracks (a video traf) and empty fragments, resolves each
-// run's base file offset, and appends each run's samples to the geometry. A run
-// with no data_offset continues immediately after the previous run's data, per
+// addTraf decodes one track fragment: it reads the tfhd, binds the fragment to
+// the selected track, then reads every trun, resolves each run's base file
+// offset, and appends each run's samples to the geometry. A run with no
+// data_offset continues immediately after the previous run's data, per
 // ISO/IEC 14496-12 8.8.8.
+//
+// The traf is walked twice: once for the tfhd alone, and again for the runs only
+// once the tfhd has bound the fragment to this track. A moof in a muxed stream
+// carries a traf per track, and the video ones far outnumber the audio one in
+// bytes; parsing their runs only to discard them is work this demuxer never
+// needs. A walk does not decode box bodies, so the second pass over the one
+// selected traf costs a header scan, well under what it saves on every traf it
+// now skips.
+//
+// Skipping a foreign traf before its runs are read also means its runs are no
+// longer structurally validated: a malformed trun in a video traf used to fail
+// the open and now does not. That is the intended contract. This demuxer
+// extracts one audio track, and another track's internal framing is not its
+// business to police. Everything that guards this reader's own arithmetic is
+// unaffected: the framing of every child box in the traf is still checked by the
+// walk, a traf still needs a parsable tfhd to bind at all, and the selected
+// track's own tfdt and trun are validated exactly as before.
 func (a *fragAccumulator) addTraf(traf []byte) error {
-	var (
-		tfhd     box.Tfhd
-		haveTfhd bool
-		truns    []box.Trun
-	)
-	err := box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
-		switch typ {
-		case fourccTfhd:
-			t, perr := box.ParseTfhd(body)
-			if perr != nil {
-				return perr
-			}
-			tfhd, haveTfhd = t, true
-		case fourccTfdt:
-			// Parsed to validate its structure; the decode time is not needed for
-			// access-unit extraction, which derives every offset from the trun runs.
-			if _, perr := box.ParseTfdt(body); perr != nil {
-				return perr
-			}
-		case fourccTrun:
-			tn, perr := box.ParseTrun(body)
-			if perr != nil {
-				return perr
-			}
-			truns = append(truns, tn)
-		}
-		return nil
-	})
+	tfhd, haveTfhd, err := trafHeader(traf)
 	if err != nil {
 		return err
 	}
@@ -218,24 +208,63 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 	if tfhd.TrackID != a.track.trackID {
 		return nil
 	}
-	// duration-is-empty declares a fragment with no samples.
-	if tfhd.DurationIsEmpty {
-		return nil
-	}
 
-	base, err := a.resolveBase(tfhd)
-	if err != nil {
-		return err
-	}
-	dataCursor := base
-	for i := range truns {
-		end, err := a.addRun(&truns[i], base, dataCursor, tfhd)
-		if err != nil {
+	// duration-is-empty declares a fragment with no samples, so no base offset is
+	// resolved for it and its runs contribute nothing. Its boxes are still parsed
+	// below, which keeps the validation the single-pass walk used to give them.
+	var base int64
+	if !tfhd.DurationIsEmpty {
+		if base, err = a.resolveBase(tfhd); err != nil {
 			return err
 		}
-		dataCursor = end
 	}
-	return nil
+	dataCursor := base
+	return box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
+		switch typ {
+		case fourccTfdt:
+			// Parsed to validate its structure; the decode time is not needed for
+			// access-unit extraction, which derives every offset from the trun runs.
+			if _, perr := box.ParseTfdt(body); perr != nil {
+				return perr
+			}
+		case fourccTrun:
+			tn, perr := box.ParseTrun(body)
+			if perr != nil {
+				return perr
+			}
+			if tfhd.DurationIsEmpty {
+				return nil
+			}
+			end, aerr := a.addRun(&tn, base, dataCursor, tfhd)
+			if aerr != nil {
+				return aerr
+			}
+			dataCursor = end
+		}
+		return nil
+	})
+}
+
+// trafHeader walks a traf for its tfhd alone and decodes it, so a caller can
+// decide whether the fragment belongs to the selected track before spending
+// anything on the rest of the box. It reports whether a tfhd was present rather
+// than erroring on its absence, leaving that judgement to the caller.
+func trafHeader(traf []byte) (tfhd box.Tfhd, found bool, err error) {
+	err = box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
+		if typ != fourccTfhd {
+			return nil
+		}
+		t, perr := box.ParseTfhd(body)
+		if perr != nil {
+			return perr
+		}
+		tfhd, found = t, true
+		return nil
+	})
+	if err != nil {
+		return box.Tfhd{}, false, err
+	}
+	return tfhd, found, nil
 }
 
 // resolveBase returns the file offset the fragment's data offsets are measured
