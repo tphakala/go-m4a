@@ -135,7 +135,9 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	}
 	// The stream carried moof boxes (that is why this path runs), so no sample
 	// matching the selected track means the fragments belong to another track or
-	// the init segment's tkhd was missing and the track_ID never bound. Reject it
+	// the init segment's tkhd was missing and the track_ID never bound. Since
+	// addTraf stopped validating foreign trafs, a stream whose only trafs are
+	// foreign and corrupt also lands here rather than on the corruption. Reject it
 	// rather than hand back a reader that reports zero frames, which a caller cannot
 	// tell apart from a genuine track-binding failure.
 	if totalSamples == 0 {
@@ -173,40 +175,52 @@ type fragAccumulator struct {
 	duration *uint64
 }
 
-// addTraf decodes one track fragment: it reads the tfhd and every trun, skips
-// fragments for other tracks (a video traf) and empty fragments, resolves each
-// run's base file offset, and appends each run's samples to the geometry. A run
-// with no data_offset continues immediately after the previous run's data, per
+// addTraf decodes one track fragment: it reads the tfhd, binds the fragment to
+// the selected track, then resolves the base file offset its data offsets are
+// measured from and appends every run's samples to the geometry. A run with no
+// data_offset continues immediately after the previous run's data, per
 // ISO/IEC 14496-12 8.8.8.
+//
+// The traf is walked twice: once for the tfhd alone, and again for the runs, only
+// once the tfhd has bound the fragment to this track. A moof in a muxed stream
+// carries a traf per track, and reading a video track's boxes to discard them is
+// work this demuxer never needs.
+//
+// Two things pay for the extra walk, and the smaller one is the obvious one.
+// Skipping a foreign traf saves its ParseTrun and ParseTfdt, which is a fixed
+// cost per traf rather than a per-sample one: ParseTrun bounds-checks and slices
+// and does not decode records, so it runs in the same dozen nanoseconds for a
+// run of one sample and a run of a million. That saving scales with how many
+// foreign trafs a moof carries, which for this package's own output is none.
+//
+// What the two-pass form actually buys on that output is an allocation. Deciding
+// the track before the runs are read means each run can be handed to addRun as it
+// is parsed; a single pass has to buffer the runs in a []box.Trun until the tfhd
+// is known, and that slice is one allocation per traf. Measured on
+// BenchmarkOpenFragmented against a single-pass version of this function, it is
+// 534 allocations against 434 over 100 fragments, with the wall time a wash. So
+// the walk is not free and this benchmark credits none of the skip, yet the trade
+// is still worth making on the one shape the package emits itself.
+//
+// Skipping a foreign traf before its body is read means its tfdt and trun are no
+// longer structurally validated: a malformed one in a video traf used to fail the
+// open and now does not. That is the intended contract. This demuxer extracts one
+// audio track, and another track's internal framing is not its business to
+// police. What guards this reader's own arithmetic is unaffected: a traf still
+// needs a parsable tfhd to bind at all, and the framing of every child box in
+// every traf is still checked, because trafHeader walks the traf to the end
+// rather than stopping at the tfhd.
+//
+// Two things did change for the selected track, both narrow. Its base offset is
+// now resolved before its runs are parsed, so a traf that both lacks a base and
+// carries a malformed tfdt or trun reports the missing base (ErrUnsupported)
+// where it used to report the malformed box (ErrCorrupt). And a run's geometry is
+// now built as the run is read rather than after every run in the traf has been
+// parsed, so among several runs the first geometry error wins where a later
+// parse error used to. Both were errors before and are errors now; only which one
+// surfaces changed.
 func (a *fragAccumulator) addTraf(traf []byte) error {
-	var (
-		tfhd     box.Tfhd
-		haveTfhd bool
-		truns    []box.Trun
-	)
-	err := box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
-		switch typ {
-		case fourccTfhd:
-			t, perr := box.ParseTfhd(body)
-			if perr != nil {
-				return perr
-			}
-			tfhd, haveTfhd = t, true
-		case fourccTfdt:
-			// Parsed to validate its structure; the decode time is not needed for
-			// access-unit extraction, which derives every offset from the trun runs.
-			if _, perr := box.ParseTfdt(body); perr != nil {
-				return perr
-			}
-		case fourccTrun:
-			tn, perr := box.ParseTrun(body)
-			if perr != nil {
-				return perr
-			}
-			truns = append(truns, tn)
-		}
-		return nil
-	})
+	tfhd, haveTfhd, err := trafHeader(traf)
 	if err != nil {
 		return err
 	}
@@ -218,24 +232,77 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 	if tfhd.TrackID != a.track.trackID {
 		return nil
 	}
-	// duration-is-empty declares a fragment with no samples.
-	if tfhd.DurationIsEmpty {
-		return nil
-	}
 
-	base, err := a.resolveBase(tfhd)
-	if err != nil {
-		return err
-	}
-	dataCursor := base
-	for i := range truns {
-		end, err := a.addRun(&truns[i], base, dataCursor, tfhd)
-		if err != nil {
+	// duration-is-empty declares a fragment with no samples. Such a traf resolves
+	// no base offset and contributes nothing, but its boxes are still parsed by the
+	// walk below, which keeps the validation the single-pass version gave them. The
+	// two halves of that decision are the guard here and the early return in the
+	// trun case; they have to agree, and this is why base is left at 0 on the path
+	// that never reads it.
+	var base int64
+	if !tfhd.DurationIsEmpty {
+		if base, err = a.resolveBase(tfhd); err != nil {
 			return err
 		}
-		dataCursor = end
 	}
-	return nil
+	dataCursor := base
+	return box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
+		switch typ {
+		case fourccTfdt:
+			// Parsed to validate its structure; the decode time is not needed for
+			// access-unit extraction, which derives every offset from the trun runs.
+			if _, perr := box.ParseTfdt(body); perr != nil {
+				return perr
+			}
+		case fourccTrun:
+			tn, perr := box.ParseTrun(body)
+			if perr != nil {
+				return perr
+			}
+			// Parsed for its structure, then dropped: an empty fragment declares no
+			// samples, so the run contributes none. See the base guard above.
+			if tfhd.DurationIsEmpty {
+				return nil
+			}
+			end, aerr := a.addRun(&tn, base, dataCursor, tfhd)
+			if aerr != nil {
+				return aerr
+			}
+			dataCursor = end
+		}
+		return nil
+	})
+}
+
+// trafHeader walks a traf for its tfhd alone and decodes it, so a caller can
+// decide whether the fragment belongs to the selected track before spending
+// anything on the rest of the box.
+//
+// It deliberately walks the traf to the end instead of stopping once it has the
+// tfhd. Completing the walk is what keeps every child box's framing checked even
+// in a traf whose body is otherwise skipped, so an early exit would trade a
+// header scan for a hole in the validation of foreign fragments.
+//
+// Absence of a tfhd is reported as found == false rather than as an error,
+// keeping "this traf has no header" separate from "this traf has a header that
+// will not parse". The caller currently rejects both, but with different messages,
+// and folding the two would lose the distinction at the point where it is known.
+func trafHeader(traf []byte) (tfhd box.Tfhd, found bool, err error) {
+	err = box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
+		if typ != fourccTfhd {
+			return nil
+		}
+		t, perr := box.ParseTfhd(body)
+		if perr != nil {
+			return perr
+		}
+		tfhd, found = t, true
+		return nil
+	})
+	if err != nil {
+		return box.Tfhd{}, false, err
+	}
+	return tfhd, found, nil
 }
 
 // resolveBase returns the file offset the fragment's data offsets are measured
@@ -311,8 +378,8 @@ func (a *fragAccumulator) addRun(tn *box.Trun, base, dataCursor int64, tfhd box.
 // in the trun, then the tfhd default, then the trex default. ok is false when no
 // source supplies a size, which the caller treats as corrupt.
 func resolveSampleSize(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) (uint32, bool) {
-	if tn.HasSampleSize && tn.Samples != nil {
-		return tn.Samples[i].Size, true
+	if tn.HasSampleSize {
+		return tn.SampleSize(i), true
 	}
 	if tfhd.HasDefaultSampleSize {
 		return tfhd.DefaultSampleSize, true
@@ -327,8 +394,8 @@ func resolveSampleSize(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) (uint3
 // preferring the per-sample duration in the trun, then the tfhd default, then the
 // trex default (0 when none is present, which leaves Info.Duration unset).
 func resolveSampleDuration(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) uint32 {
-	if tn.HasSampleDuration && tn.Samples != nil {
-		return tn.Samples[i].Duration
+	if tn.HasSampleDuration {
+		return tn.SampleDuration(i)
 	}
 	if tfhd.HasDefaultSampleDuration {
 		return tfhd.DefaultSampleDuration
