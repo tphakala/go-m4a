@@ -1,7 +1,7 @@
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/tphakala/go-aac v0.5.0 h1:NfJ9eOpdC3iHFccj77p/HBcN7zxzyElqYG/5R+p6jBE=
-github.com/tphakala/go-aac v0.5.0/go.mod h1:W7jYIsri7xxkubZcKqjHpOdCgwtPpNt1c7x2X5mutqo=
+github.com/tphakala/go-aac v0.6.0 h1:xrfvcISfVAyBwH7+tN3LGouw1g7CrIEzWOSdaJkCiUo=
+github.com/tphakala/go-aac v0.6.0/go.mod h1:zbnhFT1TNtHgFjbtJnW32vCi9yyaSC9tdhqyjAiti1c=
 github.com/tphakala/go-flac v1.1.0 h1:dyVNPFW+MVLzPvw1n3dEvBHPtKUMbQ5PHWvW/pxQMv0=
 github.com/tphakala/go-flac v1.1.0/go.mod h1:9MM9hnsIryw1BbD/e3iZgKMx3s34VCMlxzhSIP8gpEA=
 github.com/tphakala/go-opus v1.1.0 h1:SbXQjwI/ZYy6wPXd0fafLTurkUbAhBpaYnvXYtn8uIo=
