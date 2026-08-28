@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,49 +282,13 @@ func handTfhd(trackID uint32, baseDataOffset uint64) []byte {
 // a real CMAF restream from another muxer exercises but the writer never emits.
 func TestFragmentForeignTrackAndBaseOffset(t *testing.T) {
 	t.Parallel()
-	init, err := InitSegment(aacFragmentConfig()) // audio track_ID is 1
-	if err != nil {
-		t.Fatalf("InitSegment: %v", err)
-	}
-	audio := synthFrames(4)
-	var audioBytes []byte
-	audioSizes := make([]uint32, len(audio))
-	audioDurs := make([]uint32, len(audio))
-	for i, f := range audio {
-		audioBytes = append(audioBytes, f...)
-		audioSizes[i] = uint32(len(f))
-		audioDurs[i] = 1024
-	}
-	foreignBytes := []byte("VIDEODATA-not-audio-and-must-be-skipped")
-	foreignSizes := []uint32{uint32(len(foreignBytes))}
-
-	base := int64(len(init)) // the moof starts here, once appended after the init
-
-	// base_data_offset lives inside the moof but points past it into the mdat, so
-	// build the moof once to measure its length (independent of the offset values),
-	// then rebuild with the real absolute offsets.
-	buildMoof := func(foreignBase, audioBase uint64) []byte {
-		foreignTraf := handContainer("traf", concatBytes(
-			handTfhd(2, foreignBase),
+	stream, audio := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhd(2, base), // a video track: bound by track_ID, never by order
 			box.AppendTfdt(nil, 0),
-			box.AppendTrun(nil, 0, foreignSizes, nil),
+			box.AppendTrun(nil, 0, []uint32{extraTrafPayloadLen}, nil),
 		))
-		audioTraf := handContainer("traf", concatBytes(
-			handTfhd(1, audioBase),
-			box.AppendTfdt(nil, 0),
-			box.AppendTrun(nil, 0, audioSizes, audioDurs),
-		))
-		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), foreignTraf, audioTraf))
-	}
-	moofLen := int64(len(buildMoof(0, 0)))
-	mdatPayloadAbs := uint64(base + moofLen + box.MdatShortHeaderSize)
-	foreignDataAbs := mdatPayloadAbs
-	audioDataAbs := mdatPayloadAbs + uint64(len(foreignBytes))
-
-	moof := buildMoof(foreignDataAbs, audioDataAbs)
-	segment := concatBytes(moof, box.AppendMdat(nil, concatBytes(foreignBytes, audioBytes)))
-	stream := concatBytes(init, segment)
-
+	})
 	rd, err := NewReader(bytes.NewReader(stream))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -353,54 +318,70 @@ func handTfhdDefaultSize(trackID, defaultSize uint32) []byte {
 	return fragBox("tfhd", 0, flags, body)
 }
 
-// handTrunDataOffsetOnly builds a trun carrying only data_offset and sample_count,
-// with no per-sample records, so every sample's size comes from the tfhd/trex
-// default.
+// handTrunDataOffsetOnly builds a well-formed trun carrying only data_offset and
+// sample_count, with no per-sample records, so every sample's size comes from the
+// tfhd/trex default.
 func handTrunDataOffsetOnly(sampleCount uint32, dataOffset int32) []byte {
-	flags := uint32(0x000001) // data-offset-present only
-	body := binary.BigEndian.AppendUint32(nil, sampleCount)
-	body = binary.BigEndian.AppendUint32(body, uint32(dataOffset))
-	return fragBox("trun", 0, flags, body)
+	return handTrunVersion(0, sampleCount, dataOffset)
 }
 
 // TestFragmentTfhdDefaultSampleSize exercises the resolveSampleSize fallback: the
 // trun carries no per-sample sizes, so each sample's size comes from the tfhd
 // default_sample_size. The writer never emits this shape (it always writes
-// per-sample sizes), so it is hand-built.
+// per-sample sizes), so it is hand-built. It runs over both child orders, which
+// also pins the walk's independence from where the tfhd sits.
 func TestFragmentTfhdDefaultSampleSize(t *testing.T) {
 	t.Parallel()
-	init, err := InitSegment(aacFragmentConfig()) // audio track_ID 1
-	if err != nil {
-		t.Fatalf("InitSegment: %v", err)
-	}
 	const n, sz = 4, 20
-	payload := make([]byte, n*sz)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-	buildMoof := func(dataOffset int32) []byte {
-		traf := handContainer("traf", concatBytes(
-			handTfhdDefaultSize(1, sz),
-			handTrunDataOffsetOnly(n, dataOffset),
-		))
-		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), traf))
-	}
-	moofLen := int64(len(buildMoof(0)))
-	moof := buildMoof(int32(moofLen + box.MdatShortHeaderSize))
-	stream := concatBytes(init, moof, box.AppendMdat(nil, payload))
+	// The two child orders assert different things from one fixture. tfhd first is
+	// the shape every muxer writes, and exercises the resolveSampleSize fallback.
+	// tfhd last exercises nothing about sizes and everything about the two-pass
+	// walk: ISO puts the header first, but the track_ID check now runs before the
+	// runs are read, so the header must still be found wherever it sits or a run
+	// would be skipped for want of a header that was merely written later.
+	for _, tc := range []struct {
+		name      string
+		tfhdFirst bool
+	}{
+		{"tfhd first", true},
+		{"tfhd after trun", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			init, err := InitSegment(aacFragmentConfig()) // audio track_ID 1
+			if err != nil {
+				t.Fatalf("InitSegment: %v", err)
+			}
+			payload := make([]byte, n*sz)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
+			buildMoof := func(dataOffset int32) []byte {
+				tfhd, trun := handTfhdDefaultSize(1, sz), handTrunDataOffsetOnly(n, dataOffset)
+				children := concatBytes(tfhd, trun)
+				if !tc.tfhdFirst {
+					children = concatBytes(trun, tfhd)
+				}
+				return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), handContainer("traf", children)))
+			}
+			moofLen := int64(len(buildMoof(0)))
+			moof := buildMoof(int32(moofLen + box.MdatShortHeaderSize))
+			stream := concatBytes(init, moof, box.AppendMdat(nil, payload))
 
-	rd, err := NewReader(bytes.NewReader(stream))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
-	frames := drainFrames(t, rd)
-	if len(frames) != n {
-		t.Fatalf("got %d frames, want %d", len(frames), n)
-	}
-	for i, f := range frames {
-		if !bytes.Equal(f, payload[i*sz:(i+1)*sz]) {
-			t.Errorf("frame %d (size %d) differs from the default-sized slice", i, len(f))
-		}
+			rd, err := NewReader(bytes.NewReader(stream))
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			frames := drainFrames(t, rd)
+			if len(frames) != n {
+				t.Fatalf("got %d frames, want %d", len(frames), n)
+			}
+			for i, f := range frames {
+				if !bytes.Equal(f, payload[i*sz:(i+1)*sz]) {
+					t.Errorf("frame %d (size %d) differs from the default-sized slice", i, len(f))
+				}
+			}
+		})
 	}
 }
 
@@ -597,12 +578,32 @@ func handTfdtVersion(version uint8) []byte {
 	return fragBox("tfdt", version, 0, binary.BigEndian.AppendUint32(nil, 0))
 }
 
+// handTfhdBaseAndSize builds a tfhd carrying an absolute base_data_offset and a
+// default_sample_size, in that ISO field order. A record-free trun under it
+// resolves every sample's size from the header, which lets a test hold the whole
+// fragment well-formed and vary exactly one child.
+func handTfhdBaseAndSize(trackID uint32, baseDataOffset uint64, defaultSize uint32) []byte {
+	const flags = 0x000001 | 0x000010 // base-data-offset-present | default-sample-size-present
+	body := binary.BigEndian.AppendUint32(nil, trackID)
+	body = binary.BigEndian.AppendUint64(body, baseDataOffset)
+	body = binary.BigEndian.AppendUint32(body, defaultSize)
+	return fragBox("tfhd", 0, flags, body)
+}
+
 // handTfhdDurationIsEmpty builds a tfhd with default-base-is-moof and the
 // duration-is-empty flag, which declares a fragment carrying no samples.
 func handTfhdDurationIsEmpty(trackID uint32) []byte {
 	const flags = 0x020000 | 0x010000 // default-base-is-moof | duration-is-empty
 	return fragBox("tfhd", 0, flags, binary.BigEndian.AppendUint32(nil, trackID))
 }
+
+// extraTrafPayload is the mdat content the extra traf addresses, placed ahead of
+// the audio. Its length is exported as a constant so a traf can declare it as a
+// default_sample_size and consume it in one well-formed sample.
+const (
+	extraTrafPayload    = "VIDEODATA-not-audio-and-must-be-skipped"
+	extraTrafPayloadLen = uint32(len(extraTrafPayload))
+)
 
 // fragmentedStreamWithExtraTraf hand-builds a fragmented stream whose single moof
 // carries extraTraf (given the absolute file offset of its data) ahead of a
@@ -625,7 +626,7 @@ func fragmentedStreamWithExtraTraf(tb testing.TB, extraTraf func(base uint64) []
 		audioSizes[i] = uint32(len(f))
 		audioDurs[i] = 1024
 	}
-	extraBytes := []byte("VIDEODATA-not-audio-and-must-be-skipped")
+	extraBytes := []byte(extraTrafPayload)
 
 	buildMoof := func(extraBase, audioBase uint64) []byte {
 		audioTraf := handContainer("traf", concatBytes(
@@ -639,6 +640,13 @@ func fragmentedStreamWithExtraTraf(tb testing.TB, extraTraf func(base uint64) []
 	// mdat, so build the moof once to measure it, then rebuild with real offsets.
 	moofLen := int64(len(buildMoof(0, 0)))
 	mdatPayloadAbs := uint64(int64(len(init)) + moofLen + box.MdatShortHeaderSize)
+	// Enforce the length-invariance the doc requires rather than trusting callers:
+	// a traf that changed size with its base would shift every absolute offset in
+	// the fixture, and the test built on it would pass or fail for a reason that
+	// has nothing to do with what it asserts.
+	if a, b := len(extraTraf(0)), len(extraTraf(mdatPayloadAbs)); a != b {
+		tb.Fatalf("extraTraf length varies with base: %d bytes at 0, %d at %d", a, b, mdatPayloadAbs)
+	}
 	moof := buildMoof(mdatPayloadAbs, mdatPayloadAbs+uint64(len(extraBytes)))
 	stream = concatBytes(init, moof, box.AppendMdat(nil, concatBytes(extraBytes, audioBytes)))
 	return stream, audio
@@ -682,22 +690,108 @@ func TestFragmentForeignTrafMalformedTfdtIgnored(t *testing.T) {
 	assertFramesEqual(t, drainFrames(t, rd), audio)
 }
 
+// selectedTrafStream builds a stream whose extra traf belongs to the SELECTED
+// track and carries children, so a test can vary one child and hold the rest
+// well-formed. The tfhd declares a default sample size covering the whole extra
+// payload, which matters: without a size source the run fails with "zero or
+// unresolved size" regardless of the child under test, and a test built on it
+// would pass even with the parser's validation removed.
+func selectedTrafStream(tb testing.TB, children func(base uint64) []byte) []byte {
+	tb.Helper()
+	stream, _ := fragmentedStreamWithExtraTraf(tb, func(base uint64) []byte {
+		return handContainer("traf", concatBytes(
+			handTfhdBaseAndSize(1, base, extraTrafPayloadLen),
+			children(base),
+		))
+	})
+	return stream
+}
+
 // TestFragmentSelectedTrafMalformedTrunRejected is the other half of the
 // contract: the relaxation is scoped to foreign tracks, and a malformed trun in
 // the selected track's own traf still fails the open. Without this the track_ID
 // check could be moved far enough to skip validating the audio runs too.
+//
+// The well-formed case is asserted first. It is what makes the failing case
+// evidence: it proves the fixture opens cleanly when only the trun's version
+// changes, so the rejection below can only be the version.
 func TestFragmentSelectedTrafMalformedTrunRejected(t *testing.T) {
 	t.Parallel()
-	stream, _ := fragmentedStreamWithExtraTraf(t, func(base uint64) []byte {
-		return handContainer("traf", concatBytes(
-			handTfhd(1, base), // the selected audio track
-			box.AppendTfdt(nil, 0),
-			handTrunVersion(2, 1, 0),
-		))
-	})
-	_, err := NewReader(bytes.NewReader(stream))
+	build := func(trun []byte) []byte {
+		return selectedTrafStream(t, func(uint64) []byte {
+			return concatBytes(box.AppendTfdt(nil, 0), trun)
+		})
+	}
+
+	if _, err := NewReader(bytes.NewReader(build(handTrunVersion(0, 1, 0)))); err != nil {
+		t.Fatalf("NewReader with a well-formed run: %v, want success", err)
+	}
+
+	_, err := NewReader(bytes.NewReader(build(handTrunVersion(2, 1, 0))))
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+	if !strings.Contains(err.Error(), "trun version 2") {
+		t.Errorf("error = %q, want it to name the trun version as the cause", err)
+	}
+}
+
+// TestFragmentSelectedTrafMalformedTfdtRejected mirrors the trun case for the
+// other box the selected track's walk parses. The foreign half of this pair is
+// TestFragmentForeignTrafMalformedTfdtIgnored, and without this test the tfdt
+// check could be deleted outright with the whole suite still green.
+func TestFragmentSelectedTrafMalformedTfdtRejected(t *testing.T) {
+	t.Parallel()
+	build := func(tfdt []byte) []byte {
+		return selectedTrafStream(t, func(uint64) []byte {
+			return concatBytes(tfdt, handTrunVersion(0, 1, 0))
+		})
+	}
+
+	if _, err := NewReader(bytes.NewReader(build(box.AppendTfdt(nil, 0)))); err != nil {
+		t.Fatalf("NewReader with a well-formed tfdt: %v, want success", err)
+	}
+
+	_, err := NewReader(bytes.NewReader(build(handTfdtVersion(2))))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+	if !strings.Contains(err.Error(), "tfdt version 2") {
+		t.Errorf("error = %q, want it to name the tfdt version as the cause", err)
+	}
+}
+
+// TestFragmentMissingBasePreemptsMalformedChild pins the error-precedence change
+// the two-pass split introduced. Resolving the base moved ahead of parsing the
+// runs, so a selected traf that is BOTH missing a base offset AND carrying a
+// malformed child now reports the missing base rather than the malformed box.
+// Both were failures before and are failures now, but the sentinel a caller
+// branches on flipped from ErrCorrupt to ErrUnsupported, so it is pinned here
+// rather than left to be discovered.
+func TestFragmentMissingBasePreemptsMalformedChild(t *testing.T) {
+	t.Parallel()
+	// A tfhd with no flags at all: no base_data_offset, no default-base-is-moof.
+	noBaseTfhd := fragBox("tfhd", 0, 0, binary.BigEndian.AppendUint32(nil, 1))
+	for _, tc := range []struct {
+		name  string
+		child []byte
+	}{
+		{"malformed trun", handTrunVersion(2, 1, 0)},
+		{"malformed tfdt", handTfdtVersion(2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stream, _ := fragmentedStreamWithExtraTraf(t, func(uint64) []byte {
+				return handContainer("traf", concatBytes(noBaseTfhd, tc.child))
+			})
+			_, err := NewReader(bytes.NewReader(stream))
+			if !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("NewReader = %v, want ErrUnsupported (the missing base preempts the malformed child)", err)
+			}
+			if errors.Is(err, ErrCorrupt) {
+				t.Errorf("error = %v, want ErrUnsupported only", err)
+			}
+		})
 	}
 }
 
@@ -751,48 +845,5 @@ func TestFragmentDurationIsEmptyTrafStillValidated(t *testing.T) {
 	_, err := NewReader(bytes.NewReader(stream))
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
-	}
-}
-
-// TestFragmentTfhdAfterTrun places the tfhd last in the traf, after the run it
-// governs. ISO/IEC 14496-12 puts the track fragment header first and every muxer
-// writes it there, but nothing in the walk depends on that, and the track_ID
-// check now runs before the runs are read. This proves the header is still found
-// wherever it sits, so a run is never skipped for want of a header that was
-// simply written later.
-func TestFragmentTfhdAfterTrun(t *testing.T) {
-	t.Parallel()
-	init, err := InitSegment(aacFragmentConfig()) // audio track_ID 1
-	if err != nil {
-		t.Fatalf("InitSegment: %v", err)
-	}
-	const n, sz = 4, 20
-	payload := make([]byte, n*sz)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-	buildMoof := func(dataOffset int32) []byte {
-		traf := handContainer("traf", concatBytes(
-			handTrunDataOffsetOnly(n, dataOffset),
-			handTfhdDefaultSize(1, sz),
-		))
-		return handContainer("moof", concatBytes(box.AppendMfhd(nil, 1), traf))
-	}
-	moofLen := int64(len(buildMoof(0)))
-	moof := buildMoof(int32(moofLen + box.MdatShortHeaderSize))
-	stream := concatBytes(init, moof, box.AppendMdat(nil, payload))
-
-	rd, err := NewReader(bytes.NewReader(stream))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
-	frames := drainFrames(t, rd)
-	if len(frames) != n {
-		t.Fatalf("got %d frames, want %d", len(frames), n)
-	}
-	for i, f := range frames {
-		if !bytes.Equal(f, payload[i*sz:(i+1)*sz]) {
-			t.Errorf("frame %d differs from the payload slice at that offset", i)
-		}
 	}
 }

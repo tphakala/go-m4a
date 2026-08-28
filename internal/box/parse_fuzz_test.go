@@ -195,6 +195,9 @@ func FuzzParseTrun(f *testing.F) {
 	f.Add(body(AppendTrun(nil, 8, []uint32{10, 20, 30}, nil)))
 	f.Add(body(AppendTrun(nil, 8, []uint32{10, 20}, []uint32{960, 960})))
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 5}) // huge sample_count, no records
+	// A body padded past its records: the records must be sliced to the sample
+	// count, not to the end of the payload, or an accessor reads the padding.
+	f.Add([]byte{0, 0, 2, 0, 0, 0, 0, 1, 0xDE, 0xAD, 0xBE, 0xEF, 0xFF, 0xFF, 0xFF, 0xFF})
 
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		defer noPanic(t, payload)
@@ -203,27 +206,35 @@ func FuzzParseTrun(f *testing.F) {
 			mustParseSentinel(t, err)
 			return
 		}
-		// The retained records must be exactly SampleCount whole records taken
-		// from within the payload, since that bound is what makes every accessor
-		// index safe. Read every sample back to prove it: an off-by-one in the
-		// bound or in the record layout panics here rather than returning a
-		// neighbouring field.
+		// The retained records must be exactly SampleCount whole records taken from
+		// within the payload, since that length is what makes every accessor index
+		// safe.
 		if want := tn.recordWidth * int(tn.SampleCount); len(tn.records) != want {
 			t.Fatalf("trun: %d record bytes for sample_count %d at width %d, want %d",
 				len(tn.records), tn.SampleCount, tn.recordWidth, want)
 		}
-		// Only a run that carries records has anything to read back. One with no
-		// per-sample fields may legally declare a sample_count in the billions
-		// (the tfhd/trex defaults describe every sample), which is not something
-		// to loop over; with records present, sample_count is bounded by the
-		// payload length, so this walk is bounded by the input.
-		if tn.recordWidth > 0 {
-			for i := range int(tn.SampleCount) {
-				_ = tn.SampleDuration(i)
-				_ = tn.SampleSize(i)
-				_ = tn.SampleFlags(i)
-				_ = tn.SampleCompositionOffset(i)
-			}
+		// Then read every sample through every accessor. This proves the BOUND, not
+		// the layout: a wrong offset that stays inside a record reads a neighbouring
+		// field and cannot be seen from here, so the field order is pinned by
+		// TestParseTrunAllFieldsPresent instead. What this catches is an index that
+		// leaves the records at all, which is a panic and which noPanic reports with
+		// the input that produced it.
+		samples := int(tn.SampleCount)
+		if tn.recordWidth == 0 {
+			// A run with no per-sample fields may legally declare a sample_count in
+			// the billions, because the tfhd/trex defaults describe every sample and
+			// no records back them. Looping over that would hang the fuzzer. Every
+			// accessor is independent of i on this path (all four offsets are the
+			// absent-field sentinel), so one read covers it. With records present,
+			// sample_count is bounded by the payload, so the full walk is bounded by
+			// the input.
+			samples = min(samples, 1)
+		}
+		for i := range samples {
+			_ = tn.SampleDuration(i)
+			_ = tn.SampleSize(i)
+			_ = tn.SampleFlags(i)
+			_ = tn.SampleCompositionOffset(i)
 		}
 	})
 }

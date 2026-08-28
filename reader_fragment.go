@@ -135,7 +135,9 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	}
 	// The stream carried moof boxes (that is why this path runs), so no sample
 	// matching the selected track means the fragments belong to another track or
-	// the init segment's tkhd was missing and the track_ID never bound. Reject it
+	// the init segment's tkhd was missing and the track_ID never bound. Since
+	// addTraf stopped validating foreign trafs, a stream whose only trafs are
+	// foreign and corrupt also lands here rather than on the corruption. Reject it
 	// rather than hand back a reader that reports zero frames, which a caller cannot
 	// tell apart from a genuine track-binding failure.
 	if totalSamples == 0 {
@@ -174,27 +176,37 @@ type fragAccumulator struct {
 }
 
 // addTraf decodes one track fragment: it reads the tfhd, binds the fragment to
-// the selected track, then reads every trun, resolves each run's base file
-// offset, and appends each run's samples to the geometry. A run with no
+// the selected track, then resolves the base file offset its data offsets are
+// measured from and appends every run's samples to the geometry. A run with no
 // data_offset continues immediately after the previous run's data, per
 // ISO/IEC 14496-12 8.8.8.
 //
-// The traf is walked twice: once for the tfhd alone, and again for the runs only
+// The traf is walked twice: once for the tfhd alone, and again for the runs, only
 // once the tfhd has bound the fragment to this track. A moof in a muxed stream
-// carries a traf per track, and the video ones far outnumber the audio one in
-// bytes; parsing their runs only to discard them is work this demuxer never
-// needs. A walk does not decode box bodies, so the second pass over the one
-// selected traf costs a header scan, well under what it saves on every traf it
-// now skips.
+// carries a traf per track, and decoding a video track's runs to discard them is
+// work this demuxer never needs. A walk decodes no box bodies, so the second pass
+// costs a header scan over one traf. Measured, that trade wins wherever a run
+// carries per-sample records or a foreign traf is present, and is a wash in the
+// one shape where neither holds (a selected traf whose runs carry no records at
+// all, so the base version had nothing to decode either). It does not lose.
 //
-// Skipping a foreign traf before its runs are read also means its runs are no
-// longer structurally validated: a malformed trun in a video traf used to fail
-// the open and now does not. That is the intended contract. This demuxer
-// extracts one audio track, and another track's internal framing is not its
-// business to police. Everything that guards this reader's own arithmetic is
-// unaffected: the framing of every child box in the traf is still checked by the
-// walk, a traf still needs a parsable tfhd to bind at all, and the selected
-// track's own tfdt and trun are validated exactly as before.
+// Skipping a foreign traf before its body is read means its tfdt and trun are no
+// longer structurally validated: a malformed one in a video traf used to fail the
+// open and now does not. That is the intended contract. This demuxer extracts one
+// audio track, and another track's internal framing is not its business to
+// police. What guards this reader's own arithmetic is unaffected: a traf still
+// needs a parsable tfhd to bind at all, and the framing of every child box in
+// every traf is still checked, because trafHeader walks the traf to the end
+// rather than stopping at the tfhd.
+//
+// Two things did change for the selected track, both narrow. Its base offset is
+// now resolved before its runs are parsed, so a traf that both lacks a base and
+// carries a malformed tfdt or trun reports the missing base (ErrUnsupported)
+// where it used to report the malformed box (ErrCorrupt). And a run's geometry is
+// now built as the run is read rather than after every run in the traf has been
+// parsed, so among several runs the first geometry error wins where a later
+// parse error used to. Both were errors before and are errors now; only which one
+// surfaces changed.
 func (a *fragAccumulator) addTraf(traf []byte) error {
 	tfhd, haveTfhd, err := trafHeader(traf)
 	if err != nil {
@@ -209,9 +221,12 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 		return nil
 	}
 
-	// duration-is-empty declares a fragment with no samples, so no base offset is
-	// resolved for it and its runs contribute nothing. Its boxes are still parsed
-	// below, which keeps the validation the single-pass walk used to give them.
+	// duration-is-empty declares a fragment with no samples. Such a traf resolves
+	// no base offset and contributes nothing, but its boxes are still parsed by the
+	// walk below, which keeps the validation the single-pass version gave them. The
+	// two halves of that decision are the guard here and the early return in the
+	// trun case; they have to agree, and this is why base is left at 0 on the path
+	// that never reads it.
 	var base int64
 	if !tfhd.DurationIsEmpty {
 		if base, err = a.resolveBase(tfhd); err != nil {
@@ -232,6 +247,8 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 			if perr != nil {
 				return perr
 			}
+			// Parsed for its structure, then dropped: an empty fragment declares no
+			// samples, so the run contributes none. See the base guard above.
 			if tfhd.DurationIsEmpty {
 				return nil
 			}
@@ -247,8 +264,17 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 
 // trafHeader walks a traf for its tfhd alone and decodes it, so a caller can
 // decide whether the fragment belongs to the selected track before spending
-// anything on the rest of the box. It reports whether a tfhd was present rather
-// than erroring on its absence, leaving that judgement to the caller.
+// anything on the rest of the box.
+//
+// It deliberately walks the traf to the end instead of stopping once it has the
+// tfhd. Completing the walk is what keeps every child box's framing checked even
+// in a traf whose body is otherwise skipped, so an early exit would trade a
+// header scan for a hole in the validation of foreign fragments.
+//
+// Absence of a tfhd is reported as found == false rather than as an error,
+// keeping "this traf has no header" separate from "this traf has a header that
+// will not parse". The caller currently rejects both, but with different messages,
+// and folding the two would lose the distinction at the point where it is known.
 func trafHeader(traf []byte) (tfhd box.Tfhd, found bool, err error) {
 	err = box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
 		if typ != fourccTfhd {

@@ -98,6 +98,11 @@ func checkSegmentInvariants(t *testing.T, seg []byte, want segmentExpectation) {
 	// Walk the per-sample records and check the sample table against what was
 	// written, in order. A reversed or shifted table passes a total-length check
 	// but is silently wrong.
+	//
+	// These offsets are decoded by hand on purpose. This is the oracle for
+	// AppendTrun, so it must not share code with box.ParseTrun: routing it through
+	// the reader's parser would make a record layout the two agree on wrongly look
+	// correct, and no test would go red. Leave the duplication in place.
 	rec := 12
 	stride := 4
 	if hasPerSample {

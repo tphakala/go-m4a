@@ -62,6 +62,25 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
 
+      # go-aac v0.5.0 inverted its SIMD build constraint: the kernels used to sit
+      # behind an opt-in goaac_simd tag and are now the default, with -tags noasm
+      # selecting the scalar Go path instead. That tag reaches go-aac through this
+      # module, which makes the scalar path a supported build of go-m4a that
+      # nothing else here covers, since no other job passes a build tag.
+      #
+      # Run the suite rather than a build: go build skips _test.go entirely, so it
+      # would only prove the scalar path links, and this module has no build
+      # constraints of its own that could fail to compile. Running it executes
+      # go-aac's scalar kernels through aacm4a's fixtures.
+      #
+      # One target is enough. The constraint is tag-gated, not GOOS/GOARCH-gated,
+      # so every platform selects the same files. Note the tag does NOT make the
+      # binary assembly-free: it drops exactly one package (simd/f32), while
+      # go-flac and go-opus link github.com/tphakala/simd unconditionally.
+      - name: Run tests (-tags noasm)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -tags noasm ./...
+
   # The container parses untrusted bytes and does size/offset arithmetic that
   # must stay correct on 32-bit targets (BirdNET-Go ships on 32-bit ARM). The
   # race detector is 64-bit only, so this runs without it; a 386 binary executes
@@ -134,17 +153,6 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
-
-      # go-aac v0.5.0 made its SIMD kernels the default build and documents
-      # -tags noasm as the pure-Go opt-out for consumers who want no linked
-      # assembly. That tag reaches go-aac through this module, so prove the
-      # scalar build still works from this side on every target the default
-      # build already covers.
-      - name: Build (-tags noasm)
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build -tags noasm ./...
 
   fuzz:
     name: Fuzz smoke

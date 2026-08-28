@@ -226,7 +226,8 @@ type Trun struct {
 	// recordWidth is one per-sample record's byte length and the *Off fields are
 	// each field's position inside that record, or -1 when the run omits it. They
 	// are computed once here rather than rediscovered from the Has* flags on every
-	// accessor call, which makes reading a field one multiply and one load.
+	// accessor call, so reading a field is an index and a load rather than a walk
+	// over the flags.
 	recordWidth    int
 	durationOff    int
 	sizeOff        int
@@ -240,30 +241,47 @@ type Trun struct {
 	records []byte
 }
 
+// The accessors below share one contract.
+//
+// A field the run does not carry reads as 0 for every i, including an i outside
+// [0, SampleCount). A field it does carry panics for such an i, exactly as
+// indexing the record slice would. So 0 does not distinguish an absent field from
+// a present zero, and it must not be read as one: a trun may legitimately encode
+// sample_duration 0, and this package draws that distinction with the Has* flags
+// precisely because 0 is a legal value (see Tfhd). A caller reads the Has* flag
+// first and falls through to the tfhd and trex defaults when it is clear;
+// resolveSampleSize and resolveSampleDuration in the demuxer are the worked
+// example.
+//
+// The zero Trun is inert rather than dangerous: it carries no records, so every
+// accessor reads 0 for every i. That matters because ParseTrun returns Trun{} on
+// each of its error paths, and a caller that ignored the error would otherwise
+// index a nil slice through offsets the constructor never initialised.
+
 // SampleDuration returns sample i's duration in media-timescale ticks, or 0 when
-// the run carries no per-sample durations (HasSampleDuration false), which the
-// caller resolves against the tfhd and trex defaults instead. Like a slice index,
-// an i outside [0, SampleCount) panics.
+// the run carries no per-sample durations.
 func (t *Trun) SampleDuration(i int) uint32 { return t.field(i, t.durationOff) }
 
 // SampleSize returns sample i's byte length, or 0 when the run carries no
-// per-sample sizes (HasSampleSize false). Indexing follows SampleDuration.
+// per-sample sizes.
 func (t *Trun) SampleSize(i int) uint32 { return t.field(i, t.sizeOff) }
 
 // SampleFlags returns sample i's flags word, or 0 when the run carries no
-// per-sample flags. Audio access units are all sync samples, so the demuxer does
-// not consult this; it is here so a caller inspecting a foreign fragment can.
+// per-sample flags.
+//
+// Nothing in this module reads it: audio access units are all sync samples, and
+// internal/box cannot be imported from outside the module, so there is no other
+// caller to serve. It exists because the record layout has to account for the
+// field's width regardless, which makes decoding it free, and because reading
+// every field back is what lets TestParseTrunAllFieldsPresent pin the offset of
+// each one. The same goes for SampleCompositionOffset.
 func (t *Trun) SampleFlags(i int) uint32 { return t.field(i, t.flagsOff) }
 
 // SampleCompositionOffset returns sample i's composition time offset in
 // media-timescale ticks, or 0 when the run carries none. A version 0 run encodes
-// it unsigned and a version 1 run signed, which this reads faithfully even though
-// the demuxer has no use for it on an audio track.
+// it unsigned and a version 1 run signed, which this reads faithfully.
 func (t *Trun) SampleCompositionOffset(i int) int64 {
-	if t.compositionOff < 0 {
-		return 0
-	}
-	raw := binary.BigEndian.Uint32(t.records[i*t.recordWidth+t.compositionOff:])
+	raw := t.field(i, t.compositionOff)
 	if t.version == 0 {
 		return int64(raw)
 	}
@@ -271,9 +289,16 @@ func (t *Trun) SampleCompositionOffset(i int) int64 {
 }
 
 // field reads the 4-byte field at off within sample i's record, reporting 0 for
-// an absent field (off < 0) so an accessor never has to special-case one.
+// an absent field so an accessor never has to special-case one.
+//
+// Absence is tested two ways because the two say different things. A negative off
+// is the constructor's sentinel for a field this run omits. A zero recordWidth
+// means there are no records at all, which covers both a run that legitimately
+// carries none and a Trun that ParseTrun never filled in, whose offsets are a
+// zero value rather than the sentinel; without it such a value would index a nil
+// slice at offset 0 instead of reading as empty.
 func (t *Trun) field(i, off int) uint32 {
-	if off < 0 {
+	if off < 0 || t.recordWidth == 0 {
 		return 0
 	}
 	return binary.BigEndian.Uint32(t.records[i*t.recordWidth+off:])
@@ -282,11 +307,15 @@ func (t *Trun) field(i, off int) uint32 {
 // ParseTrun decodes a trun (track fragment run) FullBox body. The flags select
 // the optional fields after sample_count (data_offset, first_sample_flags) and
 // the per-sample record layout (duration, size, flags, composition_time_offset),
-// each 4 bytes. The per-record width times sample_count is bounded against the
-// remaining body before any per-sample slice is allocated, so a hostile
-// sample_count cannot force a large allocation. first_sample_flags and the
-// per-sample flags are skipped: audio access units are all sync samples and their
-// flags do not affect extraction.
+// each 4 bytes. first_sample_flags is skipped: it describes only the first
+// sample's sync state, which does not affect extraction of audio.
+//
+// The per-record width times sample_count is bounded against the remaining body
+// before the records are retained. Nothing here allocates, so that bound is not
+// an allocation guard: it is what makes every accessor index safe, since it
+// proves the retained slice holds a whole record for every sample below
+// sample_count. Removing it would not save an allocation, it would let a hostile
+// sample_count read past the box.
 func ParseTrun(payload []byte) (Trun, error) {
 	if len(payload) < 8 {
 		return Trun{}, fmt.Errorf("trun: %d bytes, need 8: %w", len(payload), errParse)
@@ -349,9 +378,9 @@ func ParseTrun(payload []byte) (Trun, error) {
 
 	// Bound sample_count against the remaining body before retaining anything.
 	// recordWidth is at most 16 and SampleCount at most 2^32-1, so the product
-	// stays well inside int64 and cannot wrap. Passing this bound is also what
-	// proves every accessor index is in range: remaining is a slice length, so a
-	// product no larger than it fits an int on a 32-bit build too.
+	// stays well inside int64 and cannot wrap. Passing this bound is what proves
+	// every accessor index is in range: remaining is a slice length, so a product
+	// no larger than it fits an int on a 32-bit build too.
 	remaining := int64(len(payload) - p)
 	recordBytes := int64(recordWidth) * int64(t.SampleCount)
 	if recordBytes > remaining {
@@ -362,9 +391,12 @@ func ParseTrun(payload []byte) (Trun, error) {
 	if recordWidth == 0 {
 		return t, nil
 	}
-	// Retain exactly the records, not the rest of the box body behind them: a trun
-	// may be followed by other boxes in the same buffer, and the tighter slice
-	// keeps an accessor's index arithmetic inside what was actually validated.
+	// Slice to exactly the records, not to the end of the body behind them: a trun
+	// body may be padded past its records, and the tighter length keeps an
+	// accessor's index arithmetic inside what the bound above actually validated.
+	// This trims the length, not the retention. A subslice pins its whole backing
+	// array, so this still holds the enclosing buffer alive, which is the lifetime
+	// rule documented on the type.
 	t.records = payload[p : p+int(recordBytes)]
 	return t, nil
 }

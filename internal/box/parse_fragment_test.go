@@ -225,7 +225,7 @@ func TestParseTrunNoPerSampleFields(t *testing.T) {
 		t.Errorf("HasSampleSize = true, want false")
 	}
 	// A zero-width record means no records at all, so every accessor answers from
-	// the absent-field path instead of dividing into an empty slice.
+	// the absent-field path instead of indexing into an empty slice.
 	for i := range int(got.SampleCount) {
 		if got.SampleSize(i) != 0 || got.SampleDuration(i) != 0 || got.SampleFlags(i) != 0 {
 			t.Errorf("sample %d = size %d dur %d flags %d, want all 0",
@@ -320,7 +320,8 @@ func TestParseTrunRecordsExcludeTrailingBytes(t *testing.T) {
 }
 
 // TestParseTrunSampleCountOverrun sets a huge sample_count with no room for the
-// records, which must be rejected before any allocation.
+// records. Nothing here allocates, so what this rejection protects is the index
+// arithmetic: accepting it would leave the accessors reading past the box.
 func TestParseTrunSampleCountOverrun(t *testing.T) {
 	t.Parallel()
 	var p []byte
@@ -381,5 +382,94 @@ func TestParseFragmentReservedVersions(t *testing.T) {
 	}
 	if _, err := ParseTrun(fullBox(2, trunDataOffsetPresent, make([]byte, 8))); !errors.Is(err, errParse) {
 		t.Errorf("ParseTrun v2 = %v, want errParse", err)
+	}
+}
+
+// TestParseTrunZeroValueIsInert pins the one Trun no constructor produced. Every
+// ParseTrun error path returns Trun{}, whose offsets are a zero value rather than
+// the -1 absent-field sentinel and whose records are nil, so a caller that ignored
+// the error would index a nil slice at offset 0. The accessors treat a zero
+// recordWidth as "no records" precisely so that value reads as empty instead of
+// panicking. Deleting that half of the guard makes this test panic.
+func TestParseTrunZeroValueIsInert(t *testing.T) {
+	t.Parallel()
+	var z Trun
+	for _, i := range []int{0, 1, 1 << 20} {
+		if got := z.SampleSize(i); got != 0 {
+			t.Errorf("zero Trun SampleSize(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleDuration(i); got != 0 {
+			t.Errorf("zero Trun SampleDuration(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleFlags(i); got != 0 {
+			t.Errorf("zero Trun SampleFlags(%d) = %d, want 0", i, got)
+		}
+		if got := z.SampleCompositionOffset(i); got != 0 {
+			t.Errorf("zero Trun SampleCompositionOffset(%d) = %d, want 0", i, got)
+		}
+	}
+
+	// The same holds for what an error path actually hands back.
+	errored, err := ParseTrun([]byte{2, 0, 0, 0, 0, 0, 0, 1}) // reserved version
+	if err == nil {
+		t.Fatal("ParseTrun accepted a reserved version")
+	}
+	if got := errored.SampleSize(0); got != 0 {
+		t.Errorf("SampleSize on an error return = %d, want 0", got)
+	}
+}
+
+// TestParseTrunAllocFree pins the property the whole record-retaining design
+// exists for: parsing a run costs nothing per sample, however many it declares.
+// A well-meaning defensive copy of the records would restore correctness-neutral
+// behaviour and silently undo the change, and no other test would notice.
+func TestParseTrunAllocFree(t *testing.T) {
+	// No t.Parallel: testing.AllocsPerRun panics if called from a parallel test.
+	const samples = 4096
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, samples)
+	p = binary.BigEndian.AppendUint32(p, 0) // data_offset
+	for i := range samples {
+		p = binary.BigEndian.AppendUint32(p, uint32(i))   // duration
+		p = binary.BigEndian.AppendUint32(p, uint32(i)+1) // size
+	}
+	body := fullBox(0, trunDataOffsetPresent|trunSampleDurationPresent|trunSampleSizePresent, p)
+
+	if got := testing.AllocsPerRun(50, func() {
+		tn, err := ParseTrun(body)
+		if err != nil {
+			t.Fatalf("ParseTrun: %v", err)
+		}
+		if tn.SampleSize(samples-1) != samples {
+			t.Fatalf("SampleSize(last) = %d", tn.SampleSize(samples-1))
+		}
+	}); got != 0 {
+		t.Errorf("ParseTrun of a %d-sample run allocated %v times, want 0", samples, got)
+	}
+}
+
+// TestParseTrunRecordsAliasPayload pins the other half of that design: the
+// records are read through to the caller's buffer rather than copied out of it.
+// This is the contract that makes a Trun unsafe to outlive its payload, so it is
+// asserted rather than left implicit.
+func TestParseTrunRecordsAliasPayload(t *testing.T) {
+	t.Parallel()
+	var p []byte
+	p = binary.BigEndian.AppendUint32(p, 1)
+	p = binary.BigEndian.AppendUint32(p, 0x1111_1111) // the one size record
+	body := fullBox(0, trunSampleSizePresent, p)
+
+	tn, err := ParseTrun(body)
+	if err != nil {
+		t.Fatalf("ParseTrun: %v", err)
+	}
+	if got := tn.SampleSize(0); got != 0x1111_1111 {
+		t.Fatalf("SampleSize(0) = %#x, want 0x11111111", got)
+	}
+	// Mutating the source after the parse must show through, which it can only do
+	// if nothing was copied.
+	binary.BigEndian.PutUint32(body[len(body)-4:], 0x2222_2222)
+	if got := tn.SampleSize(0); got != 0x2222_2222 {
+		t.Errorf("SampleSize(0) after mutating the payload = %#x, want 0x22222222 (records must alias, not copy)", got)
 	}
 }
