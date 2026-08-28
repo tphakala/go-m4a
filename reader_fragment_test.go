@@ -881,3 +881,22 @@ func TestFragmentForeignTrafBrokenFramingRejected(t *testing.T) {
 		t.Errorf("error = %q, want the framing check to be what rejects it", err)
 	}
 }
+
+// TestFragmentTrafWithoutTfhdRejected covers the guard the two-pass split moved:
+// binding now reads the tfhd before anything else, so a traf that carries none is
+// rejected there rather than after its runs have been parsed. The boxes it does
+// carry are well-formed, so the missing header is the only thing that can fail
+// the open.
+func TestFragmentTrafWithoutTfhdRejected(t *testing.T) {
+	t.Parallel()
+	stream, _ := fragmentedStreamWithExtraTraf(t, func(uint64) []byte {
+		return handContainer("traf", box.AppendTfdt(nil, 0))
+	})
+	_, err := NewReader(bytes.NewReader(stream))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("NewReader = %v, want ErrCorrupt", err)
+	}
+	if !strings.Contains(err.Error(), "traf without tfhd") {
+		t.Errorf("error = %q, want it to name the missing tfhd", err)
+	}
+}
