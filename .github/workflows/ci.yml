@@ -135,6 +135,17 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
 
+      # go-aac v0.5.0 made its SIMD kernels the default build and documents
+      # -tags noasm as the pure-Go opt-out for consumers who want no linked
+      # assembly. That tag reaches go-aac through this module, so prove the
+      # scalar build still works from this side on every target the default
+      # build already covers.
+      - name: Build (-tags noasm)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -tags noasm ./...
+
   fuzz:
     name: Fuzz smoke
     runs-on: ubuntu-latest
