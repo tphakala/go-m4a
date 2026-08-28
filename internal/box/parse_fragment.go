@@ -194,21 +194,22 @@ func ParseTkhd(payload []byte) (trackID uint32, err error) {
 	}
 }
 
-// TrunSample is one decoded per-sample record from a trun run. A field absent
-// from the box body (its trun flag clear) is left zero; the caller resolves an
-// absent size or duration against the tfhd and trex defaults.
-type TrunSample struct {
-	Duration          uint32
-	Size              uint32
-	Flags             uint32
-	CompositionOffset int64
-}
-
 // Trun holds one decoded track fragment run (trun). The Has* flags report which
 // per-sample fields the box actually carried, so the caller knows whether to read
-// a sample's size and duration from Samples or from the tfhd/trex defaults. When
-// no per-sample field is present, Samples is nil and SampleCount alone describes
-// the run.
+// a sample's size and duration from the accessors or from the tfhd/trex defaults.
+// When no per-sample field is present, SampleCount alone describes the run.
+//
+// The per-sample records are not decoded into a slice. A run in a CMAF fragment
+// routinely declares hundreds of samples, of which the demuxer reads only the
+// size and duration, so Trun retains the record bytes of the payload it was
+// parsed from and each accessor decodes one field on demand. That keeps ParseTrun
+// allocation-free however many samples a run declares.
+//
+// Retaining those bytes means a Trun aliases the buffer it was parsed from and
+// must not outlive it. The demuxer parses and consumes each run inside the walk
+// over the moof body it was read from, which is what makes this safe. Anything
+// that keeps a Trun past that walk, or hands one to a later phase, has to copy
+// the fields it needs first, or it pins the whole fragment body.
 type Trun struct {
 	SampleCount        uint32
 	HasDataOffset      bool
@@ -217,7 +218,65 @@ type Trun struct {
 	HasSampleSize      bool
 	HasSampleFlags     bool
 	HasCompositionTime bool
-	Samples            []TrunSample
+
+	// version selects how a composition offset is signed: unsigned in version 0,
+	// signed in version 1.
+	version uint8
+
+	// recordWidth is one per-sample record's byte length and the *Off fields are
+	// each field's position inside that record, or -1 when the run omits it. They
+	// are computed once here rather than rediscovered from the Has* flags on every
+	// accessor call, which makes reading a field one multiply and one load.
+	recordWidth    int
+	durationOff    int
+	sizeOff        int
+	flagsOff       int
+	compositionOff int
+
+	// records is exactly recordWidth*SampleCount bytes of per-sample records
+	// aliasing the parsed payload, and nil when recordWidth is 0. ParseTrun proves
+	// that length fits the box body before slicing it, which is what makes every
+	// accessor index in range for a sample below SampleCount.
+	records []byte
+}
+
+// SampleDuration returns sample i's duration in media-timescale ticks, or 0 when
+// the run carries no per-sample durations (HasSampleDuration false), which the
+// caller resolves against the tfhd and trex defaults instead. Like a slice index,
+// an i outside [0, SampleCount) panics.
+func (t *Trun) SampleDuration(i int) uint32 { return t.field(i, t.durationOff) }
+
+// SampleSize returns sample i's byte length, or 0 when the run carries no
+// per-sample sizes (HasSampleSize false). Indexing follows SampleDuration.
+func (t *Trun) SampleSize(i int) uint32 { return t.field(i, t.sizeOff) }
+
+// SampleFlags returns sample i's flags word, or 0 when the run carries no
+// per-sample flags. Audio access units are all sync samples, so the demuxer does
+// not consult this; it is here so a caller inspecting a foreign fragment can.
+func (t *Trun) SampleFlags(i int) uint32 { return t.field(i, t.flagsOff) }
+
+// SampleCompositionOffset returns sample i's composition time offset in
+// media-timescale ticks, or 0 when the run carries none. A version 0 run encodes
+// it unsigned and a version 1 run signed, which this reads faithfully even though
+// the demuxer has no use for it on an audio track.
+func (t *Trun) SampleCompositionOffset(i int) int64 {
+	if t.compositionOff < 0 {
+		return 0
+	}
+	raw := binary.BigEndian.Uint32(t.records[i*t.recordWidth+t.compositionOff:])
+	if t.version == 0 {
+		return int64(raw)
+	}
+	return int64(int32(raw))
+}
+
+// field reads the 4-byte field at off within sample i's record, reporting 0 for
+// an absent field (off < 0) so an accessor never has to special-case one.
+func (t *Trun) field(i, off int) uint32 {
+	if off < 0 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(t.records[i*t.recordWidth+off:])
 }
 
 // ParseTrun decodes a trun (track fragment run) FullBox body. The flags select
@@ -264,60 +323,48 @@ func ParseTrun(payload []byte) (Trun, error) {
 	t.HasSampleFlags = flags&trunSampleFlagsPresent != 0
 	t.HasCompositionTime = flags&trunSampleCompositionTimeOffsetsPresent != 0
 
+	// Lay out one per-sample record: the present fields appear in this ISO order,
+	// each 4 bytes. An absent field gets offset -1 so an accessor can tell it apart
+	// from one that genuinely sits at the front of the record.
+	t.version = version
+	t.durationOff, t.sizeOff, t.flagsOff, t.compositionOff = -1, -1, -1, -1
 	recordWidth := 0
 	if t.HasSampleDuration {
+		t.durationOff = recordWidth
 		recordWidth += 4
 	}
 	if t.HasSampleSize {
+		t.sizeOff = recordWidth
 		recordWidth += 4
 	}
 	if t.HasSampleFlags {
+		t.flagsOff = recordWidth
 		recordWidth += 4
 	}
 	if t.HasCompositionTime {
+		t.compositionOff = recordWidth
 		recordWidth += 4
 	}
+	t.recordWidth = recordWidth
 
-	// Bound sample_count against the remaining body before allocating. recordWidth
-	// is at most 16 and SampleCount at most 2^32-1, so the product stays well
-	// inside int64 and cannot wrap.
+	// Bound sample_count against the remaining body before retaining anything.
+	// recordWidth is at most 16 and SampleCount at most 2^32-1, so the product
+	// stays well inside int64 and cannot wrap. Passing this bound is also what
+	// proves every accessor index is in range: remaining is a slice length, so a
+	// product no larger than it fits an int on a 32-bit build too.
 	remaining := int64(len(payload) - p)
-	if int64(recordWidth)*int64(t.SampleCount) > remaining {
+	recordBytes := int64(recordWidth) * int64(t.SampleCount)
+	if recordBytes > remaining {
 		return Trun{}, fmt.Errorf("trun sample_count %d records overrun %d bytes: %w", t.SampleCount, remaining, errParse)
 	}
 	// No per-sample fields: the run is fully described by sample_count and the
-	// tfhd/trex defaults the caller applies. Leave Samples nil.
+	// tfhd/trex defaults the caller applies. Leave records nil.
 	if recordWidth == 0 {
 		return t, nil
 	}
-
-	t.Samples = make([]TrunSample, t.SampleCount)
-	for i := range t.Samples {
-		var s TrunSample
-		if t.HasSampleDuration {
-			s.Duration = binary.BigEndian.Uint32(payload[p:])
-			p += 4
-		}
-		if t.HasSampleSize {
-			s.Size = binary.BigEndian.Uint32(payload[p:])
-			p += 4
-		}
-		if t.HasSampleFlags {
-			s.Flags = binary.BigEndian.Uint32(payload[p:])
-			p += 4
-		}
-		if t.HasCompositionTime {
-			raw := binary.BigEndian.Uint32(payload[p:])
-			// Version 0 encodes the composition offset as unsigned, version 1 as
-			// signed. The demuxer does not use it for audio, but decode it faithfully.
-			if version == 0 {
-				s.CompositionOffset = int64(raw)
-			} else {
-				s.CompositionOffset = int64(int32(raw))
-			}
-			p += 4
-		}
-		t.Samples[i] = s
-	}
+	// Retain exactly the records, not the rest of the box body behind them: a trun
+	// may be followed by other boxes in the same buffer, and the tighter slice
+	// keeps an accessor's index arithmetic inside what was actually validated.
+	t.records = payload[p : p+int(recordBytes)]
 	return t, nil
 }

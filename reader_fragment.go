@@ -340,8 +340,8 @@ func (a *fragAccumulator) addRun(tn *box.Trun, base, dataCursor int64, tfhd box.
 // in the trun, then the tfhd default, then the trex default. ok is false when no
 // source supplies a size, which the caller treats as corrupt.
 func resolveSampleSize(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) (uint32, bool) {
-	if tn.HasSampleSize && tn.Samples != nil {
-		return tn.Samples[i].Size, true
+	if tn.HasSampleSize {
+		return tn.SampleSize(i), true
 	}
 	if tfhd.HasDefaultSampleSize {
 		return tfhd.DefaultSampleSize, true
@@ -356,8 +356,8 @@ func resolveSampleSize(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) (uint3
 // preferring the per-sample duration in the trun, then the tfhd default, then the
 // trex default (0 when none is present, which leaves Info.Duration unset).
 func resolveSampleDuration(tn *box.Trun, i int, tfhd box.Tfhd, trex box.Trex) uint32 {
-	if tn.HasSampleDuration && tn.Samples != nil {
-		return tn.Samples[i].Duration
+	if tn.HasSampleDuration {
+		return tn.SampleDuration(i)
 	}
 	if tfhd.HasDefaultSampleDuration {
 		return tfhd.DefaultSampleDuration

@@ -203,10 +203,27 @@ func FuzzParseTrun(f *testing.F) {
 			mustParseSentinel(t, err)
 			return
 		}
-		// When any per-sample field is present, the parser allocates exactly
-		// SampleCount records, and those records must fit within the payload.
-		if tn.Samples != nil && len(tn.Samples) != int(tn.SampleCount) {
-			t.Fatalf("trun: %d samples for sample_count %d", len(tn.Samples), tn.SampleCount)
+		// The retained records must be exactly SampleCount whole records taken
+		// from within the payload, since that bound is what makes every accessor
+		// index safe. Read every sample back to prove it: an off-by-one in the
+		// bound or in the record layout panics here rather than returning a
+		// neighbouring field.
+		if want := tn.recordWidth * int(tn.SampleCount); len(tn.records) != want {
+			t.Fatalf("trun: %d record bytes for sample_count %d at width %d, want %d",
+				len(tn.records), tn.SampleCount, tn.recordWidth, want)
+		}
+		// Only a run that carries records has anything to read back. One with no
+		// per-sample fields may legally declare a sample_count in the billions
+		// (the tfhd/trex defaults describe every sample), which is not something
+		// to loop over; with records present, sample_count is bounded by the
+		// payload length, so this walk is bounded by the input.
+		if tn.recordWidth > 0 {
+			for i := range int(tn.SampleCount) {
+				_ = tn.SampleDuration(i)
+				_ = tn.SampleSize(i)
+				_ = tn.SampleFlags(i)
+				_ = tn.SampleCompositionOffset(i)
+			}
 		}
 	})
 }
