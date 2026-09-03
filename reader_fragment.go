@@ -126,11 +126,15 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 		// scanTopLevel already parsed and bounds-checked this moof's header, so read
 		// the body directly from the cached extent without re-parsing it.
 		if ext.bodyLen > maxInt {
-			// On a 32-bit build a >2 GiB body cannot be a slice length: the make below
-			// would panic with "len out of range". Reject it as ErrCorrupt exactly as
-			// readSection does, rather than crash. The guard stays ahead of the make so
-			// that panic is unreachable. On a 64-bit build maxInt is enormous, so this
-			// never fires.
+			// bodyLen is already bounded by the stream length: scanTopLevel rejected any
+			// box whose total ran past the stream, and io.ReadFull below reads exactly
+			// this many bytes, so the body can never exceed the file and the allocation
+			// is not unbounded. This guard is the 32-bit slice-length ceiling that
+			// readSection also applies: on a 32-bit build a body between maxInt (~2 GiB)
+			// and the stream length cannot be a slice length, and the make below would
+			// panic with "len out of range", so reject it as ErrCorrupt ahead of the
+			// make rather than crash. On a 64-bit build maxInt exceeds any real stream,
+			// so this never fires.
 			return fmt.Errorf("go-m4a: moof body at %d length %d exceeds addressable memory: %w", ext.offset, ext.bodyLen, ErrCorrupt)
 		}
 		if int64(cap(moofBody)) < ext.bodyLen {
