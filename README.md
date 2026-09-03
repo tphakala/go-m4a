@@ -117,6 +117,13 @@ The core `m4a` package is stdlib-only. The optional `aacm4a`, `opusm4a`, and
 `flacm4a` subpackages wire the container to go-aac, go-opus, and go-flac; each
 pulls in its codec module, so import only the ones you use.
 
+Building with `-tags noasm` selects a scalar code path: go-aac made its SIMD
+kernels the default in v0.5.0 and this tag the opt-out, and the tag reaches go-aac
+through this module, so the scalar build is a supported configuration. It does not
+produce an assembly-free binary, though: `-tags noasm` drops exactly one package,
+`simd/f32`, while go-flac and go-opus link `github.com/tphakala/simd`
+unconditionally, with no opt-out of their own.
+
 ## Usage
 
 ### m4a: the container

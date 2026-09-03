@@ -4,6 +4,7 @@ package m4a
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/tphakala/go-m4a/internal/box"
 )
@@ -110,22 +111,45 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 		duration:  &totalDur,
 	}
 
+	// One buffer, grown to the largest moof body and reused across fragments rather
+	// than allocated per fragment. This is sound only because every box.Trun parsed
+	// from moofBody is created and fully consumed inside the WalkChildren callback
+	// below: addTraf, through addRun, reads every sample's size and duration before it
+	// returns, so no box.Trun (whose records slice aliases moofBody, see the invariant
+	// documented on box.Trun) and nothing else pointing into moofBody outlives the
+	// iteration that produced it. A later change that retains a Trun past its walk,
+	// defers run resolution, or returns a []box.Trun would read records the next
+	// fragment's read has already overwritten; such a change must copy the fields it
+	// needs first or stop reusing this buffer.
+	var moofBody []byte
 	for _, ext := range moofs {
-		// scanTopLevel already parsed and bounds-checked this moof's header, so
-		// read the body directly from the cached extent instead of re-reading and
-		// re-parsing the 16-byte header per fragment.
-		moofBody, err := readSection(rd.r, ext.bodyStart, ext.bodyLen)
-		if err != nil {
+		// scanTopLevel already parsed and bounds-checked this moof's header, so read
+		// the body directly from the cached extent without re-parsing it.
+		if ext.bodyLen > maxInt {
+			// On a 32-bit build a >2 GiB body cannot be a slice length: the make below
+			// would panic with "len out of range". Reject it as ErrCorrupt exactly as
+			// readSection does, rather than crash. The guard stays ahead of the make so
+			// that panic is unreachable. On a 64-bit build maxInt is enormous, so this
+			// never fires.
+			return fmt.Errorf("go-m4a: moof body at %d length %d exceeds addressable memory: %w", ext.offset, ext.bodyLen, ErrCorrupt)
+		}
+		if int64(cap(moofBody)) < ext.bodyLen {
+			moofBody = make([]byte, ext.bodyLen)
+		}
+		moofBody = moofBody[:ext.bodyLen]
+		if _, err := rd.r.Seek(ext.bodyStart, io.SeekStart); err != nil {
+			return fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
+		}
+		if _, err := io.ReadFull(rd.r, moofBody); err != nil {
 			return fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
 		}
 		acc.moofOffset = ext.offset
-		err = box.WalkChildren(moofBody, func(typ box.FourCC, body []byte) error {
+		if err := box.WalkChildren(moofBody, func(typ box.FourCC, body []byte) error {
 			if typ != fourccTraf {
 				return nil
 			}
 			return acc.addTraf(body)
-		})
-		if err != nil {
+		}); err != nil {
 			return wrapParse(err)
 		}
 	}
@@ -287,22 +311,22 @@ func (a *fragAccumulator) addTraf(traf []byte) error {
 // keeping "this traf has no header" separate from "this traf has a header that
 // will not parse". The caller currently rejects both, but with different messages,
 // and folding the two would lose the distinction at the point where it is known.
-func trafHeader(traf []byte) (tfhd box.Tfhd, found bool, err error) {
-	err = box.WalkChildren(traf, func(typ box.FourCC, body []byte) error {
-		if typ != fourccTfhd {
-			return nil
-		}
-		t, perr := box.ParseTfhd(body)
-		if perr != nil {
-			return perr
-		}
-		tfhd, found = t, true
-		return nil
-	})
+func trafHeader(traf []byte) (box.Tfhd, bool, error) {
+	// FindChild walks the whole traf, so every child box is framing-checked even in a
+	// foreign traf whose body addTraf otherwise skips; it must not be swapped for an
+	// early-exit search.
+	body, found, err := box.FindChild(traf, fourccTfhd)
 	if err != nil {
 		return box.Tfhd{}, false, err
 	}
-	return tfhd, found, nil
+	if !found {
+		return box.Tfhd{}, false, nil
+	}
+	tfhd, perr := box.ParseTfhd(body)
+	if perr != nil {
+		return box.Tfhd{}, false, perr
+	}
+	return tfhd, true, nil
 }
 
 // resolveBase returns the file offset the fragment's data offsets are measured
