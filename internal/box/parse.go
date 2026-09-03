@@ -100,6 +100,31 @@ func WalkChildren(payload []byte, fn func(typ FourCC, body []byte) error) error 
 	return nil
 }
 
+// FindChild returns the body of the first child box of type typ packed in payload.
+// It walks payload to the end rather than stopping at the match, so every child is
+// framing-checked exactly as WalkChildren would check it (a malformed box after the
+// match is still reported), and a malformed-framing error takes precedence over a
+// miss. found is false when no such child is present. The returned body aliases
+// payload; it is not copied.
+//
+// This is the shared form of the hand-rolled "walk the children, act on one FourCC"
+// idiom. It intentionally returns the first match: its callers each expect a single
+// instance of their target box, and completing the walk keeps the container's
+// remaining children validated. It is not a fit for a box that legitimately repeats
+// (an mvex carrying one trex per track, say); walk those directly.
+func FindChild(payload []byte, typ FourCC) (body []byte, found bool, err error) {
+	walkErr := WalkChildren(payload, func(t FourCC, b []byte) error {
+		if t == typ && !found {
+			body, found = b, true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, false, walkErr
+	}
+	return body, found, nil
+}
+
 // readDescriptorSize decodes an ISO/IEC 14496-1 expandable size at the front of
 // b: seven bits per byte, most significant group first, high bit set on every
 // byte except the last. It accepts up to four continuation bytes (a five-byte

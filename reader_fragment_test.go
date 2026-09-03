@@ -198,6 +198,35 @@ func TestFragmentMultiSegment(t *testing.T) {
 	assertFramesEqual(t, drainFrames(t, rd), all)
 }
 
+// TestFragmentBufferReuseVaryingSegments drives the moof-body buffer reuse in
+// buildFragmentGeometry with segments of sharply varying sample counts. Ordering them
+// tiny, large, medium, tiny sizes the shared buffer on the first small fragment, then
+// forces a genuine regrow on the larger second one (a second make, not just the
+// initial allocation), then reslices it down and reuses it for the rest. A bug in the
+// reuse (a missing reslice leaving the walk to parse a previous larger fragment's
+// stale tail, or a box.Trun read past its walk into bytes the next fragment
+// overwrote) corrupts a run's geometry and fails the byte-exact frame comparison.
+func TestFragmentBufferReuseVaryingSegments(t *testing.T) {
+	t.Parallel()
+	all := synthFrames(24)
+	segments := [][]fragAU{
+		uniformSegment(all[0:2], 1024),   // tiny: initial allocation sizes the buffer small
+		uniformSegment(all[2:14], 1024),  // large: forces the buffer to regrow (a second make)
+		uniformSegment(all[14:23], 1024), // medium: reuses the larger buffer, resliced down
+		uniformSegment(all[23:24], 1024), // tiny again: resliced down further
+	}
+	data := buildFragmentedStream(t, aacFragmentConfig(), segments)
+
+	rd, err := NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if rd.Info().FrameCount != len(all) {
+		t.Errorf("FrameCount = %d, want %d", rd.Info().FrameCount, len(all))
+	}
+	assertFramesEqual(t, drainFrames(t, rd), all)
+}
+
 // TestFragmentDuration checks that Info.Duration is the sum of the fragments'
 // sample durations at the media timescale, since the init segment's own durations
 // are all zero.
@@ -266,13 +295,10 @@ func handContainer(typ string, children []byte) []byte {
 // position), a form AppendTfhd never emits (it always uses default-base-is-moof).
 // This is the shape a foreign muxer or a relocated segment produces.
 func handTfhd(trackID uint32, baseDataOffset uint64) []byte {
+	const flags = 0x000001 // base-data-offset-present
 	body := binary.BigEndian.AppendUint32(nil, trackID)
 	body = binary.BigEndian.AppendUint64(body, baseDataOffset)
-	const flags = 0x000001 // base-data-offset-present
-	out := binary.BigEndian.AppendUint32(nil, uint32(8+4+len(body)))
-	out = append(out, "tfhd"...)
-	out = append(out, 0, byte(flags>>16), byte(flags>>8), byte(flags))
-	return append(out, body...)
+	return fragBox("tfhd", 0, flags, body)
 }
 
 // TestFragmentForeignTrackAndBaseOffset hand-builds a media segment whose moof
@@ -435,15 +461,12 @@ func TestFragmentTrafWithoutBase(t *testing.T) {
 // previous run in the same traf (ISO/IEC 14496-12 8.8.8). AppendTrun always sets
 // data-offset-present, so this case needs a hand-built box.
 func handTrunNoOffset(sizes []uint32) []byte {
-	flags := uint32(0x000200) // sample-size-present only
+	const flags = 0x000200 // sample-size-present only
 	body := binary.BigEndian.AppendUint32(nil, uint32(len(sizes)))
 	for _, s := range sizes {
 		body = binary.BigEndian.AppendUint32(body, s)
 	}
-	out := binary.BigEndian.AppendUint32(nil, uint32(8+4+len(body)))
-	out = append(out, "trun"...)
-	out = append(out, 0, byte(flags>>16), byte(flags>>8), byte(flags))
-	return append(out, body...)
+	return fragBox("trun", 0, flags, body)
 }
 
 // TestFragmentMultiTrunContiguous puts two runs in one traf where the second omits

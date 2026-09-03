@@ -175,6 +175,13 @@ type moofExtent struct {
 // skipped; a missing moov is ErrCorrupt.
 func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
 	var moov []byte
+	// One buffer reused for every top-level box header instead of a fresh allocation
+	// per box: box.ParseHeader copies the fields it keeps and does not retain its
+	// argument, so the bytes are free to be overwritten on the next box. The buffer
+	// escapes to the heap once (io.ReadFull takes it through the reader interface), but
+	// that is a single allocation amortized over every box rather than one per box. A
+	// full header is 16 bytes; trailing bytes shorter than that read into the prefix.
+	var hdrBuf [16]byte
 	for off := int64(0); off < streamLen; {
 		remaining := streamLen - off
 		if remaining < 8 {
@@ -184,8 +191,11 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 		if remaining < 16 {
 			hdrLen = remaining
 		}
-		head, rerr := readSection(r, off, hdrLen)
-		if rerr != nil {
+		if _, rerr := r.Seek(off, io.SeekStart); rerr != nil {
+			return "", nil, nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
+		}
+		head := hdrBuf[:hdrLen]
+		if _, rerr := io.ReadFull(r, head); rerr != nil {
 			return "", nil, nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
 		}
 		h, perr := box.ParseHeader(head)
@@ -375,19 +385,21 @@ func parseTrak(trak []byte) (*track, error) {
 
 // parseEdts reads the first elst entry from an edts box.
 func parseEdts(edts []byte, tr *track) error {
-	return box.WalkChildren(edts, func(typ box.FourCC, body []byte) error {
-		if typ != fourccElst {
-			return nil
-		}
-		seg, media, has, perr := box.ParseElst(body)
-		if perr != nil {
-			return perr
-		}
-		tr.hasElst = has
-		tr.elstSeg = seg
-		tr.elstMedia = media
+	body, found, err := box.FindChild(edts, fourccElst)
+	if err != nil {
+		return err
+	}
+	if !found {
 		return nil
-	})
+	}
+	seg, media, has, perr := box.ParseElst(body)
+	if perr != nil {
+		return perr
+	}
+	tr.hasElst = has
+	tr.elstSeg = seg
+	tr.elstMedia = media
+	return nil
 }
 
 // parseMdia walks an mdia box, reading the media header, the handler type, and
@@ -408,12 +420,14 @@ func parseMdia(mdia []byte, tr *track) error {
 			}
 			tr.handler = ht
 		case fourccMinf:
-			return box.WalkChildren(body, func(t box.FourCC, b []byte) error {
-				if t == fourccStbl {
-					return parseStbl(b, tr)
-				}
+			stbl, found, ferr := box.FindChild(body, fourccStbl)
+			if ferr != nil {
+				return ferr
+			}
+			if !found {
 				return nil
-			})
+			}
+			return parseStbl(stbl, tr)
 		}
 		return nil
 	})
@@ -484,49 +498,55 @@ func parseStsd(stsd []byte, tr *track) error {
 
 	switch h.Type {
 	case fourccMp4a:
-		// Find the esds child (afconvert follows esds with a sibling box, so scan
-		// rather than assume position).
-		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
-			if t != fourccEsds {
-				return nil
-			}
-			asc, objType, perr := box.ParseEsds(b)
-			if perr != nil {
-				return perr
-			}
-			tr.asc = asc
-			tr.codecConfig = asc
-			tr.objectType = objType
+		// afconvert follows esds with a sibling box, so find it by type rather than
+		// assuming position.
+		esds, found, ferr := box.FindChild(children, fourccEsds)
+		if ferr != nil {
+			return ferr
+		}
+		if !found {
 			return nil
-		})
+		}
+		asc, objType, perr := box.ParseEsds(esds)
+		if perr != nil {
+			return perr
+		}
+		tr.asc = asc
+		tr.codecConfig = asc
+		tr.objectType = objType
+		return nil
 	case fourccOpus:
-		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
-			if t != fourccDops {
-				return nil
-			}
-			chs, preSkip, _, perr := box.ParseDops(b)
-			if perr != nil {
-				return perr
-			}
-			tr.opusPreSkip = preSkip
-			tr.codecConfig = b // the dOps body
-			if chs != 0 {
-				tr.seChannels = uint16(chs) // dOps OutputChannelCount is authoritative
-			}
+		dops, found, ferr := box.FindChild(children, fourccDops)
+		if ferr != nil {
+			return ferr
+		}
+		if !found {
 			return nil
-		})
+		}
+		chs, preSkip, _, perr := box.ParseDops(dops)
+		if perr != nil {
+			return perr
+		}
+		tr.opusPreSkip = preSkip
+		tr.codecConfig = dops // the dOps body
+		if chs != 0 {
+			tr.seChannels = uint16(chs) // dOps OutputChannelCount is authoritative
+		}
+		return nil
 	case fourccFlac:
-		return box.WalkChildren(children, func(t box.FourCC, b []byte) error {
-			if t != fourccDfla {
-				return nil
-			}
-			si, perr := box.ParseDfla(b)
-			if perr != nil {
-				return perr
-			}
-			tr.codecConfig = si // the STREAMINFO metadata block
+		dfla, found, ferr := box.FindChild(children, fourccDfla)
+		if ferr != nil {
+			return ferr
+		}
+		if !found {
 			return nil
-		})
+		}
+		si, perr := box.ParseDfla(dfla)
+		if perr != nil {
+			return perr
+		}
+		tr.codecConfig = si // the STREAMINFO metadata block
+		return nil
 	}
 	return nil
 }
