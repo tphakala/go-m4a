@@ -1021,17 +1021,22 @@ func TestFragmentAddRunStreamLenBound(t *testing.T) {
 	const streamLen = 100
 	tfhd := box.Tfhd{HasDefaultSampleSize: true, DefaultSampleSize: 1}
 	for _, tc := range []struct {
-		name        string
-		sampleCount uint32
-		wantErr     bool
+		name           string
+		initialSamples int64
+		sampleCount    uint32
+		wantErr        bool
 	}{
-		{"sample_count past the stream length is rejected", streamLen + 1, true},
-		{"sample_count within the stream length is accepted", 3, false},
+		{"sample_count past the stream length is rejected", 0, streamLen + 1, true},
+		// A run that fits on its own but pushes the RUNNING total past the stream is
+		// rejected too: the bound is on *a.samples + sample_count, not sample_count
+		// alone, so dropping the *a.samples term would let this case slip through.
+		{"cumulative sample_count past the stream length is rejected", streamLen - 2, 3, true},
+		{"sample_count within the stream length is accepted", 0, 3, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			samples := tc.initialSamples
 			var (
-				samples          int64
 				sizes            []uint32
 				chunks, perChunk []int64
 				duration         uint64
@@ -1058,8 +1063,8 @@ func TestFragmentAddRunStreamLenBound(t *testing.T) {
 			if err != nil {
 				t.Fatalf("addRun = %v, want success", err)
 			}
-			if samples != int64(tc.sampleCount) {
-				t.Errorf("accumulated samples = %d, want %d", samples, tc.sampleCount)
+			if want := tc.initialSamples + int64(tc.sampleCount); samples != want {
+				t.Errorf("accumulated samples = %d, want %d", samples, want)
 			}
 		})
 	}
