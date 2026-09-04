@@ -32,15 +32,18 @@ type Info struct {
 	Codec Codec
 
 	// ASC is the MPEG-4 AudioSpecificConfig from the esds DecoderSpecificInfo,
-	// suitable for go-aac's pcm.WithRawStream. It is set only for AAC-LC; it is nil
-	// for Opus and FLAC. Info returns a fresh copy.
+	// suitable for go-aac's pcm.WithRawStream. It is set for any MPEG-4 Audio track
+	// the reader labels CodecAACLC (HE-AAC and HE-AACv2 included, since the reader
+	// does not verify the profile); it is nil for Opus and FLAC. Info returns a
+	// fresh copy.
 	ASC []byte
 
 	// CodecConfig is the codec-specific configuration recovered from the sample
-	// entry: the AudioSpecificConfig for AAC-LC (same bytes as ASC), the
-	// OpusSpecificBox (dOps) body for Opus, or the FLAC STREAMINFO metadata block
-	// for FLAC. It is what a codec bridge passes to its decoder. Info returns a
-	// fresh copy.
+	// entry: the AudioSpecificConfig for a CodecAACLC track (same bytes as ASC, and
+	// preserved for HE-AAC too, which the decoder rather than the reader rejects),
+	// the OpusSpecificBox (dOps) body for Opus, or the FLAC STREAMINFO metadata
+	// block for FLAC. It is what a codec bridge passes to its decoder. Info returns
+	// a fresh copy.
 	CodecConfig []byte
 
 	// FrameCount is the number of access units (MP4 "samples") in the track.
@@ -72,8 +75,8 @@ type Reader struct {
 
 	// maxBoxBuffer caps how many bytes a single box body may be allocated and read
 	// into, guarding against a sparse or truncated file that declares a huge body.
-	// 0 disables the cap. Set from NewReader options; consulted by readSection and
-	// buildFragmentGeometry.
+	// 0 or less disables the cap. Set from NewReader options; consulted by
+	// readSection and buildFragmentGeometry.
 	maxBoxBuffer int64
 
 	// Sample geometry. Exactly one of sizes (per-sample) or constSize (constant

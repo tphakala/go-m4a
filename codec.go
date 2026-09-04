@@ -17,7 +17,7 @@ const (
 	// verify the AudioSpecificConfig audio object type and reports CodecAACLC for an
 	// HE-AAC or HE-AACv2 track too. Verifying the profile is the decoder's job: the
 	// stdlib-only core cannot parse the codec bitstream, and aacm4a.NewDecoder
-	// surfaces a wrapped pcm.ErrUnsupportedSBR (HE-AAC) or pcm.ErrUnsupportedPS
+	// returns an error matching pcm.ErrUnsupportedSBR (HE-AAC) or pcm.ErrUnsupportedPS
 	// (HE-AACv2) for a stream this container labels CodecAACLC but that is not
 	// plain AAC-LC.
 	CodecAACLC Codec = iota

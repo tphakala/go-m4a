@@ -292,19 +292,21 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 //
 // The container reader reports Info.Codec == m4a.CodecAACLC for any MPEG-4 Audio
 // track, HE-AAC included (it does not verify the AAC profile). This decoder is
-// what verifies it: an HE-AAC (AAC-LC + SBR) stream surfaces a wrapped
-// aacpcm.ErrUnsupportedSBR and an HE-AACv2 (AAC-LC + SBR + PS) stream a wrapped
-// aacpcm.ErrUnsupportedPS. When SBR or PS is declared in the ASC, which is how an
-// esds-carried track normally signals it (and the ASC is what this call hands the
-// decoder), that error comes back from aacpcm.NewDecoder itself as it parses the
-// ASC; a stream that signals SBR only in a later in-band fill element instead
-// surfaces the same error from the first decode call. Because
-// aacpcm.ErrUnsupportedPS wraps aacpcm.ErrUnsupportedSBR, which wraps
-// aacpcm.ErrUnsupported, a caller can test errors.Is(err, aacpcm.ErrUnsupportedSBR)
-// to catch the whole HE-AAC family and route the stream to an external decoder, or
-// errors.Is(err, aacpcm.ErrUnsupportedPS) to single out HE-AACv2. HE-AACv2 is
-// distinguished only from ASC signalling, so a stream that signals SBR without PS
-// surfaces as ErrUnsupportedSBR even if it is in fact HE-AACv2.
+// what verifies it: aacpcm.NewDecoder returns go-aac's own typed error, which this
+// call passes back unchanged (see the return below), so it still errors.Is-matches
+// aacpcm.ErrUnsupportedSBR for an HE-AAC (AAC-LC + SBR) stream and
+// aacpcm.ErrUnsupportedPS for an HE-AACv2 (AAC-LC + SBR + PS) stream. When SBR or
+// PS is declared in the ASC, which is how an esds-carried track normally signals
+// it (and the ASC is what this call hands the decoder), that error comes back from
+// aacpcm.NewDecoder itself as it parses the ASC; a stream that signals SBR only in
+// a later in-band fill element instead surfaces the same error from the first
+// decode call. Because aacpcm.ErrUnsupportedPS wraps aacpcm.ErrUnsupportedSBR,
+// which wraps aacpcm.ErrUnsupported, a caller can test
+// errors.Is(err, aacpcm.ErrUnsupportedSBR) to catch the whole HE-AAC family and
+// route the stream to an external decoder, or errors.Is(err, aacpcm.ErrUnsupportedPS)
+// to single out HE-AACv2. HE-AACv2 is distinguished only from ASC signalling, so a
+// stream that signals SBR without PS matches ErrUnsupportedSBR but not
+// ErrUnsupportedPS even if it is in fact HE-AACv2.
 func NewDecoder(r io.ReadSeeker) (*aacpcm.Decoder, m4a.Info, error) {
 	rd, err := m4a.NewReader(r)
 	if err != nil {
