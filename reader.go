@@ -25,7 +25,10 @@ type Info struct {
 	Channels int
 
 	// Codec identifies the audio codec of the selected track: CodecAACLC,
-	// CodecOpus, or CodecFLAC.
+	// CodecOpus, or CodecFLAC. For an AAC track it reflects the container's MPEG-4
+	// Audio family indication, not a verified AAC profile: an HE-AAC or HE-AACv2
+	// track also reports CodecAACLC, and the decoder is what rejects it. See
+	// CodecAACLC.
 	Codec Codec
 
 	// ASC is the MPEG-4 AudioSpecificConfig from the esds DecoderSpecificInfo,
@@ -66,6 +69,12 @@ type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
 	info      Info
+
+	// maxBoxBuffer caps how many bytes a single box body may be allocated and read
+	// into, guarding against a sparse or truncated file that declares a huge body.
+	// 0 disables the cap. Set from NewReader options; consulted by readSection and
+	// buildFragmentGeometry.
+	maxBoxBuffer int64
 
 	// Sample geometry. Exactly one of sizes (per-sample) or constSize (constant
 	// size, sizes nil) describes the access-unit lengths. samplesPerChunk and
@@ -119,6 +128,39 @@ var (
 	fourccMoof = box.NewFourCC("moof")
 )
 
+// DefaultMaxBoxBuffer is the default ceiling, in bytes, on how much a single box
+// body (moov, ftyp, or a fragment's moof) the reader will allocate and read for
+// untrusted input. It bounds the memory a crafted file can drive the reader to
+// allocate up front: every box length is already bounded by the stream length,
+// but a sparse file can report a large stream length while backing almost none of
+// it, so a body declared at several gigabytes would otherwise allocate that much
+// before the (sparse, zero-filled) read succeeds. 256 MiB clears any realistic
+// container by a wide margin (even a full day of AAC keeps its moov to a few tens
+// of megabytes) while keeping a hostile allocation bounded. Override it per reader
+// with WithMaxBoxBuffer, including WithMaxBoxBuffer(0) to lift the cap entirely.
+const DefaultMaxBoxBuffer = 256 << 20
+
+// readerConfig holds the resolved NewReader options.
+type readerConfig struct {
+	maxBoxBuffer int64
+}
+
+// ReaderOption configures a Reader at construction. Pass options to NewReader.
+type ReaderOption func(*readerConfig)
+
+// WithMaxBoxBuffer sets the ceiling, in bytes, on how large a single box body may
+// be before NewReader refuses it with a wrapped ErrBoxTooLarge. It applies
+// uniformly to the moov and ftyp bodies and to each fragment's moof body. A value
+// of 0 or less disables the cap, restoring the pre-limit behavior of allocating
+// whatever length a box declares (still bounded by the stream length and, on a
+// 32-bit build, by the addressable-slice ceiling). The default is
+// DefaultMaxBoxBuffer.
+func WithMaxBoxBuffer(n int64) ReaderOption {
+	return func(c *readerConfig) {
+		c.maxBoxBuffer = n
+	}
+}
+
 // NewReader reads and parses the moov metadata from r and returns a Reader
 // positioned at the first access unit. It locates moov whether it precedes or
 // follows mdat, selects the first "soun" track carrying a supported sample entry
@@ -128,9 +170,17 @@ var (
 // movie fragments carry. It returns a wrapped ErrCorrupt for malformed input and a
 // wrapped ErrUnsupported for well-formed input outside scope (no supported audio
 // track, an unsupported codec, or an AAC object type that is not MPEG-4 Audio).
-func NewReader(r io.ReadSeeker) (*Reader, error) {
+//
+// Options tune the reader; WithMaxBoxBuffer sets how large a single box body may
+// be before NewReader refuses it with a wrapped ErrBoxTooLarge, guarding against a
+// sparse or truncated file that declares a body it does not physically back.
+func NewReader(r io.ReadSeeker, opts ...ReaderOption) (*Reader, error) {
 	if r == nil {
 		return nil, fmt.Errorf("go-m4a: nil reader")
+	}
+	cfg := readerConfig{maxBoxBuffer: DefaultMaxBoxBuffer}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 	streamLen, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
@@ -140,12 +190,12 @@ func NewReader(r io.ReadSeeker) (*Reader, error) {
 		return nil, fmt.Errorf("go-m4a: negative stream length %d: %w", streamLen, ErrCorrupt)
 	}
 
-	brand, moovPayload, moofs, err := scanTopLevel(r, streamLen)
+	brand, moovPayload, moofs, err := scanTopLevel(r, streamLen, cfg.maxBoxBuffer)
 	if err != nil {
 		return nil, err
 	}
 
-	rd := &Reader{r: r, streamLen: streamLen}
+	rd := &Reader{r: r, streamLen: streamLen, maxBoxBuffer: cfg.maxBoxBuffer}
 	rd.info.Brand = brand
 	if len(moofs) > 0 {
 		if err := rd.parseFragmented(moovPayload, moofs); err != nil {
@@ -173,7 +223,7 @@ type moofExtent struct {
 // moofs slice marks fragmented (CMAF) input, which NewReader demuxes through the
 // movie fragments rather than the moov sample tables. styp, sidx, and mfra are
 // skipped; a missing moov is ErrCorrupt.
-func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
+func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
 	var moov []byte
 	// One buffer reused for every top-level box header instead of a fresh allocation
 	// per box: box.ParseHeader copies the fields it keeps and does not retain its
@@ -214,7 +264,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 		case fourccMoof:
 			moofs = append(moofs, moofExtent{offset: off, bodyStart: off + h.HeaderLen, bodyLen: total - h.HeaderLen})
 		case fourccFtyp:
-			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen)
+			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
 			if berr != nil {
 				return "", nil, nil, fmt.Errorf("go-m4a: read ftyp: %w", berr)
 			}
@@ -222,7 +272,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 				brand = string(body[:4])
 			}
 		case fourccMoov:
-			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen)
+			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
 			if berr != nil {
 				return "", nil, nil, fmt.Errorf("go-m4a: read moov: %w", berr)
 			}
@@ -236,12 +286,24 @@ func scanTopLevel(r io.ReadSeeker, streamLen int64) (brand string, moovPayload [
 	return brand, moov, moofs, nil
 }
 
-// readSection seeks to off and reads exactly n bytes. n is always a header size
-// or a box length already bounded against streamLen by the caller, so the
-// allocation is bounded by the real input.
-func readSection(r io.ReadSeeker, off, n int64) ([]byte, error) {
+// readSection seeks to off and reads exactly n bytes. n is a header size or a box
+// length the caller has already bounded against streamLen, so it never exceeds the
+// logical file size, but that is not a physical bound: a sparse file reports a
+// large streamLen while backing almost none of it. limit, when positive, caps n
+// as a memory guard, rejecting a body above it with a wrapped ErrBoxTooLarge before
+// the allocation rather than letting a declared-but-unbacked length drive a large
+// make.
+func readSection(r io.ReadSeeker, off, n, limit int64) ([]byte, error) {
 	if n < 0 {
 		return nil, fmt.Errorf("negative length %d: %w", n, ErrCorrupt)
+	}
+	if limit > 0 && n > limit {
+		// The box body is larger than the caller's box-buffer budget. This is a
+		// memory-exhaustion guard, not a malformation, so it wraps ErrBoxTooLarge
+		// rather than ErrCorrupt; the remedy is a larger WithMaxBoxBuffer. It sits
+		// below the maxInt ceiling: on a 32-bit build a body between limit and maxInt
+		// is caught here first.
+		return nil, fmt.Errorf("section length %d exceeds the %d-byte box-buffer limit: %w", n, limit, ErrBoxTooLarge)
 	}
 	if n > maxInt {
 		// A >2 GiB box on a 32-bit build would panic make() or truncate; reject

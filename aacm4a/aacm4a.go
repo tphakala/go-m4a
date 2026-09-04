@@ -289,12 +289,32 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 // rather than against the file, because the decoded size is not proportional to
 // the input here either: a near-minimal AAC-LC access unit still decodes to a
 // fixed 1024 samples per channel.
+//
+// The container reader reports Info.Codec == m4a.CodecAACLC for any MPEG-4 Audio
+// track, HE-AAC included (it does not verify the AAC profile). This decoder is
+// what verifies it: an HE-AAC (AAC-LC + SBR) stream surfaces a wrapped
+// aacpcm.ErrUnsupportedSBR and an HE-AACv2 (AAC-LC + SBR + PS) stream a wrapped
+// aacpcm.ErrUnsupportedPS. When SBR or PS is declared in the ASC, which is how an
+// esds-carried track normally signals it (and the ASC is what this call hands the
+// decoder), that error comes back from aacpcm.NewDecoder itself as it parses the
+// ASC; a stream that signals SBR only in a later in-band fill element instead
+// surfaces the same error from the first decode call. Because
+// aacpcm.ErrUnsupportedPS wraps aacpcm.ErrUnsupportedSBR, which wraps
+// aacpcm.ErrUnsupported, a caller can test errors.Is(err, aacpcm.ErrUnsupportedSBR)
+// to catch the whole HE-AAC family and route the stream to an external decoder, or
+// errors.Is(err, aacpcm.ErrUnsupportedPS) to single out HE-AACv2. HE-AACv2 is
+// distinguished only from ASC signalling, so a stream that signals SBR without PS
+// surfaces as ErrUnsupportedSBR even if it is in fact HE-AACv2.
 func NewDecoder(r io.ReadSeeker) (*aacpcm.Decoder, m4a.Info, error) {
 	rd, err := m4a.NewReader(r)
 	if err != nil {
 		return nil, m4a.Info{}, err
 	}
 	info := rd.Info()
+	// Return the decoder's error unwrapped so the caller's
+	// errors.Is(err, aacpcm.ErrUnsupportedSBR/PS) match survives the bridge; a %w
+	// re-wrap here would still match, but a %v would silently break the routing the
+	// doc above promises.
 	d, err := aacpcm.NewDecoder(rd.RawStream(), aacpcm.WithRawStream(info.ASC))
 	if err != nil {
 		return nil, info, err

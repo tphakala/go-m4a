@@ -52,4 +52,19 @@ var (
 	// the remedy is a larger limit or a streaming decode, not treating the input
 	// as corrupt.
 	ErrDecodeLimit = errors.New("go-m4a: decoded size limit exceeded")
+
+	// ErrBoxTooLarge indicates that a box body declared a length above the
+	// reader's box-buffer limit, so NewReader refused to allocate and read it.
+	// The limit defaults to DefaultMaxBoxBuffer and is set per reader with
+	// WithMaxBoxBuffer; it guards against a sparse or truncated file that declares
+	// a multi-gigabyte box body (a moov, ftyp, or a fragment's moof) it does not
+	// physically back, which would otherwise drive a large heap allocation before
+	// the read fails.
+	//
+	// Like ErrDecodeLimit it is a resource limit, not a verdict on the file: a
+	// legitimately large container trips it too, and the remedy is a larger limit
+	// (WithMaxBoxBuffer) rather than treating the input as corrupt. It is kept
+	// distinct from ErrCorrupt so a caller that set a strict limit can tell "over
+	// my memory budget" apart from "malformed".
+	ErrBoxTooLarge = errors.New("go-m4a: box body exceeds buffer limit")
 )

@@ -48,7 +48,7 @@ func FuzzDecodeInterleaved(f *testing.F) {
 			// A rejected file is a valid outcome, but it must be typed: every decode
 			// error, whether from the demuxer or from go-opus rejecting the payload,
 			// wraps one of these sentinels.
-			if !errors.Is(err, m4a.ErrCorrupt) && !errors.Is(err, m4a.ErrUnsupported) && !errors.Is(err, m4a.ErrDecodeLimit) {
+			if !errors.Is(err, m4a.ErrCorrupt) && !errors.Is(err, m4a.ErrUnsupported) && !errors.Is(err, m4a.ErrDecodeLimit) && !errors.Is(err, m4a.ErrBoxTooLarge) {
 				t.Fatalf("decode error on %d-byte input is not a typed sentinel: %v", len(data), err)
 			}
 			return
