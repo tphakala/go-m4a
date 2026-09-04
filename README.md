@@ -102,7 +102,12 @@ both plain files and fragmented (CMAF) input: `NewReader` auto-detects a
 `moof`-based stream (an initialization segment followed by `moof`/`mdat` media
 segments) and demuxes its access units through the same API. Also out of scope
 (again `ErrUnsupported`, never a crash): video or multiple audio tracks, other
-codecs, HE-AAC, and writing metadata tags. Surround is partly covered now (FLAC up to 8
+codecs, and writing metadata tags. HE-AAC is out of scope too, but typed: the
+container reader reports an HE-AAC track as AAC-LC (it identifies the MPEG-4 Audio
+family, not the AAC profile), and the `aacm4a` decoder is what rejects it,
+surfacing `pcm.ErrUnsupportedSBR` for HE-AAC and `pcm.ErrUnsupportedPS` for
+HE-AACv2 (both still matching `errors.Is(err, pcm.ErrUnsupported)`) so a caller can
+route the stream to an external decoder. Surround is partly covered now (FLAC up to 8
 channels); more-than-stereo **Opus** is the one tracked codec extension still open
 ([#5](https://github.com/tphakala/go-m4a/issues/5)), blocked upstream on a go-opus
 multistream API.

@@ -12,11 +12,13 @@ import (
 )
 
 // isReaderSentinel reports whether err is one of the errors the Reader is allowed
-// to return: a wrapped ErrCorrupt or ErrUnsupported for rejected input, or io.EOF
-// at the clean end of the frames. Any other error from a Reader that NewReader
-// accepted is a contract violation the fuzzer must surface.
+// to return: a wrapped ErrCorrupt or ErrUnsupported for rejected input, a wrapped
+// ErrBoxTooLarge for a box body over the buffer limit, or io.EOF at the clean end
+// of the frames. Any other error from a Reader that NewReader accepted is a
+// contract violation the fuzzer must surface.
 func isReaderSentinel(err error) bool {
-	return errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupported) || errors.Is(err, io.EOF)
+	return errors.Is(err, ErrCorrupt) || errors.Is(err, ErrUnsupported) ||
+		errors.Is(err, ErrBoxTooLarge) || errors.Is(err, io.EOF)
 }
 
 // writerSeed builds a valid in-memory M4A from a handful of synthetic access

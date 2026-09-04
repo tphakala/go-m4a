@@ -125,6 +125,13 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	for _, ext := range moofs {
 		// scanTopLevel already parsed and bounds-checked this moof's header, so read
 		// the body directly from the cached extent without re-parsing it.
+		if rd.maxBoxBuffer > 0 && ext.bodyLen > rd.maxBoxBuffer {
+			// Same box-buffer memory guard readSection applies to moov/ftyp, here for
+			// each moof body so the fragmented path is bounded uniformly. A
+			// memory-exhaustion limit, not a malformation, so it wraps ErrBoxTooLarge;
+			// the remedy is a larger WithMaxBoxBuffer.
+			return fmt.Errorf("go-m4a: moof body at %d length %d exceeds the %d-byte box-buffer limit: %w", ext.offset, ext.bodyLen, rd.maxBoxBuffer, ErrBoxTooLarge)
+		}
 		if ext.bodyLen > maxInt {
 			// bodyLen is already bounded by the stream length: scanTopLevel rejected any
 			// box whose total ran past the stream, and io.ReadFull below reads exactly
