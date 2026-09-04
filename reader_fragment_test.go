@@ -923,3 +923,149 @@ func TestFragmentTrafWithoutTfhdRejected(t *testing.T) {
 		t.Errorf("error = %q, want it to name the missing tfhd", err)
 	}
 }
+
+// TestFragmentResolveBase pins the two guards inside resolveBase, both of which a
+// mutation of the switch leaves invisible to the round-trip tests. First, ISO/IEC
+// 14496-12 makes base_data_offset authoritative when present, so a tfhd carrying
+// both base-data-offset-present and default-base-is-moof must resolve to the
+// explicit offset: HasBaseDataOffset has to be tested before DefaultBaseIsMoof, and
+// reversing the two would resolve this to the moof offset instead. Second, an
+// absolute base_data_offset above 1<<62 is rejected as ErrCorrupt rather than cast
+// to a signed offset. resolveBase reads only moofOffset from the accumulator, so a
+// bare value with that field set exercises it directly. The reader_regression tests
+// only ever drive an offset below 1<<62, so the ceiling itself is untested there.
+func TestFragmentResolveBase(t *testing.T) {
+	t.Parallel()
+	const moofOffset = 5000
+	a := &fragAccumulator{moofOffset: moofOffset}
+	for _, tc := range []struct {
+		name    string
+		tfhd    box.Tfhd
+		want    int64
+		wantErr error
+		errMsg  string
+	}{
+		{
+			// Both flags set: base_data_offset is authoritative. Distinct values
+			// (1234 vs moofOffset 5000) mean a reversed switch order would return 5000,
+			// which this case catches.
+			name: "base_data_offset wins over default-base-is-moof",
+			tfhd: box.Tfhd{HasBaseDataOffset: true, BaseDataOffset: 1234, DefaultBaseIsMoof: true},
+			want: 1234,
+		},
+		{
+			name: "default-base-is-moof resolves to the moof offset",
+			tfhd: box.Tfhd{DefaultBaseIsMoof: true},
+			want: moofOffset,
+		},
+		{
+			name: "base_data_offset alone",
+			tfhd: box.Tfhd{HasBaseDataOffset: true, BaseDataOffset: 1234},
+			want: 1234,
+		},
+		{
+			name:    "neither base flag is unsupported",
+			tfhd:    box.Tfhd{},
+			wantErr: ErrUnsupported,
+		},
+		{
+			// 1<<62 is the largest offset the guard admits (the check is strictly
+			// greater-than), and it fits int64 with room to spare, so it passes through.
+			name: "base_data_offset at the 1<<62 ceiling is accepted",
+			tfhd: box.Tfhd{HasBaseDataOffset: true, BaseDataOffset: 1 << 62},
+			want: 1 << 62,
+		},
+		{
+			name:    "base_data_offset above the ceiling is rejected",
+			tfhd:    box.Tfhd{HasBaseDataOffset: true, BaseDataOffset: 1<<62 + 1},
+			wantErr: ErrCorrupt,
+			errMsg:  "too large",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := a.resolveBase(tc.tfhd)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("resolveBase = (%d, %v), want error %v", got, err, tc.wantErr)
+				}
+				if tc.errMsg != "" && !strings.Contains(err.Error(), tc.errMsg) {
+					t.Errorf("error = %q, want it to mention %q", err, tc.errMsg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveBase = %v, want %d", err, tc.want)
+			}
+			if got != tc.want {
+				t.Errorf("resolveBase = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFragmentAddRunStreamLenBound pins addRun's stream-length bound on a run's
+// sample_count. Every access unit occupies at least one byte of the stream and real
+// samples do not overlap, so the running sample total can never exceed the stream
+// length; a run claiming more samples than the stream has bytes is rejected as
+// ErrCorrupt before the per-sample loop grows the geometry slices, which is what
+// stops a hostile sample_count from exhausting memory. Disabling the bound leaves
+// the whole suite green, because addRun is reached only through the fragmented open
+// path and no round-trip fixture drives a sample_count past the stream. The tfhd
+// supplies a default sample size so a within-bound run resolves every sample and
+// succeeds, proving the guard admits valid input rather than rejecting everything;
+// were the bound removed, the oversized run would resolve its sizes the same way and
+// succeed, turning the rejection case red.
+func TestFragmentAddRunStreamLenBound(t *testing.T) {
+	t.Parallel()
+	const streamLen = 100
+	tfhd := box.Tfhd{HasDefaultSampleSize: true, DefaultSampleSize: 1}
+	for _, tc := range []struct {
+		name           string
+		initialSamples int64
+		sampleCount    uint32
+		wantErr        bool
+	}{
+		{"sample_count past the stream length is rejected", 0, streamLen + 1, true},
+		// A run that fits on its own but pushes the RUNNING total past the stream is
+		// rejected too: the bound is on *a.samples + sample_count, not sample_count
+		// alone, so dropping the *a.samples term would let this case slip through.
+		{"cumulative sample_count past the stream length is rejected", streamLen - 2, 3, true},
+		{"sample_count within the stream length is accepted", 0, 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			samples := tc.initialSamples
+			var (
+				sizes            []uint32
+				chunks, perChunk []int64
+				duration         uint64
+			)
+			a := &fragAccumulator{
+				streamLen: streamLen,
+				sizes:     &sizes,
+				chunks:    &chunks,
+				perChunk:  &perChunk,
+				samples:   &samples,
+				duration:  &duration,
+			}
+			tn := box.Trun{SampleCount: tc.sampleCount}
+			_, err := a.addRun(&tn, 0, 0, tfhd)
+			if tc.wantErr {
+				if !errors.Is(err, ErrCorrupt) {
+					t.Fatalf("addRun = %v, want ErrCorrupt", err)
+				}
+				if !strings.Contains(err.Error(), "exceeds stream") {
+					t.Errorf("error = %q, want it to name the stream-length bound", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("addRun = %v, want success", err)
+			}
+			if want := tc.initialSamples + int64(tc.sampleCount); samples != want {
+				t.Errorf("accumulated samples = %d, want %d", samples, want)
+			}
+		})
+	}
+}
