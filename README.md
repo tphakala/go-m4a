@@ -112,6 +112,17 @@ channels); more-than-stereo **Opus** is the one tracked codec extension still op
 ([#5](https://github.com/tphakala/go-m4a/issues/5)), blocked upstream on a go-opus
 multistream API.
 
+## Audio quality
+
+go-m4a is a container, so audio quality is set by the inner codec: AAC-LC via
+[go-aac](https://github.com/tphakala/go-aac), Opus via
+[go-opus](https://github.com/tphakala/go-opus), or FLAC via
+[go-flac](https://github.com/tphakala/go-flac), each measured in its own
+repository. What go-m4a itself guarantees is container correctness: an encode
+then decode round trip is sample-accurate (the edit-list priming and trailing
+padding are handled), and FLAC-in-M4A is bit-exact. A CI round-trip integrity
+gate is planned (#57).
+
 ## Install
 
 ```sh
