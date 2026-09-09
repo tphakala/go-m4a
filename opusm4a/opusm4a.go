@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 
 	"github.com/tphakala/go-opus/opus"
 
@@ -140,7 +139,7 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 		remaining := max(samplesPerChannel-off, 0)
 		n := min(frameSamples, remaining) * cfg.Channels
 		base := off * stride
-		for i := 0; i < n; i++ {
+		for i := range n {
 			frame[i] = int16(binary.LittleEndian.Uint16(pcm[base+2*i:]))
 		}
 		for i := n; i < len(frame); i++ {
@@ -179,22 +178,10 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 	return DecodeInterleavedLimit(r, int(defaultMaxDecodedBytes.Load()))
 }
 
-// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
-// a variable rather than the constant itself only so that a test can lower it:
-// asserting that the wrapper is bounded otherwise costs a decode past the real
-// default, and a test that cannot afford that ends up asserting nothing, which
-// is exactly how a "delegate with no limit" regression would slip through.
-//
-// It is atomic because the alternative is safe only by an ordering invariant
-// nothing enforces: a plain variable is race-free here purely because Go defers
-// parallel tests until the serial ones finish, so adding t.Parallel to the test
-// that lowers it, or to any sibling that decodes, introduces a data race with no
-// warning. One atomic load per decoded file is not a cost worth that. Whatever
-// is stored must fit an int, which the constant does on every supported
-// architecture.
-var defaultMaxDecodedBytes atomic.Int64
-
-func init() { defaultMaxDecodedBytes.Store(m4a.DefaultMaxDecodedBytes) }
+// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with, held
+// as a tunable atomic so a test can lower it without a decode past the real
+// default. See reservation.NewLimit for why it is a var, atomic, and built there.
+var defaultMaxDecodedBytes = reservation.NewLimit(m4a.DefaultMaxDecodedBytes)
 
 // DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
 // decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
@@ -263,7 +250,7 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 // through a file.
 func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
 	if fn == nil {
-		return m4a.Info{}, fmt.Errorf("go-m4a/opusm4a: DecodeStream: nil callback")
+		return m4a.Info{}, errors.New("go-m4a/opusm4a: DecodeStream: nil callback")
 	}
 	rd, dec, info, err := openStream(r)
 	if err != nil {

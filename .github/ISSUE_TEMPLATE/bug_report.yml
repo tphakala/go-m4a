@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a bug or unexpected behaviour
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Before submitting, check that you are on the latest release and search existing issues (open and closed) for duplicates.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The go-m4a release (module version) you are using.
+      placeholder: "e.g. v0.5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, and Go version.
+      placeholder: "e.g. Ubuntu 24.04 amd64, go1.27.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal code snippet and, where possible, a sample file that triggers the issue.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happens instead? Paste any error messages exactly as they appear.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Remove or redact anything private (IPs, hostnames, credentials, API keys).
+      render: shell
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I am running the latest release.
+          required: true
+        - label: I have searched existing open and closed issues and this does not appear to be a duplicate.
+          required: true

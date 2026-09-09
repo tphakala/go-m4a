@@ -212,7 +212,7 @@ func TestAppendMdatHeader(t *testing.T) {
 		t.Fatalf("mdat header length = %d, want %d", len(got), MdatHeaderSize)
 	}
 	// The writer patches the largesize at MdatLargeSizeOffset.
-	patched := append([]byte(nil), got...)
+	patched := bytes.Clone(got)
 	ls := AppendMdatLargeSize(nil, MdatHeaderSize+4242)
 	copy(patched[MdatLargeSizeOffset:], ls)
 	if v := binary.BigEndian.Uint64(patched[MdatLargeSizeOffset:]); v != MdatHeaderSize+4242 {

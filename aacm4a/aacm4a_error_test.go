@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 

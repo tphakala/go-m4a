@@ -1,0 +1,8 @@
+# Normalize line endings so a Windows checkout cannot break the shell scripts
+# or make gofmt see CRLF.
+* text=auto eol=lf
+*.sh text eol=lf
+*.go text eol=lf
+
+# Keep generated files out of diffs and language statistics.
+go.sum linguist-generated=true

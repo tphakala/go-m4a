@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 
 	flacpcm "github.com/tphakala/go-flac/pcm"
 
@@ -157,22 +156,10 @@ func DecodeInterleaved(r io.ReadSeeker) ([]byte, m4a.Info, error) {
 	return DecodeInterleavedLimit(r, int(defaultMaxDecodedBytes.Load()))
 }
 
-// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with. It is
-// a variable rather than the constant itself only so that a test can lower it:
-// asserting that the wrapper is bounded otherwise costs a decode past the real
-// default, and a test that cannot afford that ends up asserting nothing, which
-// is exactly how a "delegate with no limit" regression would slip through.
-//
-// It is atomic because the alternative is safe only by an ordering invariant
-// nothing enforces: a plain variable is race-free here purely because Go defers
-// parallel tests until the serial ones finish, so adding t.Parallel to the test
-// that lowers it, or to any sibling that decodes, introduces a data race with no
-// warning. One atomic load per decoded file is not a cost worth that. Whatever
-// is stored must fit an int, which the constant does on every supported
-// architecture.
-var defaultMaxDecodedBytes atomic.Int64
-
-func init() { defaultMaxDecodedBytes.Store(m4a.DefaultMaxDecodedBytes) }
+// defaultMaxDecodedBytes is the ceiling DecodeInterleaved delegates with, held
+// as a tunable atomic so a test can lower it without a decode past the real
+// default. See reservation.NewLimit for why it is a var, atomic, and built there.
+var defaultMaxDecodedBytes = reservation.NewLimit(m4a.DefaultMaxDecodedBytes)
 
 // DecodeInterleavedLimit is DecodeInterleaved with an explicit ceiling on the
 // decoded size, returning an error wrapping m4a.ErrDecodeLimit as soon as the
@@ -248,7 +235,7 @@ func DecodeInterleavedLimit(r io.ReadSeeker, maxBytes int) ([]byte, m4a.Info, er
 // partway through a file.
 func DecodeStream(r io.ReadSeeker, fn func(pcm []byte) error) (m4a.Info, error) {
 	if fn == nil {
-		return m4a.Info{}, fmt.Errorf("go-m4a/flacm4a: DecodeStream: nil callback")
+		return m4a.Info{}, errors.New("go-m4a/flacm4a: DecodeStream: nil callback")
 	}
 	rd, fd, info, err := openStream(r)
 	if err != nil {

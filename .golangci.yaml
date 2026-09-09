@@ -1,45 +1,144 @@
-# Linting standard shared with github.com/tphakala/go-flac and go-aac, trimmed
-# to what go-m4a needs: the go-aac-specific depguard fmath boundary and the
-# gocritic ruleguard rules/*.go wiring are dropped (go-m4a has no such internal
-# numeric fence), the common linter set is kept.
+# golangci-lint v2 configuration for go-m4a.
+#
+# The linter version is pinned once, in .golangci-version; CI and `task tools`
+# read it from there so the local and CI runs use the same binary. Validate an
+# edit to this file with `golangci-lint config verify` before relying on it.
+#
+# Policy: strict by default. A linter is disabled here only with a written
+# reason, and a finding is silenced at the call site only with a
+# `//nolint:<linter> // <reason>` directive (nolintlint enforces both parts).
+#
+# go-m4a is a pure-stdlib MP4/M4A container library that parses untrusted bytes
+# and does size/offset arithmetic; a couple of settings below are tuned for that
+# domain, each with a reason.
 version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
 output:
   sort-order:
     - linter
     - severity
     - file
-linters:
+
+# golangci-lint v2 runs formatters from this top-level key, not from
+# linters.enable. Without it, `golangci-lint run` reports no formatting issues
+# at all, so CI would accept unformatted code even though gofumpt or goimports
+# would rewrite it.
+formatters:
   enable:
-    - bodyclose
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+    goimports:
+      local-prefixes:
+        - github.com/tphakala/go-m4a
+
+linters:
+  # The v2 "standard" default set (errcheck, govet, ineffassign, staticcheck,
+  # unused) stays enabled; the list below adds to it.
+  #
+  # Linters that only target subsystems this pure-Go container library does not
+  # have (net/http, database/sql, log/slog, testify, distributed tracing) are
+  # intentionally left out; enabling them would be a permanent no-op here. Add
+  # the matching linter back the day the code grows such a surface.
+  enable:
+    - asciicheck
+    - bidichk
+    - containedctx
+    - contextcheck
     - copyloopvar
+    - decorder
+    - depguard
     - dupl
     - durationcheck
+    - embeddedstructfieldcheck
+    - errchkjson
     - errname
     - errorlint
     - exhaustive
+    - exptostd
     - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecknoinits
     - gocognit
     - goconst
     - gocritic
+    - godoclint
     - gocyclo
     - iface
-    - ineffassign
+    - makezero
     - misspell
+    # modernize stays disabled on purpose: rules/*.go (ruleguard) carry the
+    # Go 1.20 through Go 1.27 modernization patterns instead. Enabling both
+    # would make the two fight over the same line under uniq-by-line, with the
+    # surviving message chosen by run order rather than by quality.
+    #- modernize
+    - musttag
+    - nakedret
     - nilerr
+    - nilnesserr
     - nilnil
-    - predeclared
+    - nolintlint
+    - perfsprint
     - prealloc
+    - predeclared
+    - reassign
+    - recvcheck
     - revive
-    - staticcheck
-    - testifylint
     - thelper
+    - tparallel
     - unconvert
+    - unparam
+    - usestdlibvars
+    - usetesting
     - wastedassign
-  disable:
-    - unused
+
   settings:
+    depguard:
+      rules:
+        main:
+          # lax: everything is allowed unless it matches a deny entry.
+          list-mode: lax
+          deny:
+            - pkg: "io/ioutil"
+              desc: "deprecated since Go 1.16; use the io and os packages"
+            - pkg: "github.com/pkg/errors"
+              desc: "use the standard errors package (errors.Is/As/AsType, %w)"
+            - pkg: "golang.org/x/exp/slices"
+              desc: "use the standard slices package"
+            - pkg: "golang.org/x/exp/maps"
+              desc: "use the standard maps package"
+            - pkg: "golang.org/x/exp/constraints"
+              desc: "use the standard cmp package or a local constraint"
+            - pkg: "math/rand$"
+              desc: "use math/rand/v2 (or crypto/rand for secrets)"
+    dupl:
+      threshold: 120
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      # A switch with a default branch is treated as exhaustive.
+      default-signifies-exhaustive: true
+    goconst:
+      # Do not count string literals in _test.go files toward the
+      # extract-a-constant threshold. Test inputs are the API contract a test
+      # pins by literal; counting them would force a production constant and
+      # weaken the test.
+      ignore-tests: true
     gocognit:
-      min-complexity: 50
+      # The reader dispatches on box type and the demuxer walks fragmented-MP4
+      # framing; a handful of these functions are inherently branchy. 30 keeps
+      # the gate meaningful without forcing an artificial split of a parser that
+      # reads clearer as one function. Findings above this are addressed, not
+      # blanket-silenced.
+      min-complexity: 30
     gocritic:
       disabled-checks:
         - commentFormatting
@@ -54,17 +153,140 @@ linters:
           # (NewWriter and its validators), so raise the default 80-byte threshold
           # to two cache lines rather than force a pointer through the public API.
           sizeThreshold: 128
-    revive:
-      rules:
-        - name: unused-parameter
-          disabled: true
-        - name: exported
+        # gocritic auto-enables its ruleguard check when settings.ruleguard.rules
+        # is set. The rules/*.go matchers carry the //go:build ruleguard tag so
+        # the normal toolchain ignores them; `go vet -tags ruleguard ./rules/`
+        # compiles them as a canary and `go test ./rules/rulestest/` runs each
+        # matcher against rules/testdata/probe.
+        ruleguard:
+          # Fail the run when a rule file does not parse or imports a package
+          # that cannot be found. Without this, ruleguard logs the error and
+          # silently drops the whole rule file, so every matcher in it stops
+          # firing while the lint job stays green.
+          failOn: all
+          # ${base-path} is the directory holding this config file, so the glob
+          # resolves the same way regardless of the working directory.
+          rules: "${base-path}/rules/*.go"
+    gocyclo:
+      # See gocognit: the same branchy parser functions drive cyclomatic count.
+      # 20 is stricter than the default 30 while leaving room for the box and
+      # fragment dispatch.
+      min-complexity: 20
+    gosec:
+      # No severity or confidence floor. G101 (hardcoded credentials) and G112
+      # (missing ReadHeaderTimeout) are emitted below a medium confidence floor,
+      # and both matter for anything that holds credentials or serves HTTP.
+      #
+      # Do NOT read this as full InsecureSkipVerify coverage. gosec detects G402
+      # only in composite-literal form, tls.Config{InsecureSkipVerify: x}. The
+      # assignment form, c.InsecureSkipVerify = x, produces no finding, so a
+      # skip-verify path written that way has to be caught in review.
+      #
+      # Exclude specific rule IDs with a written reason instead of a floor.
+      excludes:
+        - G104 # Audit errors not checked (covered by errcheck)
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment optimizes struct layout for memory at the cost of
+        # readability; it is a per-struct decision, not a lint gate.
+        - fieldalignment
+        # shadow flags the idiomatic `if x, err := f(); err != nil` inside a
+        # function that already has an err in scope. Too noisy to gate on.
+        - shadow
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
     prealloc:
       simple: true
       range-loops: true
       for-loops: true
-    exhaustive:
-      default-signifies-exhaustive: true
+    revive:
+      # golangci-lint replaces revive's default rule set with this list as soon
+      # as `rules` is non-empty, so the defaults are spelled out here (minus
+      # unused-parameter, whose `_` rewrites hurt readability of interface
+      # implementations) and a few extra correctness rules are added.
+      rules:
+        - name: atomic
+        - name: bare-return
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: datarace
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: identical-branches
+        - name: if-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-value-receiver
+        - name: package-comments
+        - name: range
+        - name: range-val-address
+        - name: range-val-in-closure
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: redundant-import-alias
+        - name: string-of-int
+        - name: struct-tag
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unconditional-recursion
+        - name: unexported-return
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-receiver
+        - name: use-any
+        - name: useless-break
+        - name: var-declaration
+        - name: var-naming
+        - name: waitgroup-by-value
+    staticcheck:
+      checks:
+        - all
+    usetesting:
+      # Both default to false upstream; without them usetesting does not flag
+      # context.Background()/context.TODO() in tests at all.
+      context-background: true
+      context-todo: true
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests repeat setup on purpose, pin inputs by literal, and their table and
+      # fuzz-invariant helpers are naturally branchy, so the duplication and
+      # complexity linters are relaxed for them.
+      - path: '_test\.go$'
+        linters:
+          - dupl
+          - gocognit
+          - gocyclo
+          - goconst
+      # Test fixtures build fixed-size binary box headers by writing into a
+      # make([]byte, N) at known offsets and then appending the variable-length
+      # payload; the make([]byte, 0, N) form makezero wants cannot be indexed.
+      - path: '_test\.go$'
+        linters:
+          - makezero
+      # Tests read fixtures by computed path (G304) and run tools they locate
+      # at runtime (G204, the ffmpeg interop checks); neither input comes from
+      # outside the repository. Every other gosec rule still applies to tests.
+      - path: '_test\.go$'
+        linters:
+          - gosec
+        text: 'G(204|304):'
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0

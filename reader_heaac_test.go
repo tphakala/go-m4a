@@ -39,7 +39,7 @@ func rewriteASC(t *testing.T, data, have, want []byte) []byte {
 	if n := bytes.Count(data, needle); n != 1 {
 		t.Fatalf("esds DecoderSpecificInfo needle % x appears %d times, want 1", needle, n)
 	}
-	out := append([]byte(nil), data...)
+	out := bytes.Clone(data)
 	copy(out[bytes.Index(data, needle)+2:], want)
 	return out
 }

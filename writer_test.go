@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -222,7 +223,7 @@ func TestWriteAndReparse(t *testing.T) {
 	if count := binary.BigEndian.Uint32(stszPayload[4:]); count != n {
 		t.Fatalf("stsz sample_count = %d, want %d", count, n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		got := binary.BigEndian.Uint32(stszPayload[8+4*i:])
 		if got != sizes[i] {
 			t.Errorf("stsz[%d] = %d, want %d", i, got, sizes[i])
@@ -576,7 +577,7 @@ func TestFFprobeInterop(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	// Parse stdout as JSON but capture stderr in its own buffer: under
 	// -count_packets ffprobe's AAC decoder logs benign diagnostics (the synthetic
@@ -622,7 +623,7 @@ func TestFFprobeInterop(t *testing.T) {
 	if len(probe.Packets) != n {
 		t.Errorf("packets array length = %d, want %d", len(probe.Packets), n)
 	}
-	if s.NbReadPackets != fmt.Sprint(n) {
+	if s.NbReadPackets != strconv.Itoa(n) {
 		t.Errorf("nb_read_packets = %q, want %d", s.NbReadPackets, n)
 	}
 	t.Logf("ffprobe: codec_name=%s sample_rate=%s channels=%d nb_read_packets=%s packets=%d",

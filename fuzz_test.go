@@ -55,7 +55,7 @@ func fragmentedSeed() (data []byte, ok bool) {
 	if err != nil {
 		return nil, false
 	}
-	out := append([]byte(nil), init...)
+	out := bytes.Clone(init)
 	for _, seg := range [][]byte{{0x21, 0x22, 0x23}, {0x31, 0x32}} {
 		for range 3 {
 			if err := fw.WriteFrameDuration(seg, 1024); err != nil {

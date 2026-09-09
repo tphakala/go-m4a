@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -21,7 +22,7 @@ const benchADTSFrames = 5000
 func buildADTS(n int) []byte {
 	var buf []byte
 	var hdr [adtsHeaderLen]byte
-	for i := 0; i < n; i++ {
+	for i := range n {
 		payloadLen := 100 + (i*97)%701
 		frameLen := adtsHeaderLen + payloadLen
 		hdr[0] = 0xff

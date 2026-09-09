@@ -52,7 +52,7 @@ func TestReadFrameIntoRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		got, rerr := rd.ReadFrameInto(dst)
 		if rerr != nil {
 			t.Fatalf("ReadFrameInto frame %d: %v", i, rerr)

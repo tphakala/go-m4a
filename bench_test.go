@@ -15,11 +15,11 @@ import (
 // costs dominate the one-time setup and finalize work.
 const benchFrameCount = 5000
 
-// benchFrames builds n synthetic AAC-LC access units with realistic, varied
-// sizes (roughly 100..800 bytes, the range of real AAC-LC frames). The bytes are
-// arbitrary; the container never decodes them.
-func benchFrames(n int) [][]byte {
-	frames := make([][]byte, n)
+// benchFrames builds benchFrameCount synthetic AAC-LC access units with
+// realistic, varied sizes (roughly 100..800 bytes, the range of real AAC-LC
+// frames). The bytes are arbitrary; the container never decodes them.
+func benchFrames() [][]byte {
+	frames := make([][]byte, benchFrameCount)
 	for i := range frames {
 		size := 100 + (i*97)%701 // 100..800 bytes, varied
 		au := make([]byte, size)
@@ -65,7 +65,7 @@ func buildBenchFile(b *testing.B, frames [][]byte) []byte {
 // pos is reset) so the numbers isolate the Writer's own allocations from the
 // sink's growth. Per-frame cost is (reported value / benchFrameCount).
 func BenchmarkWriteFrames(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
 
 	ws := &memWS{}
@@ -107,7 +107,7 @@ func muxOnce(b *testing.B, ws *memWS, cfg WriterConfig, frames [][]byte) {
 // steady-state per-frame read cost (one make([]byte, size) per frame is the
 // documented ReadFrame contract). Per-frame cost is (value / benchFrameCount).
 func BenchmarkReadFrame(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	data := buildBenchFile(b, frames)
 
 	rd, err := NewReader(bytes.NewReader(data))
@@ -137,7 +137,7 @@ func BenchmarkReadFrame(b *testing.B) {
 // allocated per frame (unlike ReadFrame's documented one make per frame). Per-
 // frame cost is (value / benchFrameCount).
 func BenchmarkReadFrameInto(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	data := buildBenchFile(b, frames)
 
 	rd, err := NewReader(bytes.NewReader(data))
@@ -176,7 +176,7 @@ func BenchmarkReadFrameInto(b *testing.B) {
 // pre-warmed scratch buffer so the numbers show the steady-state per-frame cost,
 // which is expected to be zero allocations after warm-up.
 func BenchmarkRawStream(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	data := buildBenchFile(b, frames)
 	framed := benchTotalPayload(frames) + 2*int64(len(frames)) // + 2-byte length prefixes
 
@@ -209,7 +209,7 @@ func BenchmarkRawStream(b *testing.B) {
 // scratch growth to every iteration, so allocs/op reflect that growth amortized
 // over all frames rather than the true per-frame cost.
 func BenchmarkRawStreamFresh(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	data := buildBenchFile(b, frames)
 	framed := benchTotalPayload(frames) + 2*int64(len(frames))
 
@@ -251,7 +251,7 @@ func benchFragSegments(frames [][]byte, framesPerSeg int) [][]fragAU {
 // SetBytes: the demux setup reads only the box headers and moof bodies, never
 // the mdat media payload, so a bytes-per-second figure would misreport it.
 func BenchmarkOpenFragmented(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
 	data := buildFragmentedStream(b, cfg, benchFragSegments(frames, 50))
 
@@ -267,17 +267,15 @@ func BenchmarkOpenFragmented(b *testing.B) {
 // exercising the AppendContainer re-copies that carry the sample table up the
 // box tree (stbl -> minf -> mdia -> trak -> moov).
 func BenchmarkBuildMoov(b *testing.B) {
-	frames := benchFrames(benchFrameCount)
+	frames := benchFrames()
 	sizes := make([]uint32, len(frames))
 	for i, f := range frames {
 		sizes[i] = uint32(len(f))
 	}
 	w := &Writer{
-		trackMeta: trackMeta{
-			sampleRate: 48000,
-			channels:   1,
-			asc:        ascMono48k,
-		},
+		sampleRate:   48000,
+		channels:     1,
+		asc:          ascMono48k,
 		payloadStart: 100,
 		sizes:        sizes,
 	}

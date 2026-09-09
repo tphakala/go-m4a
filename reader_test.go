@@ -196,7 +196,7 @@ func TestRawStreamFraming(t *testing.T) {
 		if off+n > len(raw) {
 			t.Fatalf("frame at %d claims %d bytes, only %d remain", off, n, len(raw)-off)
 		}
-		got = append(got, append([]byte(nil), raw[off:off+n]...))
+		got = append(got, bytes.Clone(raw[off:off+n]))
 		off += n
 	}
 	if len(got) != len(frames) {
@@ -239,7 +239,11 @@ func TestInterop(t *testing.T) {
 			if err != nil {
 				t.Skipf("fixture missing: %v", err)
 			}
-			defer func() { _ = f.Close() }()
+			defer func() {
+				if cerr := f.Close(); cerr != nil {
+					t.Errorf("close fixture: %v", cerr)
+				}
+			}()
 
 			r, err := NewReader(f)
 			if err != nil {
@@ -331,7 +335,7 @@ func patch(t *testing.T, data []byte, sub, repl string) []byte {
 	if len(sub) != len(repl) {
 		t.Fatalf("patch length mismatch: %q vs %q", sub, repl)
 	}
-	out := append([]byte(nil), data...)
+	out := bytes.Clone(data)
 	copy(out[i:], repl)
 	return out
 }
@@ -357,12 +361,12 @@ func TestMalformedInput(t *testing.T) {
 
 	// A copy of the valid file with the ftyp size field zeroed: the extends-to-EOF
 	// box swallows moov, which then cannot be found.
-	sizeZero := append([]byte(nil), valid...)
+	sizeZero := bytes.Clone(valid)
 	binary.BigEndian.PutUint32(sizeZero, 0)
 
 	// A copy with a wildly inflated stsz sample_count. From the "stsz" type
 	// bytes: version/flags(4) + sample_size(4), then sample_count at +12.
-	lyingStsz := append([]byte(nil), valid...)
+	lyingStsz := bytes.Clone(valid)
 	if i := bytes.Index(lyingStsz, []byte("stsz")); i >= 0 {
 		binary.BigEndian.PutUint32(lyingStsz[i+12:], 0x7fffffff)
 	}

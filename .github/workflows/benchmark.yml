@@ -1,0 +1,70 @@
+name: Benchmark
+
+# Runs the benchmarks on the pull request and on its base commit, compares them
+# with benchstat, and keeps one sticky comment on the PR with the result. The
+# comparison is informational (never a gate): GitHub runners are noisy, so read
+# the p-values, not the percentages.
+#
+# Actions here are pinned by commit SHA (with the version in a comment, which
+# Dependabot keeps updated) because the job holds pull-requests: write.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: Benchmark comparison
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      # -run='^$' matches no tests, so only benchmarks run. Results go to
+      # $RUNNER_TEMP, not the workspace: the base checkout below cleans the
+      # working tree and would delete them.
+      - name: Run benchmarks on PR
+        run: go test -run='^$' -bench=. -benchmem -benchtime=100ms -count=6 -timeout=15m ./... | tee "$RUNNER_TEMP/pr.bench"
+      - name: Checkout base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Run benchmarks on base
+        run: go test -run='^$' -bench=. -benchmem -benchtime=100ms -count=6 -timeout=15m ./... | tee "$RUNNER_TEMP/base.bench"
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+      - name: Compare
+        run: |
+          {
+            echo '## Benchmark comparison'
+            echo
+            echo '```'
+            benchstat "$RUNNER_TEMP/base.bench" "$RUNNER_TEMP/pr.bench" 2>&1 || true
+            echo '```'
+          } > "$RUNNER_TEMP/bench-report.md"
+      # Only a same-repo PR gets a write-scoped token; a fork PR's token is
+      # forced read-only, so posting a comment there would 403 and fail the
+      # check. Forks still run the benchmark; the comparison is in the job log.
+      - name: Post the result
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: benchmark
+          path: ${{ runner.temp }}/bench-report.md

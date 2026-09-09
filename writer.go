@@ -18,6 +18,8 @@
 package m4a
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -205,10 +207,10 @@ type WriterConfig struct {
 // and Close patches the mdat size and writes the moov metadata. It requires an
 // io.WriteSeeker because the mdat size is a placeholder patched once at Close.
 type Writer struct {
-	w io.WriteSeeker
-
 	// Normalized codec configuration, shared with FragmentWriter.
 	trackMeta
+
+	w io.WriteSeeker
 
 	encoderDelay int
 	mediaLength  int64
@@ -247,7 +249,7 @@ type Writer struct {
 // SampleRate or Channels, the sample rate is unsupported, or an initial write fails.
 func NewWriter(w io.WriteSeeker, cfg WriterConfig) (*Writer, error) {
 	if w == nil {
-		return nil, fmt.Errorf("go-m4a: nil writer")
+		return nil, errors.New("go-m4a: nil writer")
 	}
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
@@ -313,7 +315,7 @@ func newTrackMeta(cfg WriterConfig) trackMeta {
 	}
 	switch cfg.Codec {
 	case CodecAACLC:
-		m.asc = append([]byte(nil), cfg.ASC...)
+		m.asc = bytes.Clone(cfg.ASC)
 		m.defaultDelay = DefaultEncoderDelay // 1024
 		m.defaultDuration = samplesPerFrame  // every AAC-LC AU is 1024 samples
 	case CodecOpus:
@@ -330,7 +332,7 @@ func newTrackMeta(cfg WriterConfig) trackMeta {
 		// Opus packet durations vary (the final packet may be short), so callers
 		// supply each with WriteFrameDuration; defaultDuration stays 0.
 	case CodecFLAC:
-		m.streamInfo = append([]byte(nil), cfg.STREAMINFO...)
+		m.streamInfo = bytes.Clone(cfg.STREAMINFO)
 		m.defaultDelay = 0 // FLAC has no encoder priming
 		// FLAC block sizes vary (the final frame is short); callers supply each
 		// with WriteFrameDuration; defaultDuration stays 0.
@@ -366,10 +368,10 @@ func (w *Writer) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 		return ErrClosed
 	}
 	if len(au) == 0 {
-		return fmt.Errorf("go-m4a: WriteFrameDuration: empty access unit")
+		return errors.New("go-m4a: WriteFrameDuration: empty access unit")
 	}
 	if sampleDuration == 0 {
-		return fmt.Errorf("go-m4a: WriteFrameDuration: sample duration must be positive")
+		return errors.New("go-m4a: WriteFrameDuration: sample duration must be positive")
 	}
 	if len(w.sizes) >= maxFrames {
 		return fmt.Errorf("go-m4a: WriteFrameDuration: frame count would exceed the limit of %d", maxFrames)
@@ -430,7 +432,7 @@ func (w *Writer) SetSTREAMINFO(streamInfo []byte) error {
 	if err := validateFlacStreamInfo(streamInfo, int(w.channels), int(w.sampleRate)); err != nil {
 		return fmt.Errorf("go-m4a: SetSTREAMINFO: %w", err)
 	}
-	w.streamInfo = append([]byte(nil), streamInfo...)
+	w.streamInfo = bytes.Clone(streamInfo)
 	return nil
 }
 
@@ -454,7 +456,7 @@ func (w *Writer) Close() error {
 	// error without WriteFrame being able to append in between.
 	w.closed = true
 	if len(w.sizes) == 0 {
-		return fmt.Errorf("go-m4a: Close: no frames written")
+		return errors.New("go-m4a: Close: no frames written")
 	}
 	// A FLAC track must carry a STREAMINFO block by finalize: it was either given
 	// at NewWriter or supplied later with SetSTREAMINFO. Enforce the exact length
@@ -462,7 +464,7 @@ func (w *Writer) Close() error {
 	// STREAMINFO that never got SetSTREAMINFO fails with a clear error instead of
 	// building a dfLa box around a zero-length block.
 	if w.codec == CodecFLAC && len(w.streamInfo) != flacStreamInfoLen {
-		return fmt.Errorf("go-m4a: Close: FLAC track has no STREAMINFO; call SetSTREAMINFO before Close")
+		return errors.New("go-m4a: Close: FLAC track has no STREAMINFO; call SetSTREAMINFO before Close")
 	}
 
 	// Overwrite the 8-byte mdat largesize in place: header size + payload.

@@ -1,0 +1,49 @@
+name: CodeQL
+
+# Actions here are pinned by commit SHA (with the version in a comment, which
+# Dependabot keeps updated) because the job holds security-events: write.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 8 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze
+    # Code scanning is available for public repositories (and for private
+    # ones only with GitHub Advanced Security), so the job skips while the
+    # repository is private. A scheduled run has no repository payload to
+    # inspect and always runs.
+    if: github.event.repository.private != true
+    runs-on: ubuntu-latest
+    permissions:
+      # The analyze step reads its own workflow run through the API; without
+      # actions: read it fails with "Resource not accessible by integration".
+      actions: read
+      # Needed to upload the results to the code-scanning dashboard.
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: go
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9

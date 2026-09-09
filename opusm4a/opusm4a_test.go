@@ -54,9 +54,9 @@ func (m *memWS) Seek(offset int64, whence int) (int64, error) {
 // genSine builds interleaved little-endian 16-bit PCM of a 440 Hz sine at 48 kHz.
 func genSine(samplesPerCh, channels int) []byte {
 	out := make([]byte, 0, samplesPerCh*channels*2)
-	for i := 0; i < samplesPerCh; i++ {
+	for i := range samplesPerCh {
 		v := int16(math.Round(18000 * math.Sin(2*math.Pi*440*float64(i)/48000)))
-		for c := 0; c < channels; c++ {
+		for range channels {
 			out = binary.LittleEndian.AppendUint16(out, uint16(v))
 		}
 	}
@@ -69,7 +69,7 @@ func rms(pcm []byte) float64 {
 		return 0
 	}
 	var sum float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := float64(int16(binary.LittleEndian.Uint16(pcm[2*i:])))
 		sum += v * v
 	}
@@ -135,9 +135,9 @@ func TestOpusRoundTrip(t *testing.T) {
 // sine at input rates other than 48 kHz.
 func genSineAt(samplesPerCh, channels, rate int) []byte {
 	out := make([]byte, 0, samplesPerCh*channels*2)
-	for i := 0; i < samplesPerCh; i++ {
+	for i := range samplesPerCh {
 		v := int16(math.Round(18000 * math.Sin(2*math.Pi*440*float64(i)/float64(rate))))
-		for c := 0; c < channels; c++ {
+		for range channels {
 			out = binary.LittleEndian.AppendUint16(out, uint16(v))
 		}
 	}

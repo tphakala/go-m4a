@@ -18,7 +18,7 @@ import (
 // NewReader. n sets the mvhd/mdhd media duration (n * 1024 samples); it does not
 // have to agree with the sample tables, which is exactly what the malformed
 // cases need.
-func assembleMoovStbl(sampleRate uint32, channels uint16, n int, payload []byte, buildStbl func(payloadStart int64) []byte) []byte {
+func assembleMoovStbl(sampleRate uint32, n int, payload []byte, buildStbl func(payloadStart int64) []byte) []byte {
 	ftyp := box.AppendFtyp(nil, box.NewFourCC("M4A "), 0,
 		box.NewFourCC("M4A "), box.NewFourCC("mp42"), box.NewFourCC("isom"))
 
@@ -196,7 +196,7 @@ func TestExpandStscRegression(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			data := assembleMoovStbl(48000, 1, tc.n, tc.payload, tc.build)
+			data := assembleMoovStbl(48000, tc.n, tc.payload, tc.build)
 			err := newReaderNoPanic(t, data)
 			if !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("NewReader error = %v, want wrapped ErrCorrupt", err)
@@ -234,7 +234,7 @@ func TestExpandStscValidMultiChunk(t *testing.T) {
 	chunk1Len := int64(len(frames[0]) + len(frames[1]))
 	stsd := box.AppendStsd(nil, 1, 48000, ascMono48k)
 
-	data := assembleMoovStbl(48000, 1, n, payload, func(ps int64) []byte {
+	data := assembleMoovStbl(48000, n, payload, func(ps int64) []byte {
 		return joinStbl(
 			stsd,
 			box.AppendStts(nil, n, samplesPerFrame),
@@ -386,7 +386,7 @@ func TestMalformedMoovNegatives(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			data := assembleMoovStbl(48000, 1, tc.n, tc.payload, tc.build)
+			data := assembleMoovStbl(48000, tc.n, tc.payload, tc.build)
 			err := noPanicNewReader(t, data)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
