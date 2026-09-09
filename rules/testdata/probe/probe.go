@@ -306,7 +306,9 @@ func sliceRepeat(s []int, n int, n64 int64, items [][]int) []int {
 	for i := 0; i < len(s); i++ { // want "slices.Repeat(s, len(s))"
 		result = append(result, s...)
 	}
-	for i := range n { // want "slices.Repeat(s[i:], n)"
+	// Not flagged: s[i:] depends on the loop variable, so slices.Repeat is not
+	// equivalent and i is out of scope after the loop.
+	for i := range n {
 		result = append(result, s[i:]...)
 	}
 	for range n { // want "slices.Repeat(s, n)"

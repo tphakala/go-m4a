@@ -65,10 +65,13 @@ func RandV2Migration(m dsl.Matcher) {
 	).
 		Report("rand.Seed is deprecated (Go 1.20+); global rand is auto-seeded; use rand.New(rand.NewSource($seed)) for reproducibility")
 
-	// rand.Read is deprecated (Go 1.20+)
+	// rand.Read is deprecated (Go 1.20+). Gate on the math/rand import so a
+	// crypto/rand.Read call (crypto/rand also defaults to the name "rand") is not
+	// mis-flagged: crypto/rand.Read is the secure function, not the deprecated one.
 	m.Match(
 		`rand.Read($b)`,
 	).
+		Where(m.File().Imports("math/rand")).
 		Report("rand.Read is deprecated (Go 1.20+); use crypto/rand.Read for cryptographic purposes")
 }
 

@@ -45,6 +45,13 @@ func deprecatedRSAMultiPrime(nprimes, bits int) {
 	_, _ = rsa.GenerateMultiPrimeKey(rand.Reader, nprimes, bits) // want "rsa.GenerateMultiPrimeKey is deprecated"
 }
 
+// Not flagged: crypto/rand.Read is the secure function, not the deprecated
+// math/rand.Read. RandV2Migration's rand.Read match is gated on a math/rand
+// import, which this file does not have.
+func cryptoRandReadNotFlagged(b []byte) {
+	_, _ = rand.Read(b)
+}
+
 // rule: DeprecatedPKCS1v15
 func deprecatedPKCS1v15(pub *rsa.PublicKey, priv *rsa.PrivateKey, msg, ciphertext, key []byte) {
 	_, _ = rsa.EncryptPKCS1v15(rand.Reader, pub, msg)                     // want "rsa.EncryptPKCS1v15 is deprecated"

@@ -72,6 +72,7 @@ linters:
     - gocritic
     - godoclint
     - gocyclo
+    - gosec
     - iface
     - makezero
     - misspell
@@ -185,6 +186,14 @@ linters:
       # Exclude specific rule IDs with a written reason instead of a floor.
       excludes:
         - G104 # Audit errors not checked (covered by errcheck)
+        # G115 (integer overflow in fixed-width conversions) fires in the hundreds
+        # here: a binary container converts between int and uint8/16/32/64 on nearly
+        # every field read and write, almost all of them benign, format-bounded
+        # casts. That volume buries any real signal, so gosec's other rules stay
+        # useful only with it off. Overflow on the untrusted parse path is defended
+        # explicitly instead (entry-count-versus-payload checks in the box table
+        # parsers and the reservation ceiling) before any allocation, not by the cast.
+        - G115
     govet:
       enable-all: true
       disable:
@@ -231,6 +240,7 @@ linters:
         - name: indent-error-flow
         - name: modifies-value-receiver
         - name: package-comments
+        - name: package-naming
         - name: range
         - name: range-val-address
         - name: range-val-in-closure

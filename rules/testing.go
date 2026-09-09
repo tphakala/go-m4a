@@ -59,8 +59,9 @@ func BenchmarkLoop(m dsl.Matcher) {
 		Suggest("for $b.Loop() { $body }")
 }
 
-// TestingContext detects context.Background() or context.TODO() in test functions
-// and suggests using t.Context() instead.
+// TestingContext detects context.Background() or context.TODO() in test files
+// (it is gated on the _test.go filename, so it also covers test helpers, not only
+// Test functions) and suggests using t.Context() instead.
 //
 // The old pattern:
 //

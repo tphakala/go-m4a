@@ -12,7 +12,7 @@ task check
 
 That is build, vet (amd64, arm64, and linux/386), `go mod tidy -diff`, the linter (with the config verified first), the ruleguard probe test, and the tests with the race detector. CI runs the same steps with the same pinned linter version, so a green `task check` is a green CI in practice.
 
-Install the pinned tools with `task tools` if you do not have them.
+Install the tools with `task tools` if you do not have them; it installs the pinned golangci-lint (the version in `.golangci-version`) and the latest govulncheck.
 
 ## Guidelines
 

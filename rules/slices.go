@@ -269,7 +269,8 @@ func SliceRepeat(m dsl.Matcher) {
 	m.Match(
 		`for $i := 0; $i < $n; $i++ { $result = append($result, $s...) }`,
 	).
-		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+); false positive if $s depends on the loop variable")
+		Where(!m["s"].Contains(`$i`)).
+		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+)")
 
 	// Pattern: range-over-integer form (with variable)
 	// The range forms require $n to be exactly int. Without the guard,
@@ -282,8 +283,8 @@ func SliceRepeat(m dsl.Matcher) {
 	m.Match(
 		`for $i := range $n { $result = append($result, $s...) }`,
 	).
-		Where(m["n"].Type.Is("int")).
-		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+); false positive if $s depends on the loop variable")
+		Where(m["n"].Type.Is("int") && !m["s"].Contains(`$i`)).
+		Report("use slices.Repeat($s, $n) instead of manual repetition loop (Go 1.23+)")
 
 	// Pattern: range-over-integer form (without variable)
 	m.Match(

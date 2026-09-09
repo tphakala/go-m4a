@@ -144,6 +144,7 @@ func RangeOverInteger(m dsl.Matcher) {
 				!m["body"].Contains(`$n -= $_`) &&
 				!m["body"].Contains(`$n++`) &&
 				!m["body"].Contains(`$n--`) &&
+				!m["body"].Contains(`&$n`) &&
 				!m["body"].Contains(`$i = $_`) &&
 				!m["body"].Contains(`$i += $_`) &&
 				!m["body"].Contains(`$i -= $_`) &&

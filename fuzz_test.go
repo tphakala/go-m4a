@@ -88,7 +88,7 @@ func FuzzReader(f *testing.F) {
 	}
 	for _, name := range seedNames {
 		path := filepath.Join("testdata", "interop", name)
-		if b, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed test fixture path
+		if b, err := os.ReadFile(path); err == nil {
 			f.Add(b)
 		}
 	}
