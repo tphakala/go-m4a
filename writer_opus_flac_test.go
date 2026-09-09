@@ -175,7 +175,7 @@ func TestFFprobeOpus(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffprobe,
 		"-v", "error", "-show_streams", "-print_format", "json", path)

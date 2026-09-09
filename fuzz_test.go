@@ -55,7 +55,7 @@ func fragmentedSeed() (data []byte, ok bool) {
 	if err != nil {
 		return nil, false
 	}
-	out := append([]byte(nil), init...)
+	out := bytes.Clone(init)
 	for _, seg := range [][]byte{{0x21, 0x22, 0x23}, {0x31, 0x32}} {
 		for range 3 {
 			if err := fw.WriteFrameDuration(seg, 1024); err != nil {
@@ -88,7 +88,7 @@ func FuzzReader(f *testing.F) {
 	}
 	for _, name := range seedNames {
 		path := filepath.Join("testdata", "interop", name)
-		if b, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed test fixture path
+		if b, err := os.ReadFile(path); err == nil {
 			f.Add(b)
 		}
 	}

@@ -269,7 +269,7 @@ func AppendDinf(dst []byte) []byte {
 // SLConfigDescriptor (predefined 0x02). asc is the AudioSpecificConfig.
 func AppendEsds(dst, asc []byte) []byte {
 	// DecoderSpecificInfo (0x05): payload is the ASC bytes.
-	dsi := appendDescriptor(nil, tagDecoderSpecificInfo, asc)
+	dsi := appendDescriptor(tagDecoderSpecificInfo, asc)
 
 	// DecoderConfigDescriptor (0x04): fixed fields then the DecoderSpecificInfo.
 	var dcd []byte
@@ -278,10 +278,10 @@ func AppendEsds(dst, asc []byte) []byte {
 	dcd = appendU32(dcd, 0) // maxBitrate
 	dcd = appendU32(dcd, 0) // avgBitrate
 	dcd = append(dcd, dsi...)
-	dcdDesc := appendDescriptor(nil, tagDecoderConfig, dcd)
+	dcdDesc := appendDescriptor(tagDecoderConfig, dcd)
 
 	// SLConfigDescriptor (0x06): MP4 predefined, mandatory in MP4.
-	sl := appendDescriptor(nil, tagSLConfig, []byte{slPredefinedMP4})
+	sl := appendDescriptor(tagSLConfig, []byte{slPredefinedMP4})
 
 	// ES_Descriptor (0x03): ES_ID, flags, then the two child descriptors.
 	var es []byte
@@ -289,17 +289,17 @@ func AppendEsds(dst, asc []byte) []byte {
 	es = append(es, 0)    // flags (no dependence, URL, or OCR stream)
 	es = append(es, dcdDesc...)
 	es = append(es, sl...)
-	esDesc := appendDescriptor(nil, tagESDescriptor, es)
+	esDesc := appendDescriptor(tagESDescriptor, es)
 
 	size := uint32(12 + len(esDesc)) // FullBox header + ES_Descriptor
 	dst = AppendFullBoxHeader(dst, size, fourCCEsds, 0, 0)
 	return append(dst, esDesc...)
 }
 
-// appendDescriptor appends one ISO/IEC 14496-1 descriptor: tag, expandable
-// size, then payload.
-func appendDescriptor(dst []byte, tag byte, payload []byte) []byte {
-	dst = append(dst, tag)
+// appendDescriptor builds one ISO/IEC 14496-1 descriptor: tag, expandable size,
+// then payload.
+func appendDescriptor(tag byte, payload []byte) []byte {
+	dst := []byte{tag}
 	dst = AppendDescriptorSize(dst, uint32(len(payload)))
 	return append(dst, payload...)
 }

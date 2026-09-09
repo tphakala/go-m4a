@@ -32,7 +32,7 @@ import (
 func FuzzDecodeInterleaved(f *testing.F) {
 	for _, name := range []string{"flac_mono44k.mp4", "flac_stereo48k.mp4"} {
 		path := filepath.Join("..", "testdata", "interop", name)
-		if b, err := os.ReadFile(path); err == nil { //nolint:gosec // fixed test fixture path
+		if b, err := os.ReadFile(path); err == nil {
 			f.Add(b)
 		}
 	}

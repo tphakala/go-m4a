@@ -35,7 +35,7 @@ func buildFragmentedStream(tb testing.TB, cfg WriterConfig, segments [][]fragAU)
 	if err != nil {
 		tb.Fatalf("NewFragmentWriter: %v", err)
 	}
-	out := append([]byte(nil), init...)
+	out := bytes.Clone(init)
 	for i, seg := range segments {
 		for _, s := range seg {
 			if err := fw.WriteFrameDuration(s.au, s.dur); err != nil {
@@ -81,10 +81,10 @@ func assertFramesEqual(t *testing.T, got, want [][]byte) {
 	}
 }
 
-func uniformSegment(frames [][]byte, dur uint32) []fragAU {
+func uniformSegment(frames [][]byte) []fragAU {
 	seg := make([]fragAU, len(frames))
 	for i, f := range frames {
-		seg[i] = fragAU{au: f, dur: dur}
+		seg[i] = fragAU{au: f, dur: samplesPerFrame}
 	}
 	return seg
 }
@@ -95,7 +95,7 @@ func uniformSegment(frames [][]byte, dur uint32) []fragAU {
 func TestFragmentRoundTripAAC(t *testing.T) {
 	t.Parallel()
 	frames := synthFrames(10)
-	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames, 1024)})
+	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 
 	rd, err := NewReader(bytes.NewReader(data))
 	if err != nil {
@@ -182,9 +182,9 @@ func TestFragmentMultiSegment(t *testing.T) {
 	t.Parallel()
 	all := synthFrames(15)
 	segments := [][]fragAU{
-		uniformSegment(all[0:4], 1024),
-		uniformSegment(all[4:10], 1024),
-		uniformSegment(all[10:15], 1024),
+		uniformSegment(all[0:4]),
+		uniformSegment(all[4:10]),
+		uniformSegment(all[10:15]),
 	}
 	data := buildFragmentedStream(t, aacFragmentConfig(), segments)
 
@@ -210,10 +210,10 @@ func TestFragmentBufferReuseVaryingSegments(t *testing.T) {
 	t.Parallel()
 	all := synthFrames(24)
 	segments := [][]fragAU{
-		uniformSegment(all[0:2], 1024),   // tiny: initial allocation sizes the buffer small
-		uniformSegment(all[2:14], 1024),  // large: forces the buffer to regrow (a second make)
-		uniformSegment(all[14:23], 1024), // medium: reuses the larger buffer, resliced down
-		uniformSegment(all[23:24], 1024), // tiny again: resliced down further
+		uniformSegment(all[0:2]),   // tiny: initial allocation sizes the buffer small
+		uniformSegment(all[2:14]),  // large: forces the buffer to regrow (a second make)
+		uniformSegment(all[14:23]), // medium: reuses the larger buffer, resliced down
+		uniformSegment(all[23:24]), // tiny again: resliced down further
 	}
 	data := buildFragmentedStream(t, aacFragmentConfig(), segments)
 
@@ -233,7 +233,7 @@ func TestFragmentBufferReuseVaryingSegments(t *testing.T) {
 func TestFragmentDuration(t *testing.T) {
 	t.Parallel()
 	frames := synthFrames(48) // 48 * 1024 / 48000 = 1.024 s
-	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames, 1024)})
+	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 	rd, err := NewReader(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -250,7 +250,7 @@ func TestFragmentDuration(t *testing.T) {
 func TestFragmentRawStream(t *testing.T) {
 	t.Parallel()
 	frames := synthFrames(5)
-	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames, 1024)})
+	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 	rd, err := NewReader(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
@@ -554,7 +554,7 @@ func TestFragmentNoMatchingTrack(t *testing.T) {
 func TestFragmentTruncated(t *testing.T) {
 	t.Parallel()
 	frames := synthFrames(8)
-	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames, 1024)})
+	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 	for _, cut := range []int{1, 5, 20, len(data) / 2, len(data) - 3} {
 		if cut <= 0 || cut >= len(data) {
 			continue

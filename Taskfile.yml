@@ -1,0 +1,124 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  # Single source of truth for the linter version, shared with CI.
+  GOLANGCI_LINT_VERSION:
+    sh: tr -d '[:space:]' < .golangci-version
+  BENCH_TIME: 2s
+  FUZZ_TIME: 20s
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all packages
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test -shuffle=on ./...
+
+  test:race:
+    desc: Run tests with the race detector
+    cmds:
+      - go test -race -shuffle=on ./...
+
+  test:cover:
+    desc: Run tests with cross-package coverage and print the total
+    cmds:
+      # -coverpkg=./... credits coverage of the subpackages exercised through the
+      # container's public API, matching the CI coverage run.
+      - go test -race -shuffle=on -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out | tail -1
+
+  bench:
+    desc: Run all benchmarks with allocation counts
+    cmds:
+      - go test -run='^$' -bench=. -benchmem -benchtime={{.BENCH_TIME}} ./...
+
+  fuzz:
+    desc: Run the primary fuzz targets for a short bounded time each
+    cmds:
+      # The reader and fragment writer parse and emit untrusted container bytes;
+      # the reservation targets are pure arithmetic that sizes a make. This is a
+      # smoke run, not a substitute for a long local fuzz session.
+      - go test -run='^$' -fuzz=FuzzReader -fuzztime={{.FUZZ_TIME}} .
+      - go test -run='^$' -fuzz=FuzzFragmentWriter -fuzztime={{.FUZZ_TIME}} .
+      - go test -run='^$' -fuzz=FuzzShouldTrim -fuzztime={{.FUZZ_TIME}} ./internal/reservation
+
+  vet:
+    desc: Run go vet for amd64, arm64 and 386, and compile the ruleguard matchers
+    cmds:
+      - GOARCH=amd64 go vet ./...
+      - GOARCH=arm64 go vet ./...
+      # 386 is a supported target (BirdNET-Go ships on 32-bit ARM/386); darwin has
+      # no 386 pair, so vet it under linux.
+      - GOOS=linux GOARCH=386 go vet ./...
+      - go vet -tags ruleguard ./rules/
+
+  lint:
+    desc: Validate the linter config and run golangci-lint
+    cmds:
+      - golangci-lint config verify
+      - golangci-lint run
+
+  lint:fix:
+    desc: Run golangci-lint and apply the fixes it can make
+    cmds:
+      - golangci-lint run --fix
+
+  fmt:
+    desc: Format the tree with the configured formatters (gofumpt, goimports)
+    cmds:
+      - golangci-lint fmt
+
+  rules:
+    desc: Compile the ruleguard matchers and check every one fires on its probe
+    env:
+      GOLANGCI_LINT_REQUIRED: '1'
+    cmds:
+      - go vet -tags ruleguard ./rules/
+      - go test -count=1 ./rules/rulestest/
+      # The analysis cache is not keyed on the rule files, so a lint run after
+      # a matcher edit can report stale findings; clear it so the next
+      # `task lint` sees the edited matchers.
+      - golangci-lint cache clean
+
+  tidy:
+    desc: Tidy and verify go.mod
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  tidy:check:
+    desc: Fail if go.mod or go.sum need tidying
+    cmds:
+      - go mod tidy -diff
+      - go mod verify
+
+  vuln:
+    desc: Scan for known vulnerabilities in the dependency graph
+    cmds:
+      - govulncheck ./...
+
+  tools:
+    desc: Install the pinned golangci-lint and govulncheck into GOPATH/bin
+    cmds:
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+
+  check:
+    desc: Full local gate (build, vet, tidy check, lint, rules, race tests)
+    cmds:
+      - task: build
+      - task: vet
+      - task: tidy:check
+      - task: lint
+      - task: rules
+      - task: test:race

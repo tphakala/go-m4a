@@ -66,11 +66,11 @@ func buildStcoBody(n int) []byte {
 func buildStscBody(n int) []byte {
 	body := make([]byte, 8+12*n)
 	binary.BigEndian.PutUint32(body[4:], uint32(n)) // entry_count
-	for i := 0; i < n; i++ {
+	for i := range n {
 		o := 8 + 12*i
 		binary.BigEndian.PutUint32(body[o:], uint32(i+1)) // first_chunk, increasing
 		binary.BigEndian.PutUint32(body[o+4:], 1)         // samples_per_chunk
-		binary.BigEndian.PutUint32(body[o+8:], 1)         // sample_description_index
+		binary.BigEndian.PutUint32(body[o+8:], 1)
 	}
 	return body
 }

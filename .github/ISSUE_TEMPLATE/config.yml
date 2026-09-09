@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussions
+    url: https://github.com/tphakala/go-m4a/discussions
+    about: Use GitHub Discussions for questions, support, and general conversation.
+  - name: Security vulnerabilities
+    url: https://github.com/tphakala/go-m4a/security/advisories/new
+    about: Report a vulnerability privately; do not open a public issue for it.

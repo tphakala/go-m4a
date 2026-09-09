@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -81,10 +82,7 @@ func mustBox(t *testing.T, tree map[string][]byte, path string) []byte {
 	t.Helper()
 	body, ok := tree[path]
 	if !ok {
-		paths := make([]string, 0, len(tree))
-		for p := range tree {
-			paths = append(paths, p)
-		}
+		paths := slices.Collect(maps.Keys(tree))
 		t.Fatalf("box %q missing; present: %s", path, strings.Join(paths, " "))
 	}
 	return body

@@ -243,7 +243,7 @@ func FuzzParseTrun(f *testing.F) {
 // crasher lands in testdata/fuzz with the bytes that produced it.
 func noPanic(t *testing.T, payload []byte) {
 	t.Helper()
-	if p := recover(); p != nil {
+	if p := recover(); p != nil { //nolint:revive // recover is valid here: noPanic is only ever called via defer, so it is itself the deferred function
 		t.Fatalf("panic on %d-byte input % x: %v", len(payload), payload, p)
 	}
 }

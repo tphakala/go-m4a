@@ -161,15 +161,15 @@ func TestParseHeaderLargesizeTooLarge(t *testing.T) {
 func TestParseEsdsURLFlag(t *testing.T) {
 	asc := []byte{0x11, 0x88}
 
-	dsi := appendDescriptor(nil, tagDecoderSpecificInfo, asc)
+	dsi := appendDescriptor(tagDecoderSpecificInfo, asc)
 	var dcd []byte
 	dcd = append(dcd, objectTypeAAC, streamTypeAudio)
 	dcd = appendU24(dcd, 0) // bufferSizeDB
 	dcd = appendU32(dcd, 0) // maxBitrate
 	dcd = appendU32(dcd, 0) // avgBitrate
 	dcd = append(dcd, dsi...)
-	dcdDesc := appendDescriptor(nil, tagDecoderConfig, dcd)
-	sl := appendDescriptor(nil, tagSLConfig, []byte{slPredefinedMP4})
+	dcdDesc := appendDescriptor(tagDecoderConfig, dcd)
+	sl := appendDescriptor(tagSLConfig, []byte{slPredefinedMP4})
 
 	const url = "u" // a one-character URLstring
 	var es []byte
@@ -178,7 +178,7 @@ func TestParseEsdsURLFlag(t *testing.T) {
 	es = append(es, url...)               // URLstring
 	es = append(es, dcdDesc...)
 	es = append(es, sl...)
-	esDesc := appendDescriptor(nil, tagESDescriptor, es)
+	esDesc := appendDescriptor(tagESDescriptor, es)
 
 	body := make([]byte, 4, 4+len(esDesc)) // esds FullBox version/flags
 	body = append(body, esDesc...)

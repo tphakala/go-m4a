@@ -3,6 +3,7 @@
 package m4a
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -179,7 +180,7 @@ func WithMaxBoxBuffer(n int64) ReaderOption {
 // sparse or truncated file that declares a body it does not physically back.
 func NewReader(r io.ReadSeeker, opts ...ReaderOption) (*Reader, error) {
 	if r == nil {
-		return nil, fmt.Errorf("go-m4a: nil reader")
+		return nil, errors.New("go-m4a: nil reader")
 	}
 	cfg := readerConfig{maxBoxBuffer: DefaultMaxBoxBuffer}
 	for _, opt := range opts {
@@ -417,10 +418,7 @@ func (rd *Reader) parseMoov(moov []byte) error {
 		return errNoSupportedSoun(sawSoun)
 	}
 
-	if err := rd.applyTrack(chosen, movieTS, movieDur); err != nil {
-		return err
-	}
-	return nil
+	return rd.applyTrack(chosen, movieTS, movieDur)
 }
 
 // parseTrak walks one trak box, collecting its handler type, edit list, media
@@ -563,56 +561,74 @@ func parseStsd(stsd []byte, tr *track) error {
 
 	switch h.Type {
 	case fourccMp4a:
-		// afconvert follows esds with a sibling box, so find it by type rather than
-		// assuming position.
-		esds, found, ferr := box.FindChild(children, fourccEsds)
-		if ferr != nil {
-			return ferr
-		}
-		if !found {
-			return nil
-		}
-		asc, objType, perr := box.ParseEsds(esds)
-		if perr != nil {
-			return perr
-		}
-		tr.asc = asc
-		tr.codecConfig = asc
-		tr.objectType = objType
-		return nil
+		return parseMp4aConfig(children, tr)
 	case fourccOpus:
-		dops, found, ferr := box.FindChild(children, fourccDops)
-		if ferr != nil {
-			return ferr
-		}
-		if !found {
-			return nil
-		}
-		chs, preSkip, _, perr := box.ParseDops(dops)
-		if perr != nil {
-			return perr
-		}
-		tr.opusPreSkip = preSkip
-		tr.codecConfig = dops // the dOps body
-		if chs != 0 {
-			tr.seChannels = uint16(chs) // dOps OutputChannelCount is authoritative
-		}
-		return nil
+		return parseOpusConfig(children, tr)
 	case fourccFlac:
-		dfla, found, ferr := box.FindChild(children, fourccDfla)
-		if ferr != nil {
-			return ferr
-		}
-		if !found {
-			return nil
-		}
-		si, perr := box.ParseDfla(dfla)
-		if perr != nil {
-			return perr
-		}
-		tr.codecConfig = si // the STREAMINFO metadata block
+		return parseFlacConfig(children, tr)
+	}
+	return nil
+}
+
+// parseMp4aConfig reads the AAC AudioSpecificConfig from the mp4a sample entry's
+// esds child, when present, into tr.
+func parseMp4aConfig(children []byte, tr *track) error {
+	// afconvert follows esds with a sibling box, so find it by type rather than
+	// assuming position.
+	esds, found, err := box.FindChild(children, fourccEsds)
+	if err != nil {
+		return err
+	}
+	if !found {
 		return nil
 	}
+	asc, objType, err := box.ParseEsds(esds)
+	if err != nil {
+		return err
+	}
+	tr.asc = asc
+	tr.codecConfig = asc
+	tr.objectType = objType
+	return nil
+}
+
+// parseOpusConfig reads the dOps body from the Opus sample entry's child, when
+// present, into tr.
+func parseOpusConfig(children []byte, tr *track) error {
+	dops, found, err := box.FindChild(children, fourccDops)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	chs, preSkip, _, err := box.ParseDops(dops)
+	if err != nil {
+		return err
+	}
+	tr.opusPreSkip = preSkip
+	tr.codecConfig = dops // the dOps body
+	if chs != 0 {
+		tr.seChannels = uint16(chs) // dOps OutputChannelCount is authoritative
+	}
+	return nil
+}
+
+// parseFlacConfig reads the STREAMINFO metadata block from the fLaC sample
+// entry's dfLa child, when present, into tr.
+func parseFlacConfig(children []byte, tr *track) error {
+	dfla, found, err := box.FindChild(children, fourccDfla)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	si, err := box.ParseDfla(dfla)
+	if err != nil {
+		return err
+	}
+	tr.codecConfig = si // the STREAMINFO metadata block
 	return nil
 }
 
@@ -698,9 +714,9 @@ func (rd *Reader) fillFormatInfo(tr *track, movieTS uint32, movieDur uint64) {
 	// Copy the codec config (and the ASC for AAC) so the Reader is independent of
 	// the moov buffer. tr.asc is nil for Opus and FLAC, so ASC stays nil there.
 	if tr.asc != nil {
-		rd.info.ASC = append([]byte(nil), tr.asc...)
+		rd.info.ASC = bytes.Clone(tr.asc)
 	}
-	rd.info.CodecConfig = append([]byte(nil), tr.codecConfig...)
+	rd.info.CodecConfig = bytes.Clone(tr.codecConfig)
 	rd.info.SampleRate, rd.info.Channels = resolveFormat(tr)
 
 	if tr.hasElst && tr.elstMedia >= 0 {
@@ -759,7 +775,7 @@ func (rd *Reader) buildGeometry(tr *track) error {
 
 // chunkOffsetTable returns the chunk offsets from stco or co64 as int64 file
 // offsets, rejecting an offset that does not fit a signed 64-bit file position.
-func (rd *Reader) chunkOffsetTable(tr *track) ([]int64, error) {
+func (*Reader) chunkOffsetTable(tr *track) ([]int64, error) {
 	var raw []uint64
 	var err error
 	if tr.seen.co64 {
@@ -974,15 +990,15 @@ func (rd *Reader) resetCursor() {
 // ASC so the caller cannot mutate the Reader's state.
 func (rd *Reader) Info() Info {
 	out := rd.info
-	out.ASC = append([]byte(nil), rd.info.ASC...)
-	out.CodecConfig = append([]byte(nil), rd.info.CodecConfig...)
+	out.ASC = bytes.Clone(rd.info.ASC)
+	out.CodecConfig = bytes.Clone(rd.info.CodecConfig)
 	return out
 }
 
 // ASC returns a fresh copy of the AudioSpecificConfig, suitable for passing to
 // go-aac's pcm.WithRawStream.
 func (rd *Reader) ASC() []byte {
-	return append([]byte(nil), rd.info.ASC...)
+	return bytes.Clone(rd.info.ASC)
 }
 
 // ReadFrame returns the next access unit in decode order and advances the

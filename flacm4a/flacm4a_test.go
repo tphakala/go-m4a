@@ -54,8 +54,8 @@ func (m *memWS) Seek(offset int64, whence int) (int64, error) {
 // distinct frequency.
 func genS16(samplesPerCh, channels int) []byte {
 	out := make([]byte, 0, samplesPerCh*channels*2)
-	for i := 0; i < samplesPerCh; i++ {
-		for c := 0; c < channels; c++ {
+	for i := range samplesPerCh {
+		for c := range channels {
 			v := int16(math.Round(20000 * math.Sin(float64(i)*(0.02+0.005*float64(c)))))
 			out = binary.LittleEndian.AppendUint16(out, uint16(v))
 		}

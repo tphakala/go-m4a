@@ -5,15 +5,23 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-
-env:
-  GO_VERSION: '1.26'
-  # Pinned to match the local toolchain so the linter version is identical
-  # across developer machines and CI.
-  GOLANGCI_LINT_VERSION: 'v2.12.2'
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# bash on every runner, Windows included (Git bash is preinstalled): the default
+# PowerShell splits flags like `-coverprofile=coverage.out` at the dot, and the
+# fuzz shell loops below assume POSIX sh.
+defaults:
+  run:
+    shell: bash
+
+# A new push to a pull request cancels the run for the previous push; runs on
+# main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -26,11 +34,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          check-latest: true
 
       # The interop tests decode this writer's output with a third-party demuxer,
       # which is the only check that a real player agrees with the container we
@@ -45,7 +56,7 @@ jobs:
 
       - name: Run tests
         if: matrix.os != 'ubuntu-latest'
-        run: go test -race ./...
+        run: go test -race -shuffle=on ./...
 
       # Coverage is generated once, on Linux, and uploaded to Codecov.
       # -coverpkg credits cross-package coverage so the subpackages exercised
@@ -53,13 +64,17 @@ jobs:
       # under test.
       - name: Run tests with coverage
         if: matrix.os == 'ubuntu-latest'
-        run: go test -race -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
 
+      # Coverage is informational (fail_ci_if_error: false), never a gate. The
+      # token is optional for a public repository but avoids Codecov's tokenless
+      # rate limit; add CODECOV_TOKEN as a repository secret to use it.
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
       # go-aac v0.5.0 inverted its SIMD build constraint: the kernels used to sit
@@ -91,10 +106,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          check-latest: true
       - name: Run tests (GOARCH=386)
         env:
           GOARCH: '386'
@@ -106,14 +124,36 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Run golangci-lint
+          go-version-file: go.mod
+          check-latest: true
+      # .golangci-version is the single pin for the linter version; the local
+      # `task tools` reads the same file, so local and CI runs use the same
+      # binary.
+      - name: Read the pinned golangci-lint version
+        id: pin
+        run: echo "version=$(tr -d '[:space:]' < .golangci-version)" >> "$GITHUB_OUTPUT"
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          version: ${{ steps.pin.outputs.version }}
+          install-only: true
+      - name: Verify the linter configuration
+        run: golangci-lint config verify
+      - name: Lint
+        run: golangci-lint run
+      - name: Compile the ruleguard matchers
+        run: go vet -tags ruleguard ./rules/
+      # The probe test skips when golangci-lint is missing or not the pinned
+      # version; GOLANGCI_LINT_REQUIRED turns that skip into a failure here.
+      - name: Check every ruleguard matcher fires on its probe
+        env:
+          GOLANGCI_LINT_REQUIRED: '1'
+        run: go test -count=1 ./rules/rulestest/
 
   vet:
     name: Vet
@@ -125,10 +165,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          check-latest: true
       - name: Run go vet
         env:
           GOARCH: ${{ matrix.goarch }}
@@ -144,10 +187,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          check-latest: true
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -165,7 +211,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          check-latest: true
       # A short bounded run of the demuxer fuzz target on every build. The
       # reader parses untrusted bytes, so this guards against panics and
       # unbounded allocation on malformed input; a crash is committed under
@@ -183,9 +230,7 @@ jobs:
       # someone thought of, and they need no fixtures and no codec, so they run
       # at millions of executions per second.
       - name: Fuzz flacm4a reservation
-        run: |
-          go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./flacm4a
-          go test -run='^$' -fuzz=FuzzFrameReservation -fuzztime=20s ./flacm4a
+        run: go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./flacm4a
       - name: Fuzz opusm4a reservation
         run: go test -run='^$' -fuzz=FuzzPCMReservation -fuzztime=20s ./opusm4a
       # ShouldTrim moved to internal/reservation in the moov de-dup refactor; fuzz it

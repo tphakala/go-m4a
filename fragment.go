@@ -3,6 +3,7 @@
 package m4a
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -262,10 +263,10 @@ func (f *FragmentWriter) WriteFrame(au []byte) error {
 // immediately. It rejects an empty access unit and a zero duration.
 func (f *FragmentWriter) WriteFrameDuration(au []byte, sampleDuration uint32) error {
 	if len(au) == 0 {
-		return fmt.Errorf("go-m4a: WriteFrameDuration: empty access unit")
+		return errors.New("go-m4a: WriteFrameDuration: empty access unit")
 	}
 	if sampleDuration == 0 {
-		return fmt.Errorf("go-m4a: WriteFrameDuration: sample duration must be positive")
+		return errors.New("go-m4a: WriteFrameDuration: sample duration must be positive")
 	}
 	if len(f.sizes) >= maxSamplesPerSegment {
 		return fmt.Errorf("go-m4a: WriteFrameDuration: segment would exceed the limit of %d samples; call AppendSegment more often", maxSamplesPerSegment)
@@ -317,7 +318,7 @@ func (f *FragmentWriter) BaseMediaDecodeTime() uint64 { return f.baseDecodeTime 
 func (f *FragmentWriter) AppendSegment(dst []byte) ([]byte, error) {
 	origLen := len(dst)
 	if len(f.sizes) == 0 {
-		return dst[:origLen], fmt.Errorf("go-m4a: AppendSegment: no access units buffered")
+		return dst[:origLen], errors.New("go-m4a: AppendSegment: no access units buffered")
 	}
 	// The mdat box length is a 32-bit field. maxSegmentBytes already keeps the
 	// payload a factor of 64 below that, so this cannot fire today; it

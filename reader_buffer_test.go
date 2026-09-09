@@ -88,7 +88,7 @@ func TestMaxBoxBufferFragmentedPath(t *testing.T) {
 	// Many frames in one segment inflate the trun so the moof body exceeds the init
 	// moov body, letting a limit sit between them.
 	frames := synthFrames(300)
-	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames, 1024)})
+	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 
 	moovBody := topLevelBoxBodyLen(t, data, "moov")
 	moofBody := topLevelBoxBodyLen(t, data, "moof")

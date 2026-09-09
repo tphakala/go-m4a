@@ -30,6 +30,20 @@
 // worst case, the trim reclaims the common one.
 package reservation
 
+import "sync/atomic"
+
+// NewLimit returns an *atomic.Int64 seeded with v. The codec bridges use it for
+// their default decode ceiling: a value rather than the constant directly so a
+// test can lower it, atomic so lowering it under a parallel test stays race-free,
+// and built here rather than in each bridge so the two copies cannot drift (the
+// reason this package exists). It is an ordinary constructor, not an init, so a
+// bridge stays free of init functions.
+func NewLimit(v int64) *atomic.Int64 {
+	a := new(atomic.Int64)
+	a.Store(v)
+	return a
+}
+
 // MaxPCMReservation is the ceiling on what an accumulating decode reserves up
 // front. It bounds the RESERVATION only; what bounds the decode itself is the
 // caller's limit (see m4a.DefaultMaxDecodedBytes), which each bridge's

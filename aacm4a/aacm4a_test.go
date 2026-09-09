@@ -17,6 +17,7 @@ import (
 	"time"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -68,9 +69,9 @@ func chirpS16(samplesPerChannel, channels, sampleRate int) []byte {
 	const amp = 0.5 * math.MaxInt16
 	dur := float64(samplesPerChannel) / float64(sampleRate)
 	pcm := make([]byte, samplesPerChannel*channels*2)
-	for n := 0; n < samplesPerChannel; n++ {
+	for n := range samplesPerChannel {
 		t := float64(n) / float64(sampleRate)
-		for c := 0; c < channels; c++ {
+		for c := range channels {
 			// Channel 0: 300 Hz -> sampleRate/4. Channel 1: 500 Hz -> sampleRate/6.
 			f0 := 300.0 + float64(c)*200.0
 			f1 := float64(sampleRate) / (4.0 + float64(c)*2.0)
@@ -90,7 +91,7 @@ func chirpS16(samplesPerChannel, channels, sampleRate int) []byte {
 func deinterleaveCh0(pcm []byte, channels, samplesPerChannel int) []float64 {
 	out := make([]float64, 0, samplesPerChannel)
 	stride := channels * 2
-	for n := 0; n < samplesPerChannel; n++ {
+	for n := range samplesPerChannel {
 		off := n * stride
 		if off+2 > len(pcm) {
 			break
@@ -251,7 +252,11 @@ func TestInteropDecode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("open %s: %v", path, err)
 			}
-			defer func() { _ = f.Close() }()
+			defer func() {
+				if cerr := f.Close(); cerr != nil {
+					t.Errorf("close fixture: %v", cerr)
+				}
+			}()
 
 			d, info, err := NewDecoder(f)
 			if err != nil {
@@ -297,14 +302,14 @@ func TestFFprobeValidates(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	if err := EncodeInterleaved(f, cfg, src); err != nil {
-		_ = f.Close()
+		_ = f.Close() // best-effort on the failure path; the checked close is below
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	// CombinedOutput captures stderr alongside stdout so a nonzero exit is
 	// diagnosable; "-v error" keeps stderr empty on success, leaving pure JSON.

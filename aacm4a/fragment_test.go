@@ -16,6 +16,7 @@ import (
 	"time"
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -65,7 +66,7 @@ func encodeAUs(t *testing.T, cfg aacpcm.Config, pcm []byte) ([][]byte, m4a.Write
 // decodePCM runs ffmpeg over path and returns the decoded interleaved S16 PCM.
 func decodePCM(t *testing.T, path string, channels int) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	out := filepath.Join(t.TempDir(), "out.raw")
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error",
@@ -143,7 +144,7 @@ func TestFragmentedMatchesNonFragmented(t *testing.T) {
 		t.Fatalf("NewFragmentWriter: %v", err)
 	}
 	const segmentTarget = 2 * sampleRate // two seconds in the media timescale
-	stream := append([]byte(nil), init...)
+	stream := bytes.Clone(init)
 	var segmentDurations []uint64
 	flush := func() {
 		if fw.PendingSamples() == 0 {
@@ -218,7 +219,7 @@ func TestFragmentedFFprobe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFragmentWriter: %v", err)
 	}
-	stream := append([]byte(nil), init...)
+	stream := bytes.Clone(init)
 	for i, au := range aus {
 		if err := fw.WriteFrame(au); err != nil {
 			t.Fatalf("WriteFrame: %v", err)
@@ -241,7 +242,7 @@ func TestFragmentedFFprobe(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffprobe, "-v", "error",
 		"-show_format", "-show_streams", "-count_packets",
@@ -319,7 +320,7 @@ func TestFragmentedEditListTrimsPriming(t *testing.T) {
 				t.Fatalf("WriteFrame: %v", err)
 			}
 		}
-		stream, err := fw.AppendSegment(append([]byte(nil), init...))
+		stream, err := fw.AppendSegment(bytes.Clone(init))
 		if err != nil {
 			t.Fatalf("AppendSegment: %v", err)
 		}

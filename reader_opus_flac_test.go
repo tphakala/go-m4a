@@ -30,7 +30,7 @@ func TestInteropOpusFLAC(t *testing.T) {
 	for _, tc := range opusFlacFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join("testdata", "interop", tc.name)
-			f, err := os.Open(path) //nolint:gosec // fixed test fixture path
+			f, err := os.Open(path)
 			if err != nil {
 				t.Skipf("fixture missing: %v", err)
 			}
@@ -87,7 +87,7 @@ func TestInteropOpusFLAC(t *testing.T) {
 // OpusSpecificBox fields.
 func TestOpusCodecConfigIsDops(t *testing.T) {
 	path := filepath.Join("testdata", "interop", "opus_mono48k.mp4")
-	f, err := os.Open(path) //nolint:gosec // fixed test fixture path
+	f, err := os.Open(path)
 	if err != nil {
 		t.Skipf("fixture missing: %v", err)
 	}
