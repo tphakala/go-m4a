@@ -8,7 +8,7 @@ require (
 	// compiles them; `go mod tidy` still keeps the requirement because tidy
 	// considers every build tag.
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
-	github.com/tphakala/go-aac v0.6.0
+	github.com/tphakala/go-aac v0.7.0
 	github.com/tphakala/go-flac v1.1.0
 	github.com/tphakala/go-opus v1.1.0
 )
