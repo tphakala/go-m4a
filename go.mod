@@ -14,6 +14,6 @@ require (
 )
 
 require (
-	github.com/tphakala/simd v1.9.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	github.com/tphakala/simd v1.11.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
