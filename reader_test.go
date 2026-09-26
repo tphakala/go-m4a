@@ -219,7 +219,9 @@ func TestNewReaderNil(t *testing.T) {
 // ffprobe-verified expected values. They exercise moov-before and moov-after
 // mdat, multi-chunk stsc (afconvert), and elst-present versus none. ffmpeg's
 // movie timescale (1000) differs from the media timescale, so duration pins the
-// Reader's conversion of the edit segment; afconvert's files take it from mvhd.
+// timescale the Reader converts the edit segment with. afconvert's files use one
+// timescale and matching mvhd and mdhd durations, so they cannot tell which of
+// those the Reader used.
 var interopFiles = []struct {
 	name         string
 	sampleRate   int

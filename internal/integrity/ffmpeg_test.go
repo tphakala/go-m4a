@@ -94,8 +94,9 @@ func TestFFmpegDecodesOurFiles(t *testing.T) {
 // 1000 movie timescale up to ffmpeg 8.0, free and udta boxes, an edit list on
 // FLAC). The inner stream is untouched, so once each decode is trimmed by its
 // own media_time and cut to the source length the two must be identical: any
-// difference is a disagreement about where the audio starts. ffmpeg copies our media_time, so this does not
-// check the writer's priming value; TestContainerIntegrity does.
+// difference is a disagreement about where the audio starts. ffmpeg copies our
+// media_time, so this does not check the writer's priming value;
+// TestContainerIntegrity does.
 func TestFFmpegRemuxReadsBack(t *testing.T) {
 	ffmpeg := lookFFmpeg(t)
 	for _, c := range corpus {
@@ -119,13 +120,14 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			if info.FrameCount != ours.rec.FrameCount {
 				t.Errorf("ffmpeg's remux has %d frames, ours %d", info.FrameCount, ours.rec.FrameCount)
 			}
-			// ffmpeg up to 8.0 (4.4, 5.1, 7.1 and 8.0 checked) writes a 1000 movie
+			// ffmpeg up to 8.0 (4.4, 5.1, 6.1, 7.1 and 8.0 checked) writes a 1000 movie
 			// timescale, unlike ours, so here a Reader that converts the edit
 			// segment with the wrong timescale shows up; 9.0 writes equal
 			// timescales, and the root package's interop tests pin the same
 			// conversion on committed fixtures without ffmpeg. The expectation
-			// mirrors the Reader's float64 arithmetic, so the two agree to the
-			// nanosecond.
+			// mirrors the Reader's float64 arithmetic, so the two agree exactly on
+			// one platform; the 1us slack only absorbs float differences between
+			// platforms and is far below one tick of any timescale in use.
 			if f.hasEdit && f.movieTimescale > 0 {
 				want := time.Duration(float64(f.editSegment) / float64(f.movieTimescale) * float64(time.Second))
 				if d := info.Duration - want; d < -time.Microsecond || d > time.Microsecond {

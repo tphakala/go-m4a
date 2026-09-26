@@ -428,8 +428,9 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	// frames actually hold, so the two must agree: an mdhd that overstates or
 	// understates the media, or a demux that reads too few or too many frames,
 	// breaks this even when the edit list still fits inside the decode. The stts
-	// runs must sum to the same duration, which is what catches a sample table
-	// that mistimes FLAC's short last block while mdhd stays right. (NewReader
+	// runs must sum to the same duration, which catches a sample table whose
+	// durations do not add up to mdhd (for example FLAC's short last block timed
+	// as a full one); it cannot see runs reordered with the same sum. (NewReader
 	// already rejects an stts sample count that disagrees with stsz.)
 	// Info.FrameCount is reported rather than used to bound the decode, so it is
 	// checked against the stsz sample count directly.
