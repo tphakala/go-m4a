@@ -217,6 +217,7 @@ type facts struct {
 	hasEdit        bool
 	editMediaTime  int64
 	editSegment    uint64 // segment_duration, in the movie timescale
+	sampleCount    uint32 // stsz sample_count: the number of access units
 }
 
 var (
@@ -226,9 +227,13 @@ var (
 	fourccElst = box.NewFourCC("elst")
 	fourccMdia = box.NewFourCC("mdia")
 	fourccMdhd = box.NewFourCC("mdhd")
+	fourccMinf = box.NewFourCC("minf")
+	fourccStbl = box.NewFourCC("stbl")
+	fourccStsz = box.NewFourCC("stsz")
 )
 
-// inspect walks the top-level boxes and the single track's timing boxes.
+// inspect walks the top-level boxes and reads the single track's timing boxes
+// and its stsz sample count.
 func inspect(t *testing.T, data []byte) facts {
 	t.Helper()
 	var f facts
@@ -279,10 +284,14 @@ func inspect(t *testing.T, data []byte) facts {
 		}
 		f.hasEdit, f.editSegment, f.editMediaTime = has, seg, mt
 	}
-	mdhd := child(t, child(t, trak, fourccMdia), fourccMdhd)
-	f.mediaTimescale, f.mediaDuration, err = box.ParseMdhd(mdhd)
+	mdia := child(t, trak, fourccMdia)
+	f.mediaTimescale, f.mediaDuration, err = box.ParseMdhd(child(t, mdia, fourccMdhd))
 	if err != nil {
 		t.Fatalf("mdhd: %v", err)
+	}
+	stsz := child(t, child(t, child(t, mdia, fourccMinf), fourccStbl), fourccStsz)
+	if _, f.sampleCount, _, err = box.ParseStsz(stsz); err != nil {
+		t.Fatalf("stsz: %v", err)
 	}
 	return f
 }
@@ -382,6 +391,18 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	}
 
 	checkStructure(t, c, f, info)
+	// mdhd's duration is the sum of the sample-table durations, and each decoder
+	// emits exactly its packet's duration, so the two must agree: an mdhd that
+	// disagrees with the sample table, or a demux that reads too few or too many
+	// frames, breaks this even when the edit list still fits inside the decode.
+	// Info.FrameCount is reported rather than used to bound the decode, so it is
+	// checked against the stsz sample count directly.
+	if uint64(decoded) != f.mediaDuration {
+		t.Errorf("decoded %d samples per channel, but mdhd declares %d", decoded, f.mediaDuration)
+	}
+	if info.FrameCount != int(f.sampleCount) {
+		t.Errorf("Info.FrameCount %d, but stsz holds %d samples", info.FrameCount, f.sampleCount)
+	}
 	if rt.trimmed == nil {
 		t.Fatalf("edit list [%d, +%d) samples falls outside the %d decoded samples", start, length, decoded)
 	}
