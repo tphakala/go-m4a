@@ -41,8 +41,9 @@ const (
 )
 
 // corpusCase is one deterministic input. Samples is per channel. For the lossy
-// codecs it is chosen not to be a multiple of the codec frame size, so the
-// trailing padding the edit list has to cut is never zero; FLAC has no priming
+// codecs it is chosen so that samples plus the priming is not a multiple of the
+// codec frame size, so the trailing padding the edit list has to cut is never
+// zero (baseline.json shows 709, 306, 641 and 647 samples); FLAC has no priming
 // or padding and writes no edit list.
 type corpusCase struct {
 	name       string
@@ -95,8 +96,8 @@ func isin(phase uint32, amp int64) int64 {
 }
 
 // sourcePCM builds the case's interleaved little-endian PCM: a linear chirp per
-// channel, each channel sweeping its own band so a channel swap or deinterleave
-// bug decorrelates the decode instead of slipping past.
+// channel, each channel following its own frequency trajectory so a channel
+// swap or deinterleave bug decorrelates the decode instead of slipping past.
 func sourcePCM(c corpusCase) []byte {
 	// The generator only writes 16- and 24-bit samples, the lossy checks read
 	// 16-bit channels, and the phase increment below shifts up to max(f0, f1)*n
@@ -418,10 +419,11 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	}
 
 	checkStructure(t, c, f, info)
-	// mdhd's duration is the sum of the sample-table durations, and each decoder
-	// emits exactly its packet's duration, so the two must agree: an mdhd that
-	// disagrees with the sample table, or a demux that reads too few or too many
-	// frames, breaks this even when the edit list still fits inside the decode.
+	// mdhd declares how much media the track holds, and the decode is what the
+	// frames actually hold, so the two must agree: an mdhd that overstates or
+	// understates the media, or a demux that reads too few or too many frames,
+	// breaks this even when the edit list still fits inside the decode. (The
+	// stts durations are not read here; the root package's tests pin them.)
 	// Info.FrameCount is reported rather than used to bound the decode, so it is
 	// checked against the stsz sample count directly.
 	if uint64(decoded) != f.mediaDuration {
@@ -534,8 +536,8 @@ const maxLag = 16
 
 // checkSignal compares a trimmed decode with the source: bit-exact for FLAC, and
 // for the lossy codecs, on every channel, aligned at lag 0 (a mistrimmed edit
-// list shifts the peak) with RMS within a factor of two. Each channel sweeps
-// its own band, so a channel swap or corruption decorrelates that channel.
+// list shifts the peak) with RMS within a factor of two. Each channel follows
+// its own chirp, so a channel swap or corruption decorrelates that channel.
 func checkSignal(t *testing.T, c corpusCase, src, trimmed []byte) {
 	t.Helper()
 	if c.lossless() {

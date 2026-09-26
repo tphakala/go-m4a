@@ -40,7 +40,9 @@ tasks:
   integrity:
     desc: Run the container round-trip integrity gate (ffmpeg cross-checks run when ffmpeg is on PATH)
     cmds:
-      - go test -v ./internal/integrity
+      # -count=1: the test cache tracks PATH but not the ffmpeg binary, so a
+      # changed ffmpeg would otherwise report the previous result.
+      - go test -count=1 -v ./internal/integrity
 
   integrity:update:
     desc: Regenerate the integrity baseline after an intended container change
