@@ -472,11 +472,11 @@ func checkStructure(t *testing.T, c corpusCase, f facts, info m4a.Info) {
 	}
 }
 
-// channel0 returns channel 0 of 16-bit interleaved PCM as float64 samples.
-func channel0(pcm []byte, channels int) []float64 {
+// channelOf returns channel ch of 16-bit interleaved PCM as float64 samples.
+func channelOf(pcm []byte, channels, ch int) []float64 {
 	stride := channels * 2
 	out := make([]float64, 0, len(pcm)/stride)
-	for off := 0; off+2 <= len(pcm); off += stride {
+	for off := ch * 2; off+2 <= len(pcm); off += stride {
 		out = append(out, float64(int16(binary.LittleEndian.Uint16(pcm[off:]))))
 	}
 	return out
@@ -517,9 +517,15 @@ func rms(x []float64) float64 {
 // and perceptual quality is gated in the codec repos.
 const minCorrelation = 0.9
 
+// maxLag bounds the alignment search. It resolves a small mistrim; a larger
+// one, or a decode that no longer resembles the source, shows up as a peak
+// below minCorrelation instead.
+const maxLag = 16
+
 // checkSignal compares a trimmed decode with the source: bit-exact for FLAC, and
-// for the lossy codecs aligned at lag 0 (a mistrimmed edit list shifts the peak)
-// with energy within a factor of two.
+// for the lossy codecs, on every channel, aligned at lag 0 (a mistrimmed edit
+// list shifts the peak) with RMS within a factor of two. Each channel sweeps
+// its own band, so a channel swap or corruption decorrelates that channel.
 func checkSignal(t *testing.T, c corpusCase, src, trimmed []byte) {
 	t.Helper()
 	if c.lossless() {
@@ -528,21 +534,24 @@ func checkSignal(t *testing.T, c corpusCase, src, trimmed []byte) {
 		}
 		return
 	}
-	a, b := channel0(src, c.channels), channel0(trimmed, c.channels)
-	bestLag, best := 0, math.Inf(-1)
-	for lag := -16; lag <= 16; lag++ {
-		if v := normXCorr(a, b, lag); v > best {
-			best, bestLag = v, lag
+	for ch := range c.channels {
+		a, b := channelOf(src, c.channels, ch), channelOf(trimmed, c.channels, ch)
+		bestLag, best := 0, math.Inf(-1)
+		for lag := -maxLag; lag <= maxLag; lag++ {
+			if v := normXCorr(a, b, lag); v > best {
+				best, bestLag = v, lag
+			}
 		}
-	}
-	if bestLag != 0 {
-		t.Errorf("decode is shifted %d samples against the source; the edit-list trim is off", bestLag)
-	}
-	if best < minCorrelation {
-		t.Errorf("peak correlation %.4f < %.2f: the decode no longer resembles the source", best, minCorrelation)
-	}
-	if in, out := rms(a), rms(b); out < 0.5*in || out > 2*in {
-		t.Errorf("decoded RMS %.0f outside [0.5, 2] x source RMS %.0f", out, in)
+		switch {
+		case best < minCorrelation:
+			t.Errorf("channel %d: peak correlation %.4f < %.2f within +-%d samples: the decode is shifted further than that or no longer resembles the source",
+				ch, best, minCorrelation, maxLag)
+		case bestLag != 0:
+			t.Errorf("channel %d: decode is shifted %d samples against the source; the edit-list trim is off", ch, bestLag)
+		}
+		if in, out := rms(a), rms(b); out < 0.5*in || out > 2*in {
+			t.Errorf("channel %d: decoded RMS %.0f outside [0.5, 2] x source RMS %.0f", ch, out, in)
+		}
 	}
 }
 
