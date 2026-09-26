@@ -141,7 +141,9 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			// run from one movie tick short of the source to one tick past what the
 			// remux decodes after its start; the trim below uses the source length
 			// either way. The upper end comes from the decode, not the remux's mdhd,
-			// because ffmpeg 4.4 writes an mdhd that leaves out the priming.
+			// because ffmpeg 4.4 writes an mdhd equal to the source length (no
+			// priming, no padding). It is a sanity check on ffmpeg's edit, not on
+			// go-m4a: the lower end and the byte comparison below are what pin us.
 			start, length := f.presentation()
 			tol := int64(1)
 			if f.movieTimescale > 0 {
