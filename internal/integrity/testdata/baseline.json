@@ -1,0 +1,152 @@
+{
+  "aac_mono48k": {
+    "codec": "aac-lc",
+    "sample_rate": 48000,
+    "channels": 1,
+    "bit_depth": 16,
+    "source_samples": 30011,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 48000,
+    "media_duration": 31744,
+    "has_edit_list": true,
+    "edit_media_time": 1024,
+    "edit_segment_duration": 30011,
+    "frame_count": 31,
+    "decoded_samples": 31744,
+    "presented_samples": 30011
+  },
+  "aac_stereo44k": {
+    "codec": "aac-lc",
+    "sample_rate": 44100,
+    "channels": 2,
+    "bit_depth": 16,
+    "source_samples": 22222,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 44100,
+    "media_duration": 23552,
+    "has_edit_list": true,
+    "edit_media_time": 1024,
+    "edit_segment_duration": 22222,
+    "frame_count": 23,
+    "decoded_samples": 23552,
+    "presented_samples": 22222
+  },
+  "flac_5.1_48k": {
+    "codec": "flac",
+    "sample_rate": 48000,
+    "channels": 6,
+    "bit_depth": 16,
+    "source_samples": 4801,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 48000,
+    "media_duration": 4801,
+    "has_edit_list": false,
+    "edit_media_time": 0,
+    "edit_segment_duration": 0,
+    "frame_count": 2,
+    "decoded_samples": 4801,
+    "presented_samples": 4801,
+    "pcm_md5": "156aa374291687ddc90bbb9b75f17687"
+  },
+  "flac_mono44k": {
+    "codec": "flac",
+    "sample_rate": 44100,
+    "channels": 1,
+    "bit_depth": 16,
+    "source_samples": 9001,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 44100,
+    "media_duration": 9001,
+    "has_edit_list": false,
+    "edit_media_time": 0,
+    "edit_segment_duration": 0,
+    "frame_count": 3,
+    "decoded_samples": 9001,
+    "presented_samples": 9001,
+    "pcm_md5": "32a4f7e5f408eb2e838abab2c154895b"
+  },
+  "flac_stereo48k_24bit": {
+    "codec": "flac",
+    "sample_rate": 48000,
+    "channels": 2,
+    "bit_depth": 24,
+    "source_samples": 12345,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 48000,
+    "media_duration": 12345,
+    "has_edit_list": false,
+    "edit_media_time": 0,
+    "edit_segment_duration": 0,
+    "frame_count": 4,
+    "decoded_samples": 12345,
+    "presented_samples": 12345,
+    "pcm_md5": "d7468018b0eabf0f9f9ed888ee484a25"
+  },
+  "opus_mono48k": {
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "bit_depth": 16,
+    "source_samples": 24007,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 48000,
+    "media_duration": 24960,
+    "has_edit_list": true,
+    "edit_media_time": 312,
+    "edit_segment_duration": 24007,
+    "frame_count": 26,
+    "decoded_samples": 24960,
+    "presented_samples": 24007
+  },
+  "opus_stereo48k": {
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 2,
+    "bit_depth": 16,
+    "source_samples": 19201,
+    "brand": "M4A ",
+    "top_level_boxes": [
+      "ftyp",
+      "mdat",
+      "moov"
+    ],
+    "timescale": 48000,
+    "media_duration": 20160,
+    "has_edit_list": true,
+    "edit_media_time": 312,
+    "edit_segment_duration": 19201,
+    "frame_count": 21,
+    "decoded_samples": 20160,
+    "presented_samples": 19201
+  }
+}

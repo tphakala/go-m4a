@@ -37,6 +37,18 @@ tasks:
       - go test -race -shuffle=on -coverpkg=./... -covermode=atomic -coverprofile=coverage.out ./...
       - go tool cover -func=coverage.out | tail -1
 
+  integrity:
+    desc: Run the container round-trip integrity gate (ffmpeg cross-checks run when ffmpeg is on PATH)
+    cmds:
+      # -count=1: the test cache tracks PATH but not the ffmpeg binary, so a
+      # changed ffmpeg would otherwise report the previous result.
+      - go test -count=1 -v ./internal/integrity
+
+  integrity:update:
+    desc: Regenerate the integrity baseline after an intended container change
+    cmds:
+      - go test ./internal/integrity -run '^TestContainerIntegrity$' -update
+
   bench:
     desc: Run all benchmarks with allocation counts
     cmds:

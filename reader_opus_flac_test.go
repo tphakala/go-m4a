@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // opusFlacFixtures are ffmpeg-produced Opus-in-MP4 and FLAC-in-MP4 files with
@@ -19,11 +20,12 @@ var opusFlacFixtures = []struct {
 	frameCount int
 	encDelay   int64 // elst media_time: Opus pre-skip 312; FLAC has none
 	cfgLen     int   // expected CodecConfig length: dOps body 11, STREAMINFO 34
+	duration   time.Duration
 }{
-	{"opus_mono48k.mp4", CodecOpus, 48000, 1, 51, 312, 11},
-	{"opus_stereo48k.mp4", CodecOpus, 48000, 2, 51, 312, 11},
-	{"flac_mono44k.mp4", CodecFLAC, 44100, 1, 10, 0, 34},
-	{"flac_stereo48k.mp4", CodecFLAC, 48000, 2, 11, 0, 34},
+	{"opus_mono48k.mp4", CodecOpus, 48000, 1, 51, 312, 11, time.Second},
+	{"opus_stereo48k.mp4", CodecOpus, 48000, 2, 51, 312, 11, time.Second},
+	{"flac_mono44k.mp4", CodecFLAC, 44100, 1, 10, 0, 34, time.Second},
+	{"flac_stereo48k.mp4", CodecFLAC, 48000, 2, 11, 0, 34, time.Second},
 }
 
 func TestInteropOpusFLAC(t *testing.T) {
@@ -64,8 +66,8 @@ func TestInteropOpusFLAC(t *testing.T) {
 			if info.ASC != nil {
 				t.Errorf("ASC = %x, want nil for %v", info.ASC, tc.codec)
 			}
-			if info.Duration <= 0 {
-				t.Errorf("Duration = %v, want positive", info.Duration)
+			if d := info.Duration - tc.duration; d < -time.Microsecond || d > time.Microsecond {
+				t.Errorf("Duration = %v, want %v (ffprobe)", info.Duration, tc.duration)
 			}
 
 			// Every access unit must extract at its recorded (offset, size).

@@ -217,18 +217,23 @@ func TestNewReaderNil(t *testing.T) {
 
 // interopFiles are the ffmpeg- and afconvert-produced fixtures with their
 // ffprobe-verified expected values. They exercise moov-before and moov-after
-// mdat, multi-chunk stsc (afconvert), and elst-present versus none.
+// mdat, multi-chunk stsc (afconvert), and elst-present versus none. ffmpeg's
+// movie timescale (1000) differs from the media timescale, so duration pins the
+// timescale the Reader converts the edit segment with. afconvert's files use one
+// timescale and matching mvhd and mdhd durations, so they cannot tell which of
+// those the Reader used.
 var interopFiles = []struct {
 	name         string
 	sampleRate   int
 	channels     int
 	frameCount   int
 	wantEditList bool // ffmpeg writes an elst; afconvert does not
+	duration     time.Duration
 }{
-	{"ffmpeg_mono48k.m4a", 48000, 1, 30, true},
-	{"afconvert_mono48k.m4a", 48000, 1, 31, false},
-	{"ffmpeg_stereo44k.m4a", 44100, 2, 27, true},
-	{"afconvert_stereo44k.m4a", 44100, 2, 28, false},
+	{"ffmpeg_mono48k.m4a", 48000, 1, 30, true, 600 * time.Millisecond},
+	{"afconvert_mono48k.m4a", 48000, 1, 31, false, 661333333},
+	{"ffmpeg_stereo44k.m4a", 44100, 2, 27, true, 600 * time.Millisecond},
+	{"afconvert_stereo44k.m4a", 44100, 2, 28, false, 650158730},
 }
 
 func TestInterop(t *testing.T) {
@@ -251,6 +256,9 @@ func TestInterop(t *testing.T) {
 			}
 			info := r.Info()
 			assertInteropInfo(t, &info, tc.sampleRate, tc.channels, tc.frameCount, tc.wantEditList)
+			if d := info.Duration - tc.duration; d < -time.Microsecond || d > time.Microsecond {
+				t.Errorf("Duration = %v, want %v (ffprobe)", info.Duration, tc.duration)
+			}
 
 			total := assertInteropFrames(t, r, tc.frameCount, fileSize(t, path))
 			t.Logf("%s: %d Hz, %d ch, %d frames, %d AU bytes, EncoderDelay=%d, Duration=%v",
