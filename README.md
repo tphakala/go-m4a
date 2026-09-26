@@ -120,8 +120,9 @@ go-m4a is a container, so audio quality is set by the inner codec: AAC-LC via
 [go-flac](https://github.com/tphakala/go-flac), each measured in its own
 repository. What go-m4a itself guarantees is container correctness: an encode
 then decode round trip is sample-accurate (the edit-list priming and trailing
-padding are handled), and FLAC-in-M4A is bit-exact. A CI round-trip integrity
-gate is planned (#57).
+padding are handled), and FLAC-in-M4A is bit-exact. The round-trip integrity
+gate in `internal/integrity` checks this in CI for every codec, against a
+committed baseline and against ffmpeg.
 
 ## Install
 

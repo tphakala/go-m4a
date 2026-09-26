@@ -40,9 +40,10 @@ const (
 	codecFLAC codecName = "flac"
 )
 
-// corpusCase is one deterministic input. Samples is per channel and is chosen
-// not to be a multiple of the codec frame size, so the trailing padding the edit
-// list has to cut is never zero.
+// corpusCase is one deterministic input. Samples is per channel. For the lossy
+// codecs it is chosen not to be a multiple of the codec frame size, so the
+// trailing padding the edit list has to cut is never zero; FLAC has no priming
+// or padding and writes no edit list.
 type corpusCase struct {
 	name       string
 	codec      codecName
@@ -221,8 +222,11 @@ func decode(t *testing.T, c corpusCase, data []byte) ([]byte, m4a.Info) {
 	return pcm, info
 }
 
-// facts is what the container says about itself, read straight from the boxes
-// rather than through the Reader under test.
+// facts is what the container says about itself, read from the boxes with the
+// internal/box parsers rather than through the Reader under test. Those parsers
+// are the ones the writer's marshalers and the Reader share, so a bug in them
+// can agree with itself here; the signal checks and the ffmpeg cross-checks are
+// what catch that.
 type facts struct {
 	brand          string
 	topLevel       []string
@@ -324,7 +328,8 @@ func child(t *testing.T, payload []byte, typ box.FourCC) []byte {
 }
 
 // presentation returns the edit list's priming trim and presented length, both
-// in media-timescale samples. Without an edit list the whole media is presented.
+// in media-timescale samples. Without an edit list, or with an empty edit
+// (media_time -1), the whole media is presented.
 func (f facts) presentation() (start, length int64) {
 	if !f.hasEdit || f.editMediaTime < 0 {
 		return 0, int64(f.mediaDuration)
@@ -336,10 +341,14 @@ func (f facts) presentation() (start, length int64) {
 	return f.editMediaTime, seg
 }
 
-// record is the per-case baseline entry. Every field is an integer or a string
-// derived from integer data, so it is identical on every architecture: lossy
-// encoders may round differently per platform, but none of these facts depend
-// on the bits they produce.
+// record is the per-case baseline entry. No field depends on floating-point
+// output, so it is identical on every architecture: lossy encoders may round
+// differently per platform, but none of these facts depend on the bits they
+// produce. PCMMD5 fingerprints the trimmed FLAC decode; checkSignal already
+// requires that decode to equal the source, so it pins the corpus generator as
+// much as the container. The lossy frame and duration fields follow the
+// encoder's framing and flush, so a codec dependency bump can move them
+// legitimately; regenerate and review the diff when it does.
 type record struct {
 	Codec            codecName `json:"codec"`
 	SampleRate       int       `json:"sample_rate"`
@@ -427,8 +436,9 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	return rt
 }
 
-// checkStructure asserts the container invariants that hold for any correct
-// writer, independent of the baseline.
+// checkStructure asserts the invariants of this writer's output, independent of
+// the baseline. Some are policy rather than format rules (equal movie and media
+// timescales, no edit list on FLAC), so it does not apply to other muxers' files.
 func checkStructure(t *testing.T, c corpusCase, f facts, info m4a.Info) {
 	t.Helper()
 	if len(f.topLevel) == 0 || f.topLevel[0] != "ftyp" {

@@ -12,9 +12,10 @@ import (
 	"time"
 )
 
-// requireFFmpegEnv names the variable that turns a missing ffmpeg from a skip
-// into a failure. CI sets it on the runner that installs ffmpeg, so the
-// cross-checks cannot pass by never running.
+// requireFFmpegEnv names the variable that, set to any non-empty value, turns a
+// missing ffmpeg from a skip into a failure. CI sets it on the Linux test step,
+// where ffmpeg is installed, so the cross-checks cannot pass there by never
+// running.
 const requireFFmpegEnv = "M4A_REQUIRE_FFMPEG"
 
 func lookFFmpeg(t *testing.T) string {
@@ -89,9 +90,12 @@ func TestFFmpegDecodesOurFiles(t *testing.T) {
 }
 
 // TestFFmpegRemuxReadsBack has ffmpeg stream-copy each file into its own MP4 and
-// reads the result with go-m4a. The inner stream is untouched, so once each file
-// is trimmed by its own edit list the two decodes must be identical: any
-// difference is a container disagreement about where the audio starts or ends.
+// reads the result with go-m4a, which exercises the Reader on ffmpeg's layout (a
+// 1000 movie timescale, free and udta boxes, an edit list on FLAC). The inner stream
+// is untouched, so once each decode is trimmed by its own media_time and cut to
+// the source length the two must be identical: any difference is a disagreement
+// about where the audio starts. ffmpeg copies our media_time, so this does not
+// check the writer's priming value; TestContainerIntegrity does.
 func TestFFmpegRemuxReadsBack(t *testing.T) {
 	ffmpeg := lookFFmpeg(t)
 	for _, c := range corpus {
