@@ -238,6 +238,7 @@ type facts struct {
 	editMediaTime  int64
 	editSegment    uint64 // segment_duration, in the movie timescale
 	sampleCount    uint32 // stsz sample_count: the number of access units
+	sttsDuration   uint64 // sum of the stts sample_count * sample_delta runs
 }
 
 var (
@@ -250,6 +251,7 @@ var (
 	fourccMinf = box.NewFourCC("minf")
 	fourccStbl = box.NewFourCC("stbl")
 	fourccStsz = box.NewFourCC("stsz")
+	fourccStts = box.NewFourCC("stts")
 )
 
 // inspect walks the top-level boxes and reads the single track's timing boxes
@@ -309,9 +311,12 @@ func inspect(t *testing.T, data []byte) facts {
 	if err != nil {
 		t.Fatalf("mdhd: %v", err)
 	}
-	stsz := child(t, child(t, child(t, mdia, fourccMinf), fourccStbl), fourccStsz)
-	if _, f.sampleCount, _, err = box.ParseStsz(stsz); err != nil {
+	stbl := child(t, child(t, mdia, fourccMinf), fourccStbl)
+	if _, f.sampleCount, _, err = box.ParseStsz(child(t, stbl, fourccStsz)); err != nil {
 		t.Fatalf("stsz: %v", err)
+	}
+	if _, f.sttsDuration, err = box.ParseStts(child(t, stbl, fourccStts)); err != nil {
+		t.Fatalf("stts: %v", err)
 	}
 	return f
 }
@@ -422,12 +427,17 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	// mdhd declares how much media the track holds, and the decode is what the
 	// frames actually hold, so the two must agree: an mdhd that overstates or
 	// understates the media, or a demux that reads too few or too many frames,
-	// breaks this even when the edit list still fits inside the decode. (The
-	// stts durations are not read here; the root package's tests pin them.)
+	// breaks this even when the edit list still fits inside the decode. The stts
+	// runs must sum to the same duration, which is what catches a sample table
+	// that mistimes FLAC's short last block while mdhd stays right. (NewReader
+	// already rejects an stts sample count that disagrees with stsz.)
 	// Info.FrameCount is reported rather than used to bound the decode, so it is
 	// checked against the stsz sample count directly.
 	if uint64(decoded) != f.mediaDuration {
 		t.Errorf("decoded %d samples per channel, but mdhd declares %d", decoded, f.mediaDuration)
+	}
+	if f.sttsDuration != f.mediaDuration {
+		t.Errorf("stts durations sum to %d, but mdhd declares %d", f.sttsDuration, f.mediaDuration)
 	}
 	if info.FrameCount != int(f.sampleCount) {
 		t.Errorf("Info.FrameCount %d, but stsz holds %d samples", info.FrameCount, f.sampleCount)
