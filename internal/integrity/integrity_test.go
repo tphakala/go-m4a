@@ -65,8 +65,10 @@ var corpus = []corpusCase{
 // lossless reports whether the round trip must reproduce the source exactly.
 func (c corpusCase) lossless() bool { return c.codec == codecFLAC }
 
-// bytesPerSample is the width of one decoded sample. The lossy bridges always
-// decode to 16-bit; FLAC decodes at the source depth.
+// bytesPerSample is the width of one sample, in the source and in the decode
+// alike. That holds because FLAC decodes at the source depth and the lossy
+// bridges decode to 16-bit, which is why sourcePCM accepts only 16-bit lossy
+// cases.
 func (c corpusCase) bytesPerSample() int { return c.bitDepth / 8 }
 
 // frameBytes is the size of one interleaved sample frame (all channels).
@@ -95,6 +97,18 @@ func isin(phase uint32, amp int64) int64 {
 // channel, each channel sweeping its own band so a channel swap or deinterleave
 // bug decorrelates the decode instead of slipping past.
 func sourcePCM(c corpusCase) []byte {
+	// The generator only writes 16- and 24-bit samples, the lossy checks read
+	// 16-bit channels, and the phase increment below shifts up to max(f0, f1)*n
+	// left by 32, so a case outside those bounds would degrade silently rather
+	// than fail.
+	switch {
+	case c.bitDepth != 16 && c.bitDepth != 24:
+		panic(fmt.Sprintf("corpus case %s: bit depth %d, want 16 or 24", c.name, c.bitDepth))
+	case !c.lossless() && c.bitDepth != 16:
+		panic(fmt.Sprintf("corpus case %s: lossy cases must be 16-bit, got %d", c.name, c.bitDepth))
+	case max(int64(c.sampleRate)/8, int64(300+200*(c.channels-1)))*int64(c.samples) >= 1<<31:
+		panic(fmt.Sprintf("corpus case %s: %d samples at %d Hz overflows the phase increment", c.name, c.samples, c.sampleRate))
+	}
 	amp := int64(16000) << (c.bitDepth - 16)
 	bps := c.bytesPerSample()
 	out := make([]byte, 0, c.samples*c.frameBytes())
@@ -106,7 +120,8 @@ func sourcePCM(c corpusCase) []byte {
 			f0 := int64(300 + 200*ch)
 			f1 := rate / int64(8+2*ch)
 			// Phase increment in 2^-32 cycles for the instantaneous frequency
-			// f0 + (f1-f0)*i/n. The numerator stays below 2^62 for the corpus.
+			// f0 + (f1-f0)*i/n. The numerator is at most max(f0, f1)*n, which the
+			// guard above keeps below 2^31, so the shift stays below 2^63.
 			inc := ((f0*n + (f1-f0)*i) << 32) / (rate * n)
 			v := isin(phases[ch], amp)
 			phases[ch] += uint32(inc) // wraps by design: a phase accumulator
@@ -314,6 +329,9 @@ func (f facts) presentation() (start, length int64) {
 	if !f.hasEdit || f.editMediaTime < 0 {
 		return 0, int64(f.mediaDuration)
 	}
+	if f.movieTimescale == 0 {
+		return f.editMediaTime, -1 // no length can be derived; the callers report it
+	}
 	seg := int64(f.editSegment) * int64(f.mediaTimescale) / int64(f.movieTimescale)
 	return f.editMediaTime, seg
 }
@@ -365,7 +383,7 @@ func runCase(t *testing.T, c corpusCase) roundTrip {
 	start, length := f.presentation()
 
 	rt := roundTrip{src: src, file: file}
-	if end := (start + length) * int64(fb); start >= 0 && end <= int64(len(pcm)) {
+	if end := (start + length) * int64(fb); start >= 0 && length >= 0 && end <= int64(len(pcm)) {
 		rt.trimmed = pcm[start*int64(fb) : end]
 	}
 	rt.rec = record{
