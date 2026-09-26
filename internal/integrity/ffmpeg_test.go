@@ -117,6 +117,18 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			if info.FrameCount != ours.rec.FrameCount {
 				t.Errorf("ffmpeg's remux has %d frames, ours %d", info.FrameCount, ours.rec.FrameCount)
 			}
+			// ffmpeg's movie timescale differs from the media timescale, unlike
+			// ours, so this is the one place a Reader that converts the edit
+			// segment with the wrong timescale shows up. The expectation is
+			// computed in float64, as the Reader does, so a long edit cannot
+			// overflow it.
+			if f.hasEdit && f.movieTimescale > 0 {
+				want := time.Duration(float64(f.editSegment) / float64(f.movieTimescale) * float64(time.Second))
+				if d := info.Duration - want; d < -time.Microsecond || d > time.Microsecond {
+					t.Errorf("ffmpeg's remux: Info.Duration %v, want %v (edit segment %d at movie timescale %d)",
+						info.Duration, want, f.editSegment, f.movieTimescale)
+				}
+			}
 
 			// ffmpeg writes the edit in its own, usually coarser, movie timescale and
 			// rounds it to a whole tick in either direction (7.1 turns a 9001-sample
