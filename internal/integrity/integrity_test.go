@@ -519,6 +519,15 @@ func TestContainerIntegrity(t *testing.T) {
 	if t.Failed() {
 		return
 	}
+	// A -run filter selects only some cases. Comparing that subset would report
+	// every other case as missing, and writing it would drop them from the file.
+	if len(got) != len(corpus) {
+		if *update {
+			t.Fatalf("-update needs the whole corpus (%d of %d cases ran); drop the subtest filter", len(got), len(corpus))
+		}
+		t.Logf("%d of %d cases ran; skipping the baseline comparison", len(got), len(corpus))
+		return
+	}
 
 	if *update {
 		out, err := json.MarshalIndent(got, "", "  ")
