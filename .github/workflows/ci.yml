@@ -64,7 +64,11 @@ jobs:
       # under test.
       - name: Run tests with coverage
         if: matrix.os == 'ubuntu-latest'
-        run: go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+        # ffmpeg is installed on this runner, so the integrity gate's ffmpeg
+        # cross-checks must run here rather than skip.
+        env:
+          M4A_REQUIRE_FFMPEG: "1"
+        run:go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
 
       # Coverage is informational (fail_ci_if_error: false), never a gate. The
       # token is optional for a public repository but avoids Codecov's tokenless
