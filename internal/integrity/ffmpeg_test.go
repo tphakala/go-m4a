@@ -62,11 +62,12 @@ func (c corpusCase) pcmFormat() (format, codec string) {
 }
 
 // TestFFmpegDecodesOurFiles has ffmpeg decode each file the writer produced.
-// ffmpeg applies the edit list's media_time (the priming trim) itself but keeps
-// the last frame's trailing padding, on its own AAC files as much as on ours, so
-// its decode runs from media_time to the end of the media. That start must land
-// exactly on the source: the first source-length samples are bit-exact for FLAC
-// and aligned at lag 0 for the lossy codecs.
+// ffmpeg applies the edit list's media_time (the priming trim) itself. Whether it
+// also cuts the last frame's trailing padding at the edit's end depends on the
+// version (6.1 and 7.1 keep it, 9.0 cuts it), so the length may be anything from
+// the source length to media_duration less media_time. The container fact is
+// the start: the first source-length samples are bit-exact for FLAC and aligned
+// at lag 0 for the lossy codecs.
 func TestFFmpegDecodesOurFiles(t *testing.T) {
 	ffmpeg := lookFFmpeg(t)
 	for _, c := range corpus {
@@ -77,10 +78,10 @@ func TestFFmpegDecodesOurFiles(t *testing.T) {
 			out := runFFmpeg(t, ffmpeg, "-i", in, "-f", format, "-c:a", codec, "-")
 
 			fb := c.frameBytes()
-			want := int64(ours.rec.MediaDuration) - ours.rec.EditMediaTime
-			if got := int64(len(out) / fb); len(out)%fb != 0 || got != want {
-				t.Fatalf("ffmpeg decoded %d bytes (%d samples per channel), want %d: media duration %d less media_time %d",
-					len(out), got, want, ours.rec.MediaDuration, ours.rec.EditMediaTime)
+			most := int64(ours.rec.MediaDuration) - ours.rec.EditMediaTime
+			if got := int64(len(out) / fb); len(out)%fb != 0 || got < int64(c.samples) || got > most {
+				t.Fatalf("ffmpeg decoded %d bytes (%d samples per channel), want %d to %d: the source length up to media duration %d less media_time %d",
+					len(out), got, c.samples, most, ours.rec.MediaDuration, ours.rec.EditMediaTime)
 			}
 			checkSignal(t, c, ours.src, out[:c.samples*fb])
 		})
@@ -113,12 +114,20 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 				t.Errorf("ffmpeg's remux has %d frames, ours %d", info.FrameCount, ours.rec.FrameCount)
 			}
 
-			// ffmpeg may write the edit in a coarser movie timescale, so take the
-			// presented length from the source rather than from its edit list, and
-			// hold the edit list itself to within a millisecond.
+			// ffmpeg writes the edit in its own, usually coarser, movie timescale and
+			// rounds it to a whole tick in either direction (7.1 turns a 9001-sample
+			// FLAC edit into 9040 samples), and some versions (8.0) present the whole
+			// media after media_time instead of our end. So the presented length may
+			// run from one movie tick short of the source to one tick past the
+			// remux's media duration less its start; the trim below uses the source
+			// length either way.
 			start, length := f.presentation()
-			if tol := int64(c.sampleRate / 1000); length < int64(c.samples)-tol || length > int64(c.samples)+tol {
-				t.Errorf("ffmpeg's remux presents %d samples, want %d (within 1 ms)", length, c.samples)
+			tol := int64(1)
+			if f.movieTimescale > 0 {
+				tol += (int64(f.mediaTimescale) + int64(f.movieTimescale) - 1) / int64(f.movieTimescale)
+			}
+			if most := int64(f.mediaDuration) - start; length < int64(c.samples)-tol || length > most+tol {
+				t.Errorf("ffmpeg's remux presents %d samples, want %d to %d (each within %d of rounding)", length, c.samples, most, tol)
 			}
 			fb := int64(c.frameBytes())
 			end := (start + int64(c.samples)) * fb
