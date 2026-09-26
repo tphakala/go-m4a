@@ -103,7 +103,9 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			ours := runCase(t, c)
 			in := writeTemp(t, "in.mp4", ours.file)
 			remuxPath := filepath.Join(filepath.Dir(in), "remux.mp4")
-			runFFmpeg(t, ffmpeg, "-i", in, "-c", "copy", "-map_metadata", "-1", "-f", "mp4", remuxPath)
+			// ffmpeg 4.4 and 5.1 mark FLAC in MP4 experimental and refuse it
+			// without -strict -2; 6.1 and later accept the flag and ignore it.
+			runFFmpeg(t, ffmpeg, "-i", in, "-c", "copy", "-map_metadata", "-1", "-strict", "-2", "-f", "mp4", remuxPath)
 			remux, err := os.ReadFile(remuxPath)
 			if err != nil {
 				t.Fatal(err)
@@ -134,18 +136,20 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			// rounds it to a whole tick in either direction (7.1 turns a 9001-sample
 			// FLAC edit into 9040 samples), and some versions (8.0) present the whole
 			// media after media_time instead of our end. So the presented length may
-			// run from one movie tick short of the source to one tick past the
-			// remux's media duration less its start; the trim below uses the source
-			// length either way.
+			// run from one movie tick short of the source to one tick past what the
+			// remux decodes after its start; the trim below uses the source length
+			// either way. The upper end comes from the decode, not the remux's mdhd,
+			// because ffmpeg 4.4 writes an mdhd that leaves out the priming.
 			start, length := f.presentation()
 			tol := int64(1)
 			if f.movieTimescale > 0 {
 				tol += (int64(f.mediaTimescale) + int64(f.movieTimescale) - 1) / int64(f.movieTimescale)
 			}
-			if most := int64(f.mediaDuration) - start; length < int64(c.samples)-tol || length > most+tol {
-				t.Errorf("ffmpeg's remux presents %d samples, want %d to %d (each within %d of rounding)", length, c.samples, most, tol)
-			}
 			fb := int64(c.frameBytes())
+			if most := int64(len(pcm))/fb - start; length < int64(c.samples)-tol || length > most+tol {
+				t.Errorf("ffmpeg's remux presents %d samples, want %d (less up to %d of rounding) to %d decoded after its start (plus %d)",
+					length, c.samples, tol, most, tol)
+			}
 			end := (start + int64(c.samples)) * fb
 			if start < 0 || end > int64(len(pcm)) {
 				t.Fatalf("remux decode has %d samples, too few for trim %d plus %d", int64(len(pcm))/fb, start, c.samples)
