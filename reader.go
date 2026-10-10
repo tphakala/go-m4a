@@ -969,6 +969,43 @@ func (rd *Reader) sizeOf(i int) uint32 {
 	return rd.constSize
 }
 
+// SeekSample moves the running cursor to access unit sample (0-based) so that
+// the next ReadFrame returns that unit. It costs O(1) seeks: one per chunk the
+// cursor crosses, plus the final one, instead of one per skipped sample —
+// skipping an hour of audio is a handful of requests rather than ~150,000.
+// Returns an error (wrapping ErrOutOfRange) when sample is past the track.
+//
+// It is safe to call mid-stream; the cursor state is fully recomputed.
+func (rd *Reader) SeekSample(sample int) error {
+	if sample < 0 || sample >= rd.sampleCount {
+		return fmt.Errorf("go-m4a: sample %d out of range [0,%d)", sample, rd.sampleCount)
+	}
+	// Walk the flattened chunk table to the chunk that holds the sample.
+	var (
+		chunk int
+		base  int64 // index of the first access unit of chunk
+	)
+	for chunk < len(rd.samplesPerChunk) && base+rd.samplesPerChunk[chunk] <= int64(sample) {
+		base += rd.samplesPerChunk[chunk]
+		chunk++
+	}
+	if chunk >= len(rd.chunkOffsets) {
+		return fmt.Errorf("go-m4a: sample %d beyond the chunk table: %w", sample, ErrCorrupt)
+	}
+	off := rd.chunkOffsets[chunk]
+	for i := base; i < int64(sample); i++ {
+		off += int64(rd.sizeOf(int(i)))
+	}
+	rd.nextSample = sample
+	rd.curChunk = chunk
+	rd.sampleInChunk = int64(sample) - base
+	rd.curOffset = off
+	return nil
+}
+
+// SampleCount returns how many access units the track carries.
+func (rd *Reader) SampleCount() int { return rd.sampleCount }
+
 // resetCursor positions the running cursor at the first access unit, skipping
 // any leading chunks that hold zero samples.
 func (rd *Reader) resetCursor() {
