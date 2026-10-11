@@ -119,7 +119,23 @@ func FuzzReader(f *testing.F) {
 			return
 		}
 
-		_ = r.Info()
+		n := r.Info().FrameCount
+
+		// Seek around the sample tables before reading. Any in-range index must be
+		// accepted (the tables were validated at open), and an index past the end
+		// must be refused with ErrOutOfRange. The last seek is to 0, so the drain
+		// below reads every unit through the cursor SeekSample computed.
+		for _, at := range []int{n, n - 1, n / 2, 0} {
+			serr := r.SeekSample(at)
+			switch {
+			case at < 0 || at >= n:
+				if !errors.Is(serr, ErrOutOfRange) {
+					t.Errorf("SeekSample(%d) of %d = %v, want ErrOutOfRange", at, n, serr)
+				}
+			case serr != nil:
+				t.Errorf("SeekSample(%d) of %d = %v, want nil", at, n, serr)
+			}
+		}
 
 		// Drain the access units. ReadFrame ends at a non-nil error, which must be
 		// io.EOF or a wrapped corruption/unsupported sentinel.

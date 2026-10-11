@@ -198,6 +198,12 @@ without the `io.Reader` framing, `Reader.ReadFrameInto(dst)` fills a reused
 buffer instead of allocating one per frame like `ReadFrame` does (it returns the
 required length with `io.ErrShortBuffer` if `dst` is too small).
 
+`Reader.SeekSample(n)` moves the cursor to access unit `n` (0-based, below
+`Info().FrameCount`) so the next read returns it, computing the position from the
+sample tables instead of reading the units in between. Take a fresh `RawStream`
+and a fresh decoder after seeking. An index outside the track wraps
+`m4a.ErrOutOfRange`.
+
 ### aacm4a: the go-aac bridge
 
 The `aacm4a` subpackage is the one-call path for callers that have interleaved

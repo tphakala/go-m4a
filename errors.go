@@ -67,4 +67,10 @@ var (
 	// distinct from ErrCorrupt so a caller that set a strict limit can tell "over
 	// my memory budget" apart from "malformed".
 	ErrBoxTooLarge = errors.New("go-m4a: box body exceeds buffer limit")
+
+	// ErrOutOfRange is returned by Reader.SeekSample for a sample index outside
+	// [0, Info().FrameCount). It is a verdict on the caller's argument, not on the
+	// file, so it is kept distinct from ErrCorrupt: a player that maps a seek time
+	// past the end can match it and clamp.
+	ErrOutOfRange = errors.New("go-m4a: sample index out of range")
 )
