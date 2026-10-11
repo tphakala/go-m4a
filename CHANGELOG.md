@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `Reader.SeekSample` positions the reader at any access unit without reading the ones before it, for plain and fragmented input. It does no I/O itself, so a jump costs one seek on the next read. An index outside the track returns the new `ErrOutOfRange` sentinel.
+
 ### Changed
 
 - The minimum Go version is now 1.27.

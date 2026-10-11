@@ -969,18 +969,25 @@ func (rd *Reader) sizeOf(i int) uint32 {
 	return rd.constSize
 }
 
-// SeekSample moves the running cursor to access unit sample (0-based) so that
-// the next ReadFrame returns that unit. It costs O(1) seeks: one per chunk the
-// cursor crosses, plus the final one, instead of one per skipped sample —
-// skipping an hour of audio is a handful of requests rather than ~150,000.
-// Returns an error (wrapping ErrOutOfRange) when sample is past the track.
+// SeekSample moves the running cursor to access unit sample (0-based, below
+// Info().FrameCount) so that the next ReadFrame, ReadFrameInto or RawStream read
+// returns that unit. It does no I/O: the position is computed from the sample
+// tables already in memory, walking the chunk table to the chunk that holds the
+// sample and summing the sizes before it within that chunk. Skipping ahead this
+// way costs one seek on the next read, where calling ReadFrame per skipped unit
+// costs one seek and one read each (an HTTP range request apiece when the
+// io.ReadSeeker is backed by a network source). An index outside
+// [0, Info().FrameCount) returns an error wrapping ErrOutOfRange and leaves the
+// cursor unchanged.
 //
-// It is safe to call mid-stream; the cursor state is fully recomputed.
+// It may be called at any point, including after the end of the stream. An
+// io.Reader returned by an earlier RawStream call may hold part of a frame read
+// before the seek, so discard it and call RawStream again; likewise start a new
+// decoder, since codec state does not carry across a jump.
 func (rd *Reader) SeekSample(sample int) error {
 	if sample < 0 || sample >= rd.sampleCount {
-		return fmt.Errorf("go-m4a: sample %d out of range [0,%d)", sample, rd.sampleCount)
+		return fmt.Errorf("go-m4a: seek to sample %d, track has %d: %w", sample, rd.sampleCount, ErrOutOfRange)
 	}
-	// Walk the flattened chunk table to the chunk that holds the sample.
 	var (
 		chunk int
 		base  int64 // index of the first access unit of chunk
@@ -989,12 +996,21 @@ func (rd *Reader) SeekSample(sample int) error {
 		base += rd.samplesPerChunk[chunk]
 		chunk++
 	}
+	// Unreachable for a Reader built by NewReader (validateOffsets and the
+	// fragment geometry check that the chunk table covers every sample), kept so
+	// a table inconsistency surfaces as an error rather than an index panic.
 	if chunk >= len(rd.chunkOffsets) {
 		return fmt.Errorf("go-m4a: sample %d beyond the chunk table: %w", sample, ErrCorrupt)
 	}
 	off := rd.chunkOffsets[chunk]
-	for i := base; i < int64(sample); i++ {
-		off += int64(rd.sizeOf(int(i)))
+	// Every sample already lies inside the stream (validated at open), so these
+	// sums stay below streamLen and cannot overflow int64.
+	if rd.sizes == nil {
+		off += int64(rd.constSize) * (int64(sample) - base)
+	} else {
+		for i := base; i < int64(sample); i++ {
+			off += int64(rd.sizes[i])
+		}
 	}
 	rd.nextSample = sample
 	rd.curChunk = chunk
@@ -1002,9 +1018,6 @@ func (rd *Reader) SeekSample(sample int) error {
 	rd.curOffset = off
 	return nil
 }
-
-// SampleCount returns how many access units the track carries.
-func (rd *Reader) SampleCount() int { return rd.sampleCount }
 
 // resetCursor positions the running cursor at the first access unit, skipping
 // any leading chunks that hold zero samples.
