@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 func TestWriteReadOpus(t *testing.T) {
@@ -22,7 +24,7 @@ func TestWriteReadOpus(t *testing.T) {
 		content += int64(d)
 	}
 
-	var buf memWS
+	var buf testutil.WriteSeeker
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec:               CodecOpus,
 		SampleRate:          48000,
@@ -43,7 +45,7 @@ func TestWriteReadOpus(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	r, err := NewReader(bytes.NewReader(buf.buf))
+	r, err := NewReader(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -85,7 +87,7 @@ func TestWriteReadFLAC(t *testing.T) {
 	streamInfo[11] = byte(rate >> 4)
 	streamInfo[12] = byte(rate<<4) | byte((channels-1)<<1)
 
-	var buf memWS
+	var buf testutil.WriteSeeker
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec:      CodecFLAC,
 		SampleRate: rate,
@@ -104,7 +106,7 @@ func TestWriteReadFLAC(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	r, err := NewReader(bytes.NewReader(buf.buf))
+	r, err := NewReader(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -131,7 +133,7 @@ func TestWriteReadFLAC(t *testing.T) {
 // TestWriteFrameRejectsZeroDurationCodec confirms WriteFrame (the fixed-duration
 // form) refuses Opus and FLAC, whose frames need explicit durations.
 func TestWriteFrameRejectsZeroDurationCodec(t *testing.T) {
-	var buf memWS
+	var buf testutil.WriteSeeker
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 312,
 	})
@@ -148,13 +150,10 @@ func TestWriteFrameRejectsZeroDurationCodec(t *testing.T) {
 // dOps box in the moov, so the opaque synthetic packets do not affect stream
 // identification.
 func TestFFprobeOpus(t *testing.T) {
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe not found on PATH")
-	}
+	ffprobe := testutil.LookTool(t, "ffprobe")
 
 	frames := synthFrames(6)
-	var buf memWS
+	var buf testutil.WriteSeeker
 	w, err := NewWriter(&buf, WriterConfig{
 		Codec: CodecOpus, SampleRate: 48000, Channels: 2, OpusPreSkip: 312, OpusInputSampleRate: 48000,
 	})
@@ -171,7 +170,7 @@ func TestFFprobeOpus(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "synth_opus.mp4")
-	if err := os.WriteFile(path, buf.buf, 0o600); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
@@ -231,7 +230,7 @@ func TestWriterCodecConfigValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var buf memWS
+			var buf testutil.WriteSeeker
 			if _, err := NewWriter(&buf, tc.cfg); err == nil {
 				t.Errorf("NewWriter(%+v) returned nil error, want a validation error", tc.cfg)
 			}

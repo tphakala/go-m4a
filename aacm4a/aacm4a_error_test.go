@@ -8,6 +8,8 @@ import (
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 
+	"github.com/tphakala/go-m4a/internal/testutil"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -38,7 +40,7 @@ func TestEncodeInterleavedErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var ws memWriteSeeker
+			var ws testutil.WriteSeeker
 			err := func() (err error) {
 				defer func() {
 					if p := recover(); p != nil {

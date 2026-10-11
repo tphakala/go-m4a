@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tphakala/go-m4a/internal/box"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // buildEmptyFLACFile assembles a structurally valid FLAC .mp4 whose track carries
@@ -54,11 +55,11 @@ func buildEmptyFLACFile(t *testing.T, streamInfo []byte) []byte {
 // one.
 func TestDecodeInterleavedEmptyReturnsNil(t *testing.T) {
 	// A real STREAMINFO so the frame decoder builds; the file just carries no frames.
-	enc := &memWS{}
+	enc := &testutil.WriteSeeker{}
 	if err := EncodeInterleaved(enc, Config{SampleRate: 44100, Channels: 1, BitDepth: 16, CompressionLevel: 5}, genS16(4096, 1)); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	_, _, info0, err := openStream(bytes.NewReader(enc.buf))
+	_, _, info0, err := openStream(bytes.NewReader(enc.Bytes()))
 	if err != nil {
 		t.Fatalf("openStream on the encoded file: %v", err)
 	}

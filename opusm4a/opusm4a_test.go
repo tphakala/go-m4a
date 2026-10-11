@@ -6,61 +6,17 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"testing"
 	"time"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
-
-// memWS is an in-memory io.WriteSeeker for the round-trip tests.
-type memWS struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWS) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		grown := make([]byte, end)
-		copy(grown, m.buf)
-		m.buf = grown
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWS) Seek(offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = int64(len(m.buf)) + offset
-	default:
-		return 0, fmt.Errorf("memWS: bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("memWS: negative position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
-}
 
 // genSine builds interleaved little-endian 16-bit PCM of a 440 Hz sine at 48 kHz.
 func genSine(samplesPerCh, channels int) []byte {
-	out := make([]byte, 0, samplesPerCh*channels*2)
-	for i := range samplesPerCh {
-		v := int16(math.Round(18000 * math.Sin(2*math.Pi*440*float64(i)/48000)))
-		for range channels {
-			out = binary.LittleEndian.AppendUint16(out, uint16(v))
-		}
-	}
-	return out
+	return genSineAt(samplesPerCh, channels, 48000)
 }
 
 func rms(pcm []byte) float64 {
@@ -82,13 +38,13 @@ func TestOpusRoundTrip(t *testing.T) {
 			const samplesPerCh = 24000 // 0.5 s at 48 kHz
 			pcm := genSine(samplesPerCh, channels)
 
-			var buf memWS
+			var buf testutil.WriteSeeker
 			cfg := Config{SampleRate: 48000, Channels: channels, Bitrate: 96000}
 			if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 				t.Fatalf("EncodeInterleaved: %v", err)
 			}
 
-			got, info, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+			got, info, err := DecodeInterleaved(bytes.NewReader(buf.Bytes()))
 			if err != nil {
 				t.Fatalf("DecodeInterleaved: %v", err)
 			}
@@ -156,11 +112,11 @@ func TestOpusRoundTripInputRates(t *testing.T) {
 			samplesPerCh := rate / 2 // 0.5 s at the source rate
 			pcm := genSineAt(samplesPerCh, channels, rate)
 
-			var buf memWS
+			var buf testutil.WriteSeeker
 			if err := EncodeInterleaved(&buf, Config{SampleRate: rate, Channels: channels, Bitrate: 96000}, pcm); err != nil {
 				t.Fatalf("EncodeInterleaved: %v", err)
 			}
-			got, info, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+			got, info, err := DecodeInterleaved(bytes.NewReader(buf.Bytes()))
 			if err != nil {
 				t.Fatalf("DecodeInterleaved: %v", err)
 			}
@@ -206,7 +162,7 @@ func TestOpusRoundTripInputRates(t *testing.T) {
 // TestOpusRejectsUnsupportedInputRate pins that a rate outside the five Opus source
 // rates is rejected rather than silently mis-framed.
 func TestOpusRejectsUnsupportedInputRate(t *testing.T) {
-	var buf memWS
+	var buf testutil.WriteSeeker
 	if err := EncodeInterleaved(&buf, Config{SampleRate: 44100, Channels: 1}, genSineAt(4410, 1, 44100)); err == nil {
 		t.Fatal("EncodeInterleaved accepted 44100 Hz, want a rejection")
 	}

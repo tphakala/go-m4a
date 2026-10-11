@@ -10,25 +10,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
-
-// requireFFmpegEnv names the variable that, set to any non-empty value, turns a
-// missing ffmpeg from a skip into a failure. CI sets it on the Linux test step,
-// where ffmpeg is installed, so the cross-checks cannot pass there by never
-// running.
-const requireFFmpegEnv = "M4A_REQUIRE_FFMPEG"
-
-func lookFFmpeg(t *testing.T) string {
-	t.Helper()
-	path, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		if os.Getenv(requireFFmpegEnv) != "" {
-			t.Fatalf("ffmpeg not on PATH but %s is set: %v", requireFFmpegEnv, err)
-		}
-		t.Skip("ffmpeg not on PATH")
-	}
-	return path
-}
 
 // runFFmpeg runs ffmpeg with args and returns its stdout.
 func runFFmpeg(t *testing.T, ffmpeg string, args ...string) []byte {
@@ -70,7 +54,7 @@ func (c corpusCase) pcmFormat() (format, codec string) {
 // the start: the first source-length samples are bit-exact for FLAC and aligned
 // at lag 0 for the lossy codecs.
 func TestFFmpegDecodesOurFiles(t *testing.T) {
-	ffmpeg := lookFFmpeg(t)
+	ffmpeg := testutil.LookTool(t, "ffmpeg")
 	for _, c := range corpus {
 		t.Run(c.name, func(t *testing.T) {
 			ours := runCase(t, c)
@@ -98,7 +82,7 @@ func TestFFmpegDecodesOurFiles(t *testing.T) {
 // media_time, so this does not check the writer's priming value;
 // TestContainerIntegrity does.
 func TestFFmpegRemuxReadsBack(t *testing.T) {
-	ffmpeg := lookFFmpeg(t)
+	ffmpeg := testutil.LookTool(t, "ffmpeg")
 	for _, c := range corpus {
 		t.Run(c.name, func(t *testing.T) {
 			ours := runCase(t, c)

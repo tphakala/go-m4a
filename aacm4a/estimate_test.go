@@ -9,6 +9,8 @@ import (
 
 	aac "github.com/tphakala/go-aac"
 	aacpcm "github.com/tphakala/go-aac/pcm"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // TestEstimateADTSSizeIsClose checks the reservation against what the encoder
@@ -332,7 +334,7 @@ func TestEncodeInterleavedSurvivesHostileConfig(t *testing.T) {
 					t.Fatalf("EncodeInterleaved panicked on %s: %v", tc.name, r)
 				}
 			}()
-			var ws memWriteSeeker
+			var ws testutil.WriteSeeker
 			// Ten seconds of mono s16 by default. The length matters: with a
 			// sub-second clip the seconds factor in the estimate is 0 or 1 and the
 			// multiply that overflowed cannot be exercised at all, which is how the

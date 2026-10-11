@@ -20,6 +20,8 @@
 // (or task integrity:update) and review the diff; -update refuses to write
 // unless every case ran. When ffmpeg is on PATH the tests also cross-check the
 // container against it in both directions; setting M4A_REQUIRE_FFMPEG to any
-// non-empty value turns its absence into a failure, which is how the Linux CI
-// test step keeps those checks from skipping silently.
+// non-empty value turns its absence into a failure. Every ffmpeg and ffprobe
+// interop test in the module honours it through internal/testutil, and CI sets
+// it on the Linux steps that install ffmpeg, so those checks cannot skip
+// silently there.
 package integrity

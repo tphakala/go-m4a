@@ -5,9 +5,9 @@ package m4a
 import (
 	"bytes"
 	"errors"
-	"fmt"
-	"io"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // errInjectedWrite and errInjectedSeek are the sentinels the failing
@@ -23,8 +23,8 @@ var (
 // failure lands on a WriteFrame and the Writer's sticky-error latch can be
 // observed.
 type failWS struct {
-	buf  []byte
-	pos  int64
+	testutil.WriteSeeker
+
 	fail bool
 }
 
@@ -32,45 +32,16 @@ func (f *failWS) Write(p []byte) (int, error) {
 	if f.fail {
 		return 0, errInjectedWrite
 	}
-	end := f.pos + int64(len(p))
-	if end > int64(len(f.buf)) {
-		grown := make([]byte, end)
-		copy(grown, f.buf)
-		f.buf = grown
-	}
-	copy(f.buf[f.pos:end], p)
-	f.pos = end
-	return len(p), nil
-}
-
-func (f *failWS) Seek(offset int64, whence int) (int64, error) {
-	abs, err := seekAbs(f.pos, int64(len(f.buf)), offset, whence)
-	if err != nil {
-		return 0, err
-	}
-	f.pos = abs
-	return abs, nil
+	return f.WriteSeeker.Write(p)
 }
 
 // seekFailWS is an in-memory io.WriteSeeker whose next Seek fails once when
 // failNextSeek is set, letting a test drive a transient Close failure and then a
 // successful retry.
 type seekFailWS struct {
-	buf          []byte
-	pos          int64
-	failNextSeek bool
-}
+	testutil.WriteSeeker
 
-func (s *seekFailWS) Write(p []byte) (int, error) {
-	end := s.pos + int64(len(p))
-	if end > int64(len(s.buf)) {
-		grown := make([]byte, end)
-		copy(grown, s.buf)
-		s.buf = grown
-	}
-	copy(s.buf[s.pos:end], p)
-	s.pos = end
-	return len(p), nil
+	failNextSeek bool
 }
 
 func (s *seekFailWS) Seek(offset int64, whence int) (int64, error) {
@@ -78,32 +49,7 @@ func (s *seekFailWS) Seek(offset int64, whence int) (int64, error) {
 		s.failNextSeek = false
 		return 0, errInjectedSeek
 	}
-	abs, err := seekAbs(s.pos, int64(len(s.buf)), offset, whence)
-	if err != nil {
-		return 0, err
-	}
-	s.pos = abs
-	return abs, nil
-}
-
-// seekAbs resolves a Seek target against the current position and length, the
-// shared arithmetic behind the two failing writers' Seek methods.
-func seekAbs(pos, length, offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = pos + offset
-	case io.SeekEnd:
-		abs = length + offset
-	default:
-		return 0, fmt.Errorf("bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("negative position %d", abs)
-	}
-	return abs, nil
+	return s.WriteSeeker.Seek(offset, whence)
 }
 
 // TestWriterStickyError proves the Writer latches a failed frame write: once a
@@ -184,7 +130,7 @@ func TestWriterCloseSeekRetry(t *testing.T) {
 		t.Fatalf("Close retry: %v", err)
 	}
 
-	r, err := NewReader(bytes.NewReader(s.buf))
+	r, err := NewReader(bytes.NewReader(s.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader on the retried file: %v", err)
 	}
@@ -256,7 +202,7 @@ func TestWriterBrandOverride(t *testing.T) {
 // TestWriterBrandWrongLength confirms a brand that is not exactly four bytes is
 // rejected by NewWriter.
 func TestWriterBrandWrongLength(t *testing.T) {
-	_, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, Brand: "qt"})
+	_, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, Brand: "qt"})
 	if err == nil {
 		t.Fatal("NewWriter accepted a 2-byte brand, want error")
 	}
@@ -289,7 +235,7 @@ func TestValidateConfigBranches(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewWriter(&memWS{}, tc.cfg); err == nil {
+			if _, err := NewWriter(&testutil.WriteSeeker{}, tc.cfg); err == nil {
 				t.Fatal("NewWriter succeeded, want a validation error")
 			}
 		})

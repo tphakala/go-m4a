@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // The SetSTREAMINFO tests pin the contract that lets a FLAC encoder stream every
@@ -15,7 +17,7 @@ import (
 
 // newDeferredFLACWriter creates a CodecFLAC writer with an empty (deferred)
 // STREAMINFO and writes one frame, the minimal state for exercising SetSTREAMINFO.
-func newDeferredFLACWriter(t *testing.T, ws *memWS) *Writer {
+func newDeferredFLACWriter(t *testing.T, ws *testutil.WriteSeeker) *Writer {
 	t.Helper()
 	w, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, EncoderDelay: NoEdit})
 	if err != nil {
@@ -28,9 +30,9 @@ func newDeferredFLACWriter(t *testing.T, ws *memWS) *Writer {
 }
 
 // readCodecConfig closes ws-backed output and returns the read-back CodecConfig.
-func readCodecConfig(t *testing.T, ws *memWS) []byte {
+func readCodecConfig(t *testing.T, ws *testutil.WriteSeeker) []byte {
 	t.Helper()
-	r, err := NewReader(bytes.NewReader(ws.buf))
+	r, err := NewReader(bytes.NewReader(ws.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -42,7 +44,7 @@ func readCodecConfig(t *testing.T, ws *memWS) []byte {
 func TestFLACStreamInfoLateSetRoundTrips(t *testing.T) {
 	t.Parallel()
 	si := flacStreamInfo(44100, 1)
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w := newDeferredFLACWriter(t, ws)
 	if err := w.SetSTREAMINFO(si); err != nil {
 		t.Fatalf("SetSTREAMINFO: %v", err)
@@ -66,7 +68,7 @@ func TestFLACStreamInfoLateSetOverwrites(t *testing.T) {
 	// observable.
 	late := flacStreamInfo(44100, 1)
 	late[20] = 0xAB
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: early, EncoderDelay: NoEdit})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -91,7 +93,7 @@ func TestFLACStreamInfoCopiesBytes(t *testing.T) {
 	t.Parallel()
 	si := flacStreamInfo(44100, 1)
 	want := bytes.Clone(si)
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w := newDeferredFLACWriter(t, ws)
 	if err := w.SetSTREAMINFO(si); err != nil {
 		t.Fatalf("SetSTREAMINFO: %v", err)
@@ -111,7 +113,7 @@ func TestFLACStreamInfoCopiesBytes(t *testing.T) {
 // track never got SetSTREAMINFO, rather than writing a malformed dfLa.
 func TestFLACCloseWithoutStreamInfo(t *testing.T) {
 	t.Parallel()
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w := newDeferredFLACWriter(t, ws)
 	err := w.Close()
 	if err == nil {
@@ -130,7 +132,7 @@ func TestFLACSetStreamInfoRejects(t *testing.T) {
 	t.Run("after close returns ErrClosed", func(t *testing.T) {
 		t.Parallel()
 		si := flacStreamInfo(48000, 2)
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 48000, Channels: 2, STREAMINFO: si, EncoderDelay: NoEdit})
 		if err != nil {
 			t.Fatalf("NewWriter: %v", err)
@@ -148,7 +150,7 @@ func TestFLACSetStreamInfoRejects(t *testing.T) {
 
 	t.Run("non-FLAC writer is rejected", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w, err := NewWriter(ws, WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1})
 		if err != nil {
 			t.Fatalf("NewWriter (Opus): %v", err)
@@ -160,7 +162,7 @@ func TestFLACSetStreamInfoRejects(t *testing.T) {
 
 	t.Run("wrong length is rejected", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws)
 		if err := w.SetSTREAMINFO(make([]byte, 20)); err == nil {
 			t.Error("SetSTREAMINFO with 20 bytes returned nil, want an error")
@@ -177,7 +179,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("SetSTREAMINFO rejects a sample-rate mismatch", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
 		err := w.SetSTREAMINFO(flacStreamInfo(48000, 1))
 		if err == nil || !strings.Contains(err.Error(), "sample rate") {
@@ -187,7 +189,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("SetSTREAMINFO rejects a channel mismatch", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
 		err := w.SetSTREAMINFO(flacStreamInfo(44100, 2))
 		if err == nil || !strings.Contains(err.Error(), "channel") {
@@ -197,7 +199,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("SetSTREAMINFO accepts an all-zero placeholder", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws)
 		// A rate-0 block carries no rate to check, so it passes: this is what the
 		// streaming path writes before the finalized block arrives.
@@ -208,7 +210,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("SetSTREAMINFO rejects a non-placeholder zero-rate block", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws) // configured 44100 Hz / 1 ch
 		// Only the all-zero block is the accepted placeholder. A block whose sample
 		// rate is 0 but which carries other data (here the channel field) is malformed
@@ -221,7 +223,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("SetSTREAMINFO accepts a matching block", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		w := newDeferredFLACWriter(t, ws)
 		if err := w.SetSTREAMINFO(flacStreamInfo(44100, 1)); err != nil {
 			t.Errorf("SetSTREAMINFO(44100/1) = %v, want nil", err)
@@ -230,7 +232,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("NewWriter rejects a mismatched initial STREAMINFO", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		_, err := NewWriter(ws, WriterConfig{Codec: CodecFLAC, SampleRate: 44100, Channels: 1, STREAMINFO: flacStreamInfo(48000, 1), EncoderDelay: NoEdit})
 		if err == nil || !strings.Contains(err.Error(), "sample rate") {
 			t.Errorf("NewWriter with mismatched STREAMINFO error = %v, want a sample-rate mismatch", err)
@@ -239,7 +241,7 @@ func TestFLACStreamInfoValidation(t *testing.T) {
 
 	t.Run("NewWriter accepts a matching multichannel STREAMINFO at the 8-channel boundary", func(t *testing.T) {
 		t.Parallel()
-		ws := &memWS{}
+		ws := &testutil.WriteSeeker{}
 		// 8 is the exact accepted FLAC boundary (maxFLACChannels); exercise it through
 		// validateFLACConfig so an off-by-one (> vs >=) regression is caught here, not
 		// only in the flacm4a bridge.

@@ -4,39 +4,12 @@ package opusm4a
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
-
-// mdatPayloadRange returns the byte range of the mdat payload (the raw access
-// units) in an Opus .mp4 buffer, walking the top-level box headers rather than
-// scanning for "mdat", which could match arbitrary packet bytes.
-func mdatPayloadRange(tb testing.TB, buf []byte) (start, end int) {
-	tb.Helper()
-	for off := 0; off+8 <= len(buf); {
-		size := int(binary.BigEndian.Uint32(buf[off:]))
-		hdr := 8
-		if size == 1 {
-			if off+16 > len(buf) {
-				tb.Fatalf("truncated largesize header at %d", off)
-			}
-			size = int(binary.BigEndian.Uint64(buf[off+8:]))
-			hdr = 16
-		}
-		if size < hdr || off+size > len(buf) {
-			tb.Fatalf("box at %d has bad size %d", off, size)
-		}
-		if string(buf[off+4:off+8]) == "mdat" {
-			return off + hdr, off + size
-		}
-		off += size
-	}
-	tb.Fatal("no mdat box in encoded buffer")
-	return 0, 0
-}
 
 // TestDecodeCorruptPacketIsErrCorrupt is the deterministic guard for the decode
 // error contract (#32): a container the demuxer accepts but whose Opus payload the
@@ -50,13 +23,13 @@ func mdatPayloadRange(tb testing.TB, buf []byte) (start, end int) {
 // exactly the path the production wrap covers.
 func TestDecodeCorruptPacketIsErrCorrupt(t *testing.T) {
 	pcm := genSine(48000, 1) // one second, mono
-	var buf memWS
+	var buf testutil.WriteSeeker
 	cfg := Config{SampleRate: 48000, Channels: 1, Bitrate: 96000}
 	if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	data := buf.buf
-	start, end := mdatPayloadRange(t, data)
+	data := buf.Bytes()
+	start, end := testutil.MDATPayload(t, data)
 	if start+2 > end {
 		t.Fatalf("mdat payload too short to corrupt: [%d,%d)", start, end)
 	}

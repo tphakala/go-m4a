@@ -5,6 +5,8 @@ package flacm4a
 import (
 	"bytes"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // benchClip is a 15-second 48 kHz clip, the shape BirdNET-Go exports.
@@ -36,11 +38,11 @@ func BenchmarkEncodeInterleaved(b *testing.B) {
 			cfg := Config{SampleRate: benchRate, Channels: tc.channels, BitDepth: 16, CompressionLevel: 5}
 
 			// Hoist the sink and warm it up to the final file size, the same shape
-			// aacm4a's benchmarks use. memWS.Write reallocates on every extending
-			// write, so a fresh sink per iteration puts its own O(N^2) growth
+			// aacm4a's benchmarks use. testutil.WriteSeeker.Write reallocates on every
+			// extending write, so a fresh sink per iteration puts its own O(N^2) growth
 			// inside the measured region, where it accounted for over 90% of the
 			// reported B/op and buried the bridge's own allocations entirely.
-			w := &memWS{}
+			w := &testutil.WriteSeeker{}
 			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 				b.Fatalf("warm-up encode: %v", err)
 			}
@@ -48,7 +50,7 @@ func BenchmarkEncodeInterleaved(b *testing.B) {
 			b.SetBytes(int64(len(pcm)))
 			b.ReportAllocs()
 			for b.Loop() {
-				w.pos = 0
+				w.Rewind()
 				if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 					b.Fatalf("encode: %v", err)
 				}
@@ -62,11 +64,11 @@ func BenchmarkDecodeInterleaved(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			pcm := genS16(benchSamplesCh, tc.channels)
 			cfg := Config{SampleRate: benchRate, Channels: tc.channels, BitDepth: 16, CompressionLevel: 5}
-			w := &memWS{}
+			w := &testutil.WriteSeeker{}
 			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 				b.Fatalf("encode: %v", err)
 			}
-			enc := w.buf
+			enc := w.Bytes()
 
 			b.SetBytes(int64(len(pcm)))
 			b.ReportAllocs()
@@ -101,13 +103,13 @@ func TestEncodeInterleavedAllocations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pcm := genS16(benchSamplesCh, tc.channels)
 			cfg := Config{SampleRate: benchRate, Channels: tc.channels, BitDepth: 16, CompressionLevel: 5}
-			w := &memWS{}
+			w := &testutil.WriteSeeker{}
 			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 				t.Fatalf("warm-up encode: %v", err)
 			}
 
 			allocs := testing.AllocsPerRun(10, func() {
-				w.pos = 0
+				w.Rewind()
 				if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 					t.Fatalf("encode: %v", err)
 				}
@@ -135,11 +137,11 @@ const longFormSamplesCh = benchRate * 420 // 7 minutes
 func BenchmarkDecodeInterleavedLongForm(b *testing.B) {
 	pcm := genS16(longFormSamplesCh, 2)
 	cfg := Config{SampleRate: benchRate, Channels: 2, BitDepth: 16, CompressionLevel: 5}
-	w := &memWS{}
+	w := &testutil.WriteSeeker{}
 	if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 		b.Fatalf("encode: %v", err)
 	}
-	enc := w.buf
+	enc := w.Bytes()
 
 	b.SetBytes(int64(len(pcm)))
 	b.ReportAllocs()
@@ -158,11 +160,11 @@ func BenchmarkDecodeInterleavedLongForm(b *testing.B) {
 func BenchmarkDecodeInterleavedUnknownLength(b *testing.B) {
 	pcm := genS16(benchSamplesCh, 2)
 	cfg := Config{SampleRate: benchRate, Channels: 2, BitDepth: 16, CompressionLevel: 5}
-	w := &memWS{}
+	w := &testutil.WriteSeeker{}
 	if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 		b.Fatalf("encode: %v", err)
 	}
-	enc := w.buf
+	enc := w.Bytes()
 	clearTotalSamples(b, enc, benchSamplesCh)
 
 	b.SetBytes(int64(len(pcm)))

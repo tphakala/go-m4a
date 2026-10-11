@@ -11,6 +11,7 @@ import (
 
 	m4a "github.com/tphakala/go-m4a"
 	"github.com/tphakala/go-m4a/internal/reservation"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // encodeClip encodes a sine to an Opus .mp4 and returns the file bytes together
@@ -19,16 +20,16 @@ import (
 // input length.
 func encodeClip(t *testing.T, samplesPerCh, channels int) (file, decoded []byte) {
 	t.Helper()
-	var buf memWS
+	var buf testutil.WriteSeeker
 	cfg := Config{SampleRate: 48000, Channels: channels, Bitrate: 96000}
 	if err := EncodeInterleaved(&buf, cfg, genSine(samplesPerCh, channels)); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	pcm, _, err := DecodeInterleavedLimit(bytes.NewReader(buf.buf), 0)
+	pcm, _, err := DecodeInterleavedLimit(bytes.NewReader(buf.Bytes()), 0)
 	if err != nil {
 		t.Fatalf("DecodeInterleavedLimit(0): %v", err)
 	}
-	return buf.buf, pcm
+	return buf.Bytes(), pcm
 }
 
 // muxPackets writes the given Opus packets into an .mp4 as one access unit each,
@@ -37,7 +38,7 @@ func encodeClip(t *testing.T, samplesPerCh, channels int) (file, decoded []byte)
 // hand.
 func muxPackets(t *testing.T, channels, dur int, packets [][]byte) []byte {
 	t.Helper()
-	var buf memWS
+	var buf testutil.WriteSeeker
 	wr, err := m4a.NewWriter(&buf, m4a.WriterConfig{Codec: m4a.CodecOpus, SampleRate: 48000, Channels: channels})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -50,7 +51,7 @@ func muxPackets(t *testing.T, channels, dur int, packets [][]byte) []byte {
 	if err := wr.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	return buf.buf
+	return buf.Bytes()
 }
 
 func TestDecodeInterleavedLimitRejectsOversizedDecode(t *testing.T) {

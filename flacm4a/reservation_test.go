@@ -13,6 +13,7 @@ import (
 	flacpcm "github.com/tphakala/go-flac/pcm"
 
 	"github.com/tphakala/go-m4a/internal/reservation"
+	"github.com/tphakala/go-m4a/internal/testutil"
 
 	m4a "github.com/tphakala/go-m4a"
 )
@@ -132,11 +133,11 @@ func TestPCMReservationExact(t *testing.T) {
 				t.Parallel()
 				pcm := genPCM(t, 10000, channels, bitDepth)
 				cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: bitDepth, CompressionLevel: 5}
-				w := &memWS{}
+				w := &testutil.WriteSeeker{}
 				if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 					t.Fatalf("encode: %v", err)
 				}
-				out, _, err := DecodeInterleaved(bytes.NewReader(w.buf))
+				out, _, err := DecodeInterleaved(bytes.NewReader(w.Bytes()))
 				if err != nil {
 					t.Fatalf("decode: %v", err)
 				}
@@ -190,11 +191,11 @@ func inflateDeclaredLength(t *testing.T, enc []byte) {
 func TestDecodeDoesNotAmplifyOverdeclaredLength(t *testing.T) {
 	pcm := genS16(1000, 1)
 	cfg := Config{SampleRate: 48000, Channels: 1, BitDepth: 16, CompressionLevel: 5}
-	w := &memWS{}
+	w := &testutil.WriteSeeker{}
 	if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	enc := w.buf
+	enc := w.Bytes()
 	inflateDeclaredLength(t, enc)
 
 	// Assert the precondition. inflateDeclaredLength locates the box by scanning

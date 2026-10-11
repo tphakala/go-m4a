@@ -120,6 +120,14 @@ linters:
               desc: "use the standard cmp package or a local constraint"
             - pkg: "math/rand$"
               desc: "use math/rand/v2 (or crypto/rand for secrets)"
+        # internal/testutil imports testing; it is for _test.go files only.
+        testutil:
+          list-mode: lax
+          files:
+            - "!$test"
+          deny:
+            - pkg: "github.com/tphakala/go-m4a/internal/testutil"
+              desc: "test-only helpers that import testing; use them from _test.go files only"
     dupl:
       threshold: 120
     errcheck:

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // ascFor builds an AAC-LC AudioSpecificConfig for the given rate and channel
@@ -111,7 +113,7 @@ func TestAcceptedSampleRates(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NewWriter(&memWS{}, tc.cfg)
+			_, err := NewWriter(&testutil.WriteSeeker{}, tc.cfg)
 			switch {
 			case tc.accept && err != nil:
 				t.Errorf("NewWriter(%d Hz) = %v, want it accepted", tc.cfg.SampleRate, err)
@@ -179,7 +181,7 @@ func TestRoundTripFLACOffTableRate(t *testing.T) {
 
 	// FLAC access units carry their own block size, so the writer wants the
 	// duration per frame rather than inferring one.
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, cfg)
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -193,7 +195,7 @@ func TestRoundTripFLACOffTableRate(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	r, err := NewReader(bytes.NewReader(ws.buf))
+	r, err := NewReader(bytes.NewReader(ws.Bytes()))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
@@ -223,7 +225,7 @@ func TestRoundTripFLACHighRate(t *testing.T) {
 			t.Parallel()
 			const channels = 2
 			cfg := WriterConfig{Codec: CodecFLAC, SampleRate: rate, Channels: channels, STREAMINFO: flacStreamInfo(rate, channels), EncoderDelay: NoEdit}
-			ws := &memWS{}
+			ws := &testutil.WriteSeeker{}
 			w, err := NewWriter(ws, cfg)
 			if err != nil {
 				t.Fatalf("NewWriter(%d Hz): %v", rate, err)
@@ -237,7 +239,7 @@ func TestRoundTripFLACHighRate(t *testing.T) {
 				t.Fatalf("Close: %v", err)
 			}
 
-			r, err := NewReader(bytes.NewReader(ws.buf))
+			r, err := NewReader(bytes.NewReader(ws.Bytes()))
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
@@ -249,11 +251,11 @@ func TestRoundTripFLACHighRate(t *testing.T) {
 			// overflowed field. Layout after the type FourCC: 6 reserved, 2
 			// data_reference_index, 8 reserved, 2 channelcount, 2 samplesize, 2
 			// pre_defined, 2 reserved, so the 16.16 samplerate starts 28 bytes in.
-			i := bytes.Index(ws.buf, []byte("fLaC"))
+			i := bytes.Index(ws.Bytes(), []byte("fLaC"))
 			if i < 0 {
 				t.Fatal("no fLaC sample entry in the written file")
 			}
-			field := binary.BigEndian.Uint32(ws.buf[i+28 : i+32])
+			field := binary.BigEndian.Uint32(ws.Bytes()[i+28 : i+32])
 			if hint := int(field >> 16); hint != tc.wantHint {
 				t.Errorf("fLaC sample-entry rate hint = %d (raw %#08x), want the reduced %d", hint, field, tc.wantHint)
 			}
@@ -305,7 +307,7 @@ func TestSampleEntryCarriesTheRate(t *testing.T) {
 // they cannot fix.
 func TestOffTableRateReportsTheRateNotTheASC(t *testing.T) {
 	t.Parallel()
-	_, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 47999, Channels: 1, ASC: ascMono48k})
+	_, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 47999, Channels: 1, ASC: ascMono48k})
 	if err == nil {
 		t.Fatal("NewWriter accepted 47999 Hz, which is not an AAC table rate")
 	}

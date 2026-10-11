@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math"
 	"os"
@@ -18,48 +17,10 @@ import (
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 
+	"github.com/tphakala/go-m4a/internal/testutil"
+
 	m4a "github.com/tphakala/go-m4a"
 )
-
-// memWriteSeeker is an in-memory io.WriteSeeker: it grows a byte slice on write
-// and supports seeking anywhere, exactly what the Writer needs to patch the mdat
-// size and append moov. The round-trip tests encode into it and then decode the
-// captured bytes through a bytes.Reader.
-type memWriteSeeker struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWriteSeeker) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		grown := make([]byte, end)
-		copy(grown, m.buf)
-		m.buf = grown
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWriteSeeker) Seek(offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = int64(len(m.buf)) + offset
-	default:
-		return 0, fmt.Errorf("memWriteSeeker: bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("memWriteSeeker: negative position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
-}
 
 // chirpS16 synthesizes samplesPerChannel of a linear-frequency chirp per channel
 // as interleaved little-endian S16. Each channel sweeps a distinct frequency band
@@ -86,51 +47,15 @@ func chirpS16(samplesPerChannel, channels, sampleRate int) []byte {
 	return pcm
 }
 
-// deinterleaveCh0 pulls channel 0 out of an interleaved S16 byte buffer as
-// float64 samples, taking at most samplesPerChannel of them.
-func deinterleaveCh0(pcm []byte, channels, samplesPerChannel int) []float64 {
-	out := make([]float64, 0, samplesPerChannel)
-	stride := channels * 2
-	for n := range samplesPerChannel {
-		off := n * stride
-		if off+2 > len(pcm) {
-			break
-		}
-		out = append(out, float64(int16(binary.LittleEndian.Uint16(pcm[off:]))))
-	}
-	return out
-}
-
-// normXCorr is the normalized cross-correlation of a against b at the given lag,
-// aligning a[n] with b[n+lag]. The result is in [-1, 1] and is invariant to a
-// constant amplitude scale, which is what makes it a clean alignment probe for a
-// lossy codec that need not preserve absolute level.
-func normXCorr(a, b []float64, lag int) float64 {
-	var dot, na, nb float64
-	for n := range a {
-		m := n + lag
-		if m < 0 || m >= len(b) {
-			continue
-		}
-		dot += a[n] * b[m]
-		na += a[n] * a[n]
-		nb += b[m] * b[m]
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / math.Sqrt(na*nb)
-}
-
 // encodeToBytes runs EncodeInterleaved into an in-memory writer and returns the
 // captured .m4a bytes, failing the test on any encode error.
 func encodeToBytes(t *testing.T, cfg aacpcm.Config, pcm []byte) []byte {
 	t.Helper()
-	var ws memWriteSeeker
+	var ws testutil.WriteSeeker
 	if err := EncodeInterleaved(&ws, cfg, pcm); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 func TestRoundTripGapless(t *testing.T) {
@@ -178,15 +103,18 @@ func TestRoundTripGapless(t *testing.T) {
 			}
 			body := decoded.Bytes()[trim:]
 
-			decCh0 := deinterleaveCh0(body, tc.cfg.Channels, tc.samplesPerChannel)
+			decCh0 := testutil.ChannelS16(body, tc.cfg.Channels, 0)
 			if len(decCh0) < tc.samplesPerChannel {
 				t.Fatalf("decoded channel 0 has %d samples, need %d", len(decCh0), tc.samplesPerChannel)
 			}
-			srcCh0 := deinterleaveCh0(src, tc.cfg.Channels, tc.samplesPerChannel)
+			// Correlate over exactly the source length: NormXCorr bounds b by len(b),
+			// so extra decoded tail samples would add terms at positive lags.
+			decCh0 = decCh0[:tc.samplesPerChannel]
+			srcCh0 := testutil.ChannelS16(src, tc.cfg.Channels, 0)
 
 			bestLag, bestCorr := -100, math.Inf(-1)
 			for lag := -4; lag <= 4; lag++ {
-				c := normXCorr(srcCh0, decCh0, lag)
+				c := testutil.NormXCorr(srcCh0, decCh0, lag)
 				if c > bestCorr {
 					bestCorr, bestLag = c, lag
 				}
@@ -285,13 +213,10 @@ func TestInteropDecode(t *testing.T) {
 }
 
 // TestFFprobeValidates encodes a real file and asks ffprobe to demux it, proving
-// the bridge output is valid to a third-party tool. It is skipped when ffprobe is
-// not on PATH.
+// the bridge output is valid to a third-party tool. Without ffprobe on PATH it
+// skips, or fails when M4A_REQUIRE_FFMPEG is set.
 func TestFFprobeValidates(t *testing.T) {
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe not on PATH")
-	}
+	ffprobe := testutil.LookTool(t, "ffprobe")
 
 	cfg := aacpcm.Config{SampleRate: 48000, BitDepth: 16, Channels: 1}
 	src := chirpS16(16000, cfg.Channels, cfg.SampleRate)

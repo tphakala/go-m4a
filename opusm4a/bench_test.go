@@ -5,6 +5,8 @@ package opusm4a
 import (
 	"bytes"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // benchClip is a 15-second 48 kHz clip, the shape BirdNET-Go exports. opusm4a had
@@ -36,9 +38,9 @@ func BenchmarkEncodeInterleaved(b *testing.B) {
 			cfg := Config{SampleRate: benchRate, Channels: tc.channels, Bitrate: 96000}
 
 			// Hoist the sink and warm it up to the final file size, the same shape the
-			// flacm4a and aacm4a benchmarks use, so memWS's own extending-write growth
-			// stays out of the measured region.
-			w := &memWS{}
+			// flacm4a and aacm4a benchmarks use, so testutil.WriteSeeker's own
+			// extending-write growth stays out of the measured region.
+			w := &testutil.WriteSeeker{}
 			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 				b.Fatalf("warm-up encode: %v", err)
 			}
@@ -46,7 +48,7 @@ func BenchmarkEncodeInterleaved(b *testing.B) {
 			b.SetBytes(int64(len(pcm)))
 			b.ReportAllocs()
 			for b.Loop() {
-				w.pos = 0
+				w.Rewind()
 				if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 					b.Fatalf("encode: %v", err)
 				}
@@ -60,11 +62,11 @@ func BenchmarkDecodeInterleaved(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			pcm := genSine(benchSamplesCh, tc.channels)
 			cfg := Config{SampleRate: benchRate, Channels: tc.channels, Bitrate: 96000}
-			w := &memWS{}
+			w := &testutil.WriteSeeker{}
 			if err := EncodeInterleaved(w, cfg, pcm); err != nil {
 				b.Fatalf("encode: %v", err)
 			}
-			enc := w.buf
+			enc := w.Bytes()
 
 			b.SetBytes(int64(len(pcm)))
 			b.ReportAllocs()

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // ascMono48k is a valid AAC-LC AudioSpecificConfig for 48000 Hz mono
@@ -25,45 +27,6 @@ var ascMono48k = []byte{0x11, 0x88}
 // ascStereo44k is a valid AAC-LC AudioSpecificConfig for 44100 Hz stereo
 // (audioObjectType 2, samplingFrequencyIndex 4, channelConfiguration 2).
 var ascStereo44k = []byte{0x12, 0x10}
-
-// memWS is an in-memory io.WriteSeeker backing the pure round-trip tests: it
-// grows a byte slice on write and supports seeking anywhere, exactly what the
-// Writer needs to patch the mdat size and append moov.
-type memWS struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWS) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		grown := make([]byte, end)
-		copy(grown, m.buf)
-		m.buf = grown
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWS) Seek(offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = int64(len(m.buf)) + offset
-	default:
-		return 0, fmt.Errorf("memWS: bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("memWS: negative position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
-}
 
 // synthFrames builds n synthetic access units of deliberately varied sizes so
 // stsz and the mdat largesize exercise nonuniform lengths. The payload bytes are
@@ -81,10 +44,11 @@ func synthFrames(n int) [][]byte {
 	return frames
 }
 
-// writeM4A writes cfg + frames to a fresh memWS and returns the produced bytes.
+// writeM4A writes cfg + frames to a fresh testutil.WriteSeeker and returns the
+// produced bytes.
 func writeM4A(t *testing.T, cfg WriterConfig, frames [][]byte) []byte {
 	t.Helper()
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, cfg)
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -97,7 +61,7 @@ func writeM4A(t *testing.T, cfg WriterConfig, frames [][]byte) []byte {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 // --- minimal box walk for assertions ---
@@ -400,7 +364,7 @@ func TestNewWriterErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewWriter(&memWS{}, tc.cfg); err == nil {
+			if _, err := NewWriter(&testutil.WriteSeeker{}, tc.cfg); err == nil {
 				t.Fatal("NewWriter succeeded, want error")
 			}
 		})
@@ -414,7 +378,7 @@ func TestNewWriterNilWriter(t *testing.T) {
 }
 
 func TestWriteFrameRejectsEmpty(t *testing.T) {
-	w, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
+	w, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
@@ -427,7 +391,7 @@ func TestWriteFrameRejectsEmpty(t *testing.T) {
 }
 
 func TestUseAfterClose(t *testing.T) {
-	w, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
+	w, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
@@ -446,7 +410,7 @@ func TestUseAfterClose(t *testing.T) {
 }
 
 func TestCloseWithoutFrames(t *testing.T) {
-	w, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
+	w, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
@@ -562,10 +526,7 @@ func TestCo64ScaleLargesizePatch(t *testing.T) {
 }
 
 func TestFFprobeInterop(t *testing.T) {
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe not found on PATH")
-	}
+	ffprobe := testutil.LookTool(t, "ffprobe")
 
 	const n = 8
 	frames := synthFrames(n)

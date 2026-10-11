@@ -45,11 +45,15 @@ jobs:
 
       # The interop tests decode this writer's output with a third-party demuxer,
       # which is the only check that a real player agrees with the container we
-      # emit. They skip when ffmpeg is absent, so without an explicit install the
-      # suite would report success having never run them.
+      # emit. They skip when ffmpeg or ffprobe is absent unless M4A_REQUIRE_FFMPEG
+      # is set, so without an explicit install the suite would report success
+      # having never run them. The install step sets the variable for the rest of
+      # the job, so every later test step on Linux fails on a missing tool.
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          echo "M4A_REQUIRE_FFMPEG=1" >> "$GITHUB_ENV"
 
       - name: Download dependencies
         run: go mod download
@@ -64,10 +68,6 @@ jobs:
       # under test.
       - name: Run tests with coverage
         if: matrix.os == 'ubuntu-latest'
-        # ffmpeg is installed on this runner, so the integrity gate's ffmpeg
-        # cross-checks must run here rather than skip.
-        env:
-          M4A_REQUIRE_FFMPEG: "1"
         run: go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
 
       # Coverage is informational (fail_ci_if_error: false), never a gate. The
