@@ -16,14 +16,7 @@ import (
 
 // genSine builds interleaved little-endian 16-bit PCM of a 440 Hz sine at 48 kHz.
 func genSine(samplesPerCh, channels int) []byte {
-	out := make([]byte, 0, samplesPerCh*channels*2)
-	for i := range samplesPerCh {
-		v := int16(math.Round(18000 * math.Sin(2*math.Pi*440*float64(i)/48000)))
-		for range channels {
-			out = binary.LittleEndian.AppendUint16(out, uint16(v))
-		}
-	}
-	return out
+	return genSineAt(samplesPerCh, channels, 48000)
 }
 
 func rms(pcm []byte) float64 {

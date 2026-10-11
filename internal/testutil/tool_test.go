@@ -4,14 +4,12 @@ package testutil
 
 import (
 	"fmt"
-	"runtime"
 	"testing"
 )
 
-// recordTB stands in for the test LookTool is given. Fatalf and Skipf record the
-// outcome and end the goroutine with runtime.Goexit, as the real ones do, so the
-// code after them in LookTool never runs. Every other method panics through the
-// nil embedded TB, which would flag LookTool calling something unexpected.
+// recordTB stands in for the test LookTool is given and records whether it
+// failed or skipped. Every other method panics through the nil embedded TB,
+// which would flag LookTool calling something unexpected.
 type recordTB struct {
 	testing.TB
 
@@ -20,24 +18,13 @@ type recordTB struct {
 
 func (*recordTB) Helper() {}
 
-func (r *recordTB) Fatalf(format string, args ...any) {
-	r.fatal = fmt.Sprintf(format, args...)
-	runtime.Goexit()
-}
+func (r *recordTB) Fatalf(format string, args ...any) { r.fatal = fmt.Sprintf(format, args...) }
 
-func (r *recordTB) Skipf(format string, args ...any) {
-	r.skipped = fmt.Sprintf(format, args...)
-	runtime.Goexit()
-}
+func (r *recordTB) Skipf(format string, args ...any) { r.skipped = fmt.Sprintf(format, args...) }
 
 func runLookTool(name string) *recordTB {
 	rec := &recordTB{}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		LookTool(rec, name)
-	}()
-	<-done
+	LookTool(rec, name)
 	return rec
 }
 
