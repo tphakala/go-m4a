@@ -1039,7 +1039,6 @@ func TestFragmentAddRunStreamLenBound(t *testing.T) {
 			var (
 				sizes            []uint32
 				chunks, perChunk []int64
-				duration         uint64
 				timeRuns         []box.SttsRun
 			)
 			a := &fragAccumulator{
@@ -1048,7 +1047,6 @@ func TestFragmentAddRunStreamLenBound(t *testing.T) {
 				chunks:    &chunks,
 				perChunk:  &perChunk,
 				samples:   &samples,
-				duration:  &duration,
 				timeRuns:  &timeRuns,
 			}
 			tn := box.Trun{SampleCount: tc.sampleCount}

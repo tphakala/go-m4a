@@ -159,6 +159,9 @@ func TestParseSampleTablesRoundTrip(t *testing.T) {
 	if cnt, dur, err := ParseStts(bodyOf(t, AppendStts(nil, 30, 1024))); err != nil || cnt != 30 || dur != 30*1024 {
 		t.Fatalf("ParseStts = %d/%d err=%v", cnt, dur, err)
 	}
+	if _, _, err := ParseStts([]byte{0, 0, 0, 0, 0, 0, 0, 1}); !errors.Is(err, errParse) {
+		t.Fatalf("ParseStts overrun err = %v, want errParse", err)
+	}
 }
 
 func TestParseElstRoundTrip(t *testing.T) {

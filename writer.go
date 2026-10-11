@@ -641,11 +641,7 @@ func (w *Writer) appendStts(dst []byte) []byte {
 	}
 	var runs []box.SttsRun
 	for _, d := range w.durations {
-		if n := len(runs); n > 0 && runs[n-1].Delta == d {
-			runs[n-1].Count++
-			continue
-		}
-		runs = append(runs, box.SttsRun{Count: 1, Delta: d})
+		runs = appendTimeRun(runs, 1, d)
 	}
 	return box.AppendSttsRuns(dst, runs)
 }

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -151,17 +152,11 @@ func TestSeekTimeInteropFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read fixture: %v", err)
 			}
-			r, err := NewReader(bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("NewReader: %v", err)
-			}
+			r := mustReader(t, data)
 			if len(r.timeRuns) != tc.timing {
 				t.Errorf("timing runs = %d, want %d", len(r.timeRuns), tc.timing)
 			}
-			ref, err := NewReader(bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("NewReader: %v", err)
-			}
+			ref := mustReader(t, data)
 			want := drainFrames(t, ref)
 			probes := tc.probes
 			if tc.name == "afconvert_mono48k.m4a" {
@@ -260,10 +255,7 @@ func TestSeekTimeFragmentedMixedDurations(t *testing.T) {
 		{"opus", WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 312}, 312, 6},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := NewReader(bytes.NewReader(buildFragmentedStream(t, tc.cfg, segments)))
-			if err != nil {
-				t.Fatalf("NewReader: %v", err)
-			}
+			r := mustReader(t, buildFragmentedStream(t, tc.cfg, segments))
 			if len(r.timeRuns) != tc.runs {
 				t.Errorf("timing runs = %d, want %d (maximal equal-duration runs)", len(r.timeRuns), tc.runs)
 			}
@@ -286,10 +278,7 @@ func TestSeekTimePrimingBoundary(t *testing.T) {
 		skip   int64
 	}{{1023, 0, 1023}, {1024, 1, 0}, {1025, 1, 1}, {2048, 2, 0}} {
 		data := writeTimed(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, EncoderDelay: tc.delay}, durs)
-		r, err := NewReader(bytes.NewReader(data))
-		if err != nil {
-			t.Fatalf("NewReader: %v", err)
-		}
+		r := mustReader(t, data)
 		s, k, err := r.SeekTime(0)
 		if err != nil || s != tc.sample || k != tc.skip {
 			t.Errorf("delay %d: SeekTime(0) = (%d, %d, %v), want (%d, %d, nil)", tc.delay, s, k, err, tc.sample, tc.skip)
@@ -300,10 +289,7 @@ func TestSeekTimePrimingBoundary(t *testing.T) {
 func TestSeekTimeOutOfRange(t *testing.T) {
 	durs := []uint32{1024, 1024, 1024, 1024, 1024, 1024}
 	data := writeTimed(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, durs)
-	r, err := NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, data)
 	want := drainFrames(t, r)
 	if err := r.SeekSample(3); err != nil {
 		t.Fatalf("SeekSample: %v", err)
@@ -327,10 +313,7 @@ func TestSeekTimeEndExcludesPadding(t *testing.T) {
 	durs := []uint32{1024, 1024, 1024, 1024}
 	const ts = 16000
 	cfg := WriterConfig{SampleRate: ts, Channels: 1, ASC: ascMono16k, EncoderDelay: 100, MediaLength: 3000}
-	r, err := NewReader(bytes.NewReader(writeTimed(t, cfg, durs)))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, writeTimed(t, cfg, durs))
 	// Presented ticks are [0, 3000); media ticks [100, 3100) of 4096.
 	s, k, err := r.SeekTime(tickToDuration(2999, ts))
 	if ws, wk, _ := tickOracle(durs, 3099); err != nil || s != ws || k != wk {
@@ -342,10 +325,7 @@ func TestSeekTimeEndExcludesPadding(t *testing.T) {
 
 	// A MediaLength beyond the media (the Writer accepts it) clamps to the media end.
 	cfg.MediaLength = 100000
-	r, err = NewReader(bytes.NewReader(writeTimed(t, cfg, durs)))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r = mustReader(t, writeTimed(t, cfg, durs))
 	sweepTicks(t, r, durs, ts, 100, 4096)
 }
 
@@ -391,10 +371,7 @@ func TestSeekTimeNoTiming(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			data := writeTimed(t, cfg, durs)
 			tc.patch(t, data)
-			r, err := NewReader(bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("NewReader: %v", err)
-			}
+			r := mustReader(t, data)
 			if err := r.SeekSample(2); err != nil {
 				t.Fatal(err)
 			}
@@ -421,10 +398,7 @@ func TestSeekTimeSkipsZeroDurationUnit(t *testing.T) {
 		}
 		binary.BigEndian.PutUint32(body[8+8+4:], 0) // second run's delta
 	})
-	r, err := NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, data)
 	s, k, err := r.SeekTime(tickToDuration(1024, 16000))
 	if err != nil || s != 2 || k != 0 {
 		t.Fatalf("SeekTime(tick 1024) = (%d, %d, %v), want (2, 0, nil)", s, k, err)
@@ -444,10 +418,7 @@ func TestSeekTimeLeadingEmptyEdit(t *testing.T) {
 		t.Fatalf("elst version %d, test expects 0", body[0])
 	}
 	binary.BigEndian.PutUint32(body[8+4:], 0xFFFFFFFF) // first entry media_time = -1
-	r, err := NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, data)
 	s, k, err := r.SeekTime(0)
 	if !errors.Is(err, ErrUnsupported) || s != 0 || k != 0 {
 		t.Fatalf("SeekTime = (%d, %d, %v), want (0, 0, ErrUnsupported)", s, k, err)
@@ -457,10 +428,7 @@ func TestSeekTimeLeadingEmptyEdit(t *testing.T) {
 func TestSeekTimeIdempotent(t *testing.T) {
 	durs := []uint32{1024, 1024, 512, 1024, 1024}
 	cfg := WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k, EncoderDelay: 100}
-	r, err := NewReader(bytes.NewReader(writeTimed(t, cfg, durs)))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, writeTimed(t, cfg, durs))
 	want := drainFrames(t, r)
 	d := tickToDuration(2000, 16000)
 	ws, wk, _ := tickOracle(durs, 2100)
@@ -493,7 +461,7 @@ func bigTicks(d int64, ts uint32) (*big.Int, bool) {
 	return n, fits
 }
 
-func TestDurationToTicks(t *testing.T) {
+func TestRescaleTicksFromDuration(t *testing.T) {
 	for _, c := range []struct {
 		d  int64
 		ts uint32
@@ -509,13 +477,13 @@ func TestDurationToTicks(t *testing.T) {
 		{1_000_000_000, 44100},
 	} {
 		want, wantOK := bigTicks(c.d, c.ts)
-		got, ok := durationToTicks(time.Duration(c.d), c.ts)
+		got, ok := rescaleTicks(uint64(c.d), uint32(time.Second), c.ts)
 		if ok != wantOK || (ok && got != want.Uint64()) {
-			t.Errorf("durationToTicks(%d, %d) = (%d, %v), want (%v, %v)", c.d, c.ts, got, ok, want, wantOK)
+			t.Errorf("rescaleTicks(%d, 1e9, %d) = (%d, %v), want (%v, %v)", c.d, c.ts, got, ok, want, wantOK)
 		}
 	}
-	if _, ok := durationToTicks(math.MaxInt64, math.MaxUint32); ok {
-		t.Error("durationToTicks(MaxInt64, MaxUint32) = ok, want overflow")
+	if _, ok := rescaleTicks(math.MaxInt64, uint32(time.Second), math.MaxUint32); ok {
+		t.Error("rescaleTicks(MaxInt64, 1e9, MaxUint32) = ok, want overflow")
 	}
 }
 
@@ -577,40 +545,15 @@ func TestAppendTimeRun(t *testing.T) {
 	runs = appendTimeRun(runs, 2, 1024)
 	runs = appendTimeRun(runs, 3, 1024)
 	runs = appendTimeRun(runs, 1, 7)
-	if want := []box.SttsRun{{Count: 5, Delta: 1024}, {Count: 1, Delta: 7}}; !slicesEqualRuns(runs, want) {
+	if want := []box.SttsRun{{Count: 5, Delta: 1024}, {Count: 1, Delta: 7}}; !slices.Equal(runs, want) {
 		t.Fatalf("runs = %+v, want %+v", runs, want)
 	}
 	// Count overflow starts a new run instead of wrapping.
 	o := appendTimeRun(nil, math.MaxUint32, 9)
 	o = appendTimeRun(o, 2, 9)
-	if want := []box.SttsRun{{Count: math.MaxUint32, Delta: 9}, {Count: 2, Delta: 9}}; !slicesEqualRuns(o, want) {
+	if want := []box.SttsRun{{Count: math.MaxUint32, Delta: 9}, {Count: 2, Delta: 9}}; !slices.Equal(o, want) {
 		t.Fatalf("overflow runs = %+v, want %+v", o, want)
 	}
-	// In-place compaction over an aliased slice equals a fresh build.
-	raw := []box.SttsRun{{Count: 1, Delta: 4}, {Count: 0, Delta: 8}, {Count: 2, Delta: 4}, {Count: 1, Delta: 6}, {Count: 1, Delta: 6}}
-	var fresh []box.SttsRun
-	for _, r := range raw {
-		fresh = appendTimeRun(fresh, r.Count, r.Delta)
-	}
-	alias := raw[:0]
-	for _, r := range raw {
-		alias = appendTimeRun(alias, r.Count, r.Delta)
-	}
-	if !slicesEqualRuns(alias, fresh) || len(fresh) != 2 {
-		t.Fatalf("aliased = %+v, fresh = %+v", alias, fresh)
-	}
-}
-
-func slicesEqualRuns(a, b []box.SttsRun) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestSumTicksSaturates(t *testing.T) {
@@ -626,10 +569,7 @@ func TestSumTicksSaturates(t *testing.T) {
 func TestSeekTimeSkipRescalesToSampleRate(t *testing.T) {
 	durs := []uint32{1024, 1024}
 	data := writeTimed(t, WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k, EncoderDelay: NoEdit}, durs)
-	r, err := NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
+	r := mustReader(t, data)
 	d := tickToDuration(1124, 16000) // 100 ticks into unit 1
 	if s, k, err := r.SeekTime(d); err != nil || s != 1 || k != 100 {
 		t.Fatalf("equal rate: SeekTime = (%d, %d, %v), want (1, 100, nil)", s, k, err)

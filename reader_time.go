@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
-	"slices"
 	"time"
 
 	"github.com/tphakala/go-m4a/internal/box"
@@ -51,13 +50,10 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 	if d < 0 {
 		return 0, 0, fmt.Errorf("go-m4a: seek to negative time %v: %w", d, ErrOutOfRange)
 	}
-	if !rd.hasTiming {
-		return 0, 0, fmt.Errorf("go-m4a: track has no sample timing: %w", ErrUnsupported)
+	if rd.seekTimeErr != nil {
+		return 0, 0, rd.seekTimeErr
 	}
-	if rd.leadingEmptyEdit {
-		return 0, 0, fmt.Errorf("go-m4a: time seek with a leading empty edit is unsupported: %w", ErrUnsupported)
-	}
-	ticks, ok := durationToTicks(d, rd.timescale)
+	ticks, ok := rescaleTicks(uint64(d), uint32(time.Second), rd.timescale)
 	if !ok {
 		return 0, 0, fmt.Errorf("go-m4a: seek time %v overflows the media timescale: %w", d, ErrOutOfRange)
 	}
@@ -84,8 +80,8 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 }
 
 // setTiming stores the run-length timing table and the values SeekTime needs
-// beside it: the media timescale, the presented end in media ticks and the
-// empty-edit flag. It is shared by the plain and fragmented paths so they cannot
+// beside it: the media timescale, the presented end in media ticks and, when the
+// track cannot be time-sought, the error SeekTime returns. It is shared by the plain and fragmented paths so they cannot
 // drift. The retained state is at most one 8-byte run per distinct stretch of
 // equal durations: bounded by the stts entries (inside the capped moov) on the
 // plain path and by the sample count on the fragmented path, never an array of
@@ -95,14 +91,15 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 // (rescaled from the movie to the media timescale) when the edit list has a
 // positive segment_duration; a zero segment_duration is open-ended.
 func (rd *Reader) setTiming(tr *track, movieTS uint32, runs []box.SttsRun) {
-	if cap(runs) > 2*len(runs) {
-		runs = slices.Clone(runs)
-	}
 	rd.timeRuns = runs
 	rd.timescale = tr.mdhdTS
-	rd.leadingEmptyEdit = tr.hasElst && tr.elstMedia < 0
 	mediaEnd := sumTicks(runs)
-	rd.hasTiming = tr.mdhdTS > 0 && mediaEnd > 0
+	switch {
+	case tr.mdhdTS == 0 || mediaEnd == 0:
+		rd.seekTimeErr = fmt.Errorf("go-m4a: track has no sample timing: %w", ErrUnsupported)
+	case tr.hasElst && tr.elstMedia < 0:
+		rd.seekTimeErr = fmt.Errorf("go-m4a: time seek with a leading empty edit is unsupported: %w", ErrUnsupported)
+	}
 	end := mediaEnd
 	if tr.hasElst && tr.elstMedia >= 0 && tr.elstSeg > 0 && movieTS > 0 {
 		if seg, ok := rescaleTicks(tr.elstSeg, movieTS, tr.mdhdTS); ok {
@@ -116,9 +113,7 @@ func (rd *Reader) setTiming(tr *track, movieTS uint32, runs []box.SttsRun) {
 
 // appendTimeRun appends count samples of the given duration to runs, dropping an
 // empty run, merging into the previous run when the duration is equal and
-// starting a new one instead of letting its Count pass MaxUint32. It writes only
-// at or before the end of runs, so it may compact a slice in place while reading
-// from it (runs = raw[:0]).
+// starting a new one instead of letting its Count pass MaxUint32.
 func appendTimeRun(runs []box.SttsRun, count, delta uint32) []box.SttsRun {
 	if count == 0 {
 		return runs
@@ -147,25 +142,6 @@ func sumTicks(runs []box.SttsRun) uint64 {
 		}
 	}
 	return sum
-}
-
-// durationToTicks converts d (>= 0) to media ticks at ts ticks per second,
-// rounding to nearest with halves up. ok is false when the result does not fit
-// uint64. The 128-bit product d*ts + 5e8 divided by 1e9 is exact; Div64 panics
-// unless hi < 1e9, which is the overflow test.
-func durationToTicks(d time.Duration, ts uint32) (ticks uint64, ok bool) {
-	if d < 0 {
-		return 0, false
-	}
-	hi, lo := bits.Mul64(uint64(d), uint64(ts))
-	var carry uint64
-	lo, carry = bits.Add64(lo, uint64(time.Second/2), 0)
-	hi += carry // hi < 2^31, so this cannot wrap
-	if hi >= uint64(time.Second) {
-		return 0, false
-	}
-	ticks, _ = bits.Div64(hi, lo, uint64(time.Second))
-	return ticks, true
 }
 
 // rescaleTicks converts v from a timescale of from ticks per second to one of to,

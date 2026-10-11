@@ -91,13 +91,12 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 // consumes, modeling each trun run as one contiguous chunk. It reuses the plain
 // path's validateOffsets to confirm every access unit lies within the stream, and
 // sets Info.Duration from the summed sample durations at the media timescale. It
-// also returns the sample durations in run-length form for setTiming.
+// also returns those durations in run-length form for setTiming.
 func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) ([]box.SttsRun, error) {
 	var (
 		sizes        []uint32
 		timeRuns     []box.SttsRun
 		totalSamples int64
-		totalDur     uint64
 	)
 	// One chunk per movie fragment is the common CMAF layout, so size to the
 	// fragment count; a fragment carrying several trun runs or none makes this an
@@ -112,7 +111,6 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 		chunks:    &chunkOffsets,
 		perChunk:  &perChunk,
 		samples:   &totalSamples,
-		duration:  &totalDur,
 		timeRuns:  &timeRuns,
 	}
 
@@ -193,7 +191,7 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	// The init segment's durations are all zero, so presentationDuration reported
 	// zero; the real presentation length is the sum of the fragments' sample
 	// durations at the media timescale.
-	if tr.mdhdTS > 0 && totalDur > 0 {
+	if totalDur := sumTicks(timeRuns); tr.mdhdTS > 0 && totalDur > 0 {
 		rd.info.Duration = ticksToDuration(totalDur, tr.mdhdTS)
 	}
 	return timeRuns, nil
@@ -212,7 +210,6 @@ type fragAccumulator struct {
 	chunks   *[]int64
 	perChunk *[]int64
 	samples  *int64
-	duration *uint64
 	timeRuns *[]box.SttsRun
 }
 
@@ -409,9 +406,13 @@ func (a *fragAccumulator) addRun(tn *box.Trun, base, dataCursor int64, tfhd box.
 		}
 		*a.sizes = append(*a.sizes, size)
 		runBytes += int64(size)
-		dur := resolveSampleDuration(tn, i, tfhd, a.trex)
-		*a.duration += uint64(dur)
-		*a.timeRuns = appendTimeRun(*a.timeRuns, 1, dur)
+		if tn.HasSampleDuration {
+			*a.timeRuns = appendTimeRun(*a.timeRuns, 1, tn.SampleDuration(i))
+		}
+	}
+	if !tn.HasSampleDuration {
+		// Every sample takes the tfhd or trex default, so the run is one entry.
+		*a.timeRuns = appendTimeRun(*a.timeRuns, tn.SampleCount, resolveSampleDuration(tn, 0, tfhd, a.trex))
 	}
 	*a.samples += int64(tn.SampleCount)
 	return runStart + runBytes, nil
