@@ -123,8 +123,26 @@ func FuzzParseStts(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		defer noPanic(t, payload)
-		if _, _, err := ParseStts(payload); err != nil {
+		count, dur, err := ParseStts(payload)
+		runs, rerr := ParseSttsRuns(payload)
+		if (err == nil) != (rerr == nil) {
+			t.Fatalf("ParseStts err=%v, ParseSttsRuns err=%v: must agree", err, rerr)
+		}
+		if err != nil {
 			mustParseSentinel(t, err)
+			mustParseSentinel(t, rerr)
+			return
+		}
+		if int64(len(runs)) != int64(binary.BigEndian.Uint32(payload[4:])) {
+			t.Fatalf("got %d runs, header declares %d", len(runs), binary.BigEndian.Uint32(payload[4:]))
+		}
+		var c, d uint64
+		for _, r := range runs {
+			c += uint64(r.Count)
+			d += uint64(r.Count) * uint64(r.Delta)
+		}
+		if c != count || d != dur {
+			t.Fatalf("runs sum to %d/%d, ParseStts says %d/%d", c, d, count, dur)
 		}
 	})
 }

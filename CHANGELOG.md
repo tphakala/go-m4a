@@ -10,8 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `Reader.SeekSample` positions the reader at any access unit without reading the ones before it, for plain and fragmented input. It does no I/O itself, so a jump costs one seek on the next read. An index outside the track returns the new `ErrOutOfRange` sentinel.
 
+- `Reader.SeekTime` seeks to a presentation time instead of a sample index. It maps the time (measured from the end of the encoder priming, `Info.EncoderDelay`) to the access unit that holds it using timing the reader now keeps from `stts` or the fragment `trun` durations, moves the cursor there, and returns the number of decoded samples per channel to drop from that unit. A time outside the presented range returns `ErrOutOfRange` with the cursor unchanged; a track with no sample timing, or whose edit list opens with an empty edit, returns `ErrUnsupported`.
+
 ### Changed
 
+- The `ErrOutOfRange` message is now "go-m4a: seek position out of range", since it covers a seek time as well as a sample index.
 - The minimum Go version is now 1.27.
 
 Releases up to and including v0.5.0 predate this file; see the [GitHub releases](https://github.com/tphakala/go-m4a/releases) and the git tags for their history.

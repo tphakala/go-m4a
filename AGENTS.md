@@ -40,9 +40,9 @@ A change that violates one of these is wrong even if tests pass.
 3. **Parsers are total and size-capped.** An entry count or length read from a file is checked against the bytes actually present before it drives a `make`, a loop or an offset. Offset and size arithmetic uses overflow-safe widths and is correct on 32-bit (`int` is 32 bits on 386 and arm; use `int64`/`uint64` for sizes and ticks). Malformed input returns a typed error, never a panic or an index error.
 4. **Typed errors with `%w`.** Map conditions to the sentinels in `errors.go` so callers can use `errors.Is`:
    - `ErrCorrupt`: malformed container, or a well-formed container whose codec payload will not decode (the bridges return it for that too).
-   - `ErrUnsupported`: well-formed but out of scope (no audio track, other codec, unsupported fragment base offset, init segment with no samples).
+   - `ErrUnsupported`: well-formed but out of scope (no audio track, other codec, unsupported fragment base offset, init segment with no samples, a time seek on a track with no sample timing or a leading empty edit).
    - `ErrClosed`: `WriteFrame` or `Close` after `Close`.
-   - `ErrOutOfRange`: `Reader.SeekSample` index outside `[0, Info().FrameCount)`; a caller error, not a verdict on the file.
+   - `ErrOutOfRange`: `Reader.SeekSample` index outside `[0, Info().FrameCount)`, or a `Reader.SeekTime` time before 0 or at or past the presented end; a caller error, not a verdict on the file.
    - `ErrBoxTooLarge` and `ErrDecodeLimit`: resource limits, not verdicts on the file. Keep them distinct from `ErrCorrupt`.
 5. **Bounded decodes.** `DecodeInterleaved` stops at `m4a.DefaultMaxDecodedBytes` and returns `ErrDecodeLimit`; `DecodeInterleavedLimit` takes the ceiling; `DecodeStream` never accumulates. The decoded size of audio is not proportional to the file size (a FLAC constant subframe, DTX Opus packets), so the limit is a defence against amplification and silence-heavy field recordings alike. Reservations derived from file input need both a hard ceiling (`reservation.MaxPCMReservation`) and a cross-check against what the container can hold; reservations derived from caller input need only an overflow guard. The rule and its reasoning live in `internal/reservation/reservation.go`; follow it rather than adding a parallel copy in a bridge.
 6. **Reader memory is bounded.** Box bodies larger than the reader's box-buffer limit (`DefaultMaxBoxBuffer`, `WithMaxBoxBuffer`) are refused before allocation, so a sparse file claiming a multi-gigabyte `moov` or `moof` cannot drive a large heap allocation.
@@ -64,6 +64,7 @@ fragment.go           InitSegment, FragmentWriter (styp/moof/mdat), Reset/Grow, 
 
 reader.go             Reader: top-level scan, moov parse, sample-table geometry, ReadFrame,
                       ReadFrameInto, RawStream (framing for go-aac pcm.WithRawStream), Info
+reader_time.go        SeekTime and the run-length timing table (stts or trun durations) behind it
 reader_fragment.go    Fragmented (CMAF) input: init moov plus moof/mdat accumulation
 
 internal/box/         box.go (FourCC, byte primitives), marshal.go (typed marshalers),

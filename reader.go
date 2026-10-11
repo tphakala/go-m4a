@@ -96,6 +96,18 @@ type Reader struct {
 	curChunk      int
 	sampleInChunk int64
 	curOffset     int64
+
+	// Sample timing for SeekTime, built at open by setTiming. timeRuns is
+	// run-length (one 8-byte run per stretch of equal durations, never a per-sample
+	// array), timescale is the media timescale and presentEnd the presented end in
+	// media ticks. Without usable timing hasTiming is false; leadingEmptyEdit marks
+	// an edit list that opens with an empty edit, whose origin the reader does not
+	// resolve.
+	timeRuns         []box.SttsRun
+	timescale        uint32
+	presentEnd       uint64
+	hasTiming        bool
+	leadingEmptyEdit bool
 }
 
 // Box and brand codes the reader matches while walking the tree.
@@ -660,18 +672,29 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 	// Cross-check the stts total against the stsz sample count. A spec-compliant
 	// file agrees; a mismatch signals corruption. stts may be absent in an
 	// otherwise-readable file, so this only checks when the box was present.
+	var runs []box.SttsRun
 	if tr.stts != nil {
-		sttsSamples, _, serr := box.ParseStts(tr.stts)
+		raw, serr := box.ParseSttsRuns(tr.stts)
 		if serr != nil {
 			return wrapParse(serr)
+		}
+		var sttsSamples uint64
+		for _, r := range raw {
+			sttsSamples += uint64(r.Count)
 		}
 		if sttsSamples != uint64(rd.sampleCount) {
 			return fmt.Errorf("go-m4a: stts sample count %d disagrees with stsz %d: %w",
 				sttsSamples, rd.sampleCount, ErrCorrupt)
 		}
+		// Compact in place into the run-length form SeekTime walks.
+		runs = raw[:0]
+		for _, r := range raw {
+			runs = appendTimeRun(runs, r.Count, r.Delta)
+		}
 	}
 
 	rd.fillFormatInfo(tr, movieTS, movieDur)
+	rd.setTiming(tr, movieTS, runs)
 	rd.info.FrameCount = rd.sampleCount
 	return nil
 }

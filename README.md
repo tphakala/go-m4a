@@ -204,6 +204,28 @@ sample tables instead of reading the units in between. Take a fresh `RawStream`
 and a fresh decoder after seeking. An index outside the track wraps
 `m4a.ErrOutOfRange`.
 
+`Reader.SeekTime(d)` does the same for a presentation time: it returns the
+access unit that holds `d`, moves the cursor there, and reports `skip`, the
+number of decoded samples per channel to drop from that unit's output to land on
+`d` (at `Info().SampleRate`; `int64`, like `EncoderDelay`).
+
+```go
+sample, skip, err := rd.SeekTime(90 * time.Second)
+```
+
+Time 0 is media tick `Info().EncoderDelay`, the priming the edit list skips, so
+`SeekTime(d)` selects the same sample as decoding from the start and dropping
+`EncoderDelay` plus `d`'s worth of samples (see the trim recipe below). `d`
+rounds to the nearest media tick. The valid range is `[0, end)`, where `end` is
+the presented length (the edit list's segment duration when present, so trailing
+padding is excluded; otherwise the summed sample durations less `EncoderDelay`).
+A time outside it wraps `m4a.ErrOutOfRange` and leaves the cursor unchanged, so a
+player that wants to clamp can match it. A track with no sample timing, or an edit
+list that starts with an empty edit, wraps `m4a.ErrUnsupported`. A lossy decoder
+started cold at the returned unit has no overlap state from the unit before it,
+so its first output is degraded; for clean audio seek a few units earlier with
+`SeekSample` and discard that output as well as `skip` samples.
+
 ### aacm4a: the go-aac bridge
 
 The `aacm4a` subpackage is the one-call path for callers that have interleaved

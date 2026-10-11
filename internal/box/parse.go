@@ -471,6 +471,30 @@ func ParseStts(payload []byte) (sampleCount, duration uint64, err error) {
 	return sampleCount, duration, nil
 }
 
+// ParseSttsRuns decodes the stts FullBox body into its raw (sample_count,
+// sample_delta) entries, in file order, zero counts included; the caller
+// normalizes them. The entry count is bounded by the body length before the
+// allocation, so the slice stays input-proportional (8 bytes per entry on both
+// sides). ParseStts is the sums-only form.
+func ParseSttsRuns(payload []byte) ([]SttsRun, error) {
+	if len(payload) < 8 {
+		return nil, fmt.Errorf("stts: %d bytes: %w", len(payload), errParse)
+	}
+	entries := binary.BigEndian.Uint32(payload[4:])
+	if 8+8*int64(entries) > int64(len(payload)) {
+		return nil, fmt.Errorf("stts entry_count %d overruns %d bytes: %w", entries, len(payload), errParse)
+	}
+	runs := make([]SttsRun, entries)
+	for i := range runs {
+		o := 8 + 8*i
+		runs[i] = SttsRun{
+			Count: binary.BigEndian.Uint32(payload[o:]),
+			Delta: binary.BigEndian.Uint32(payload[o+4:]),
+		}
+	}
+	return runs, nil
+}
+
 // ParseElst decodes the first entry of an elst (edit list) FullBox body,
 // honoring the version-0 (32-bit) and version-1 (64-bit) layouts. hasEntry is
 // false when entry_count is zero. media_time is returned as-is: a value of -1
