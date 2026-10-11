@@ -9,6 +9,8 @@ import (
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 
+	"github.com/tphakala/go-m4a/internal/testutil"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -35,7 +37,7 @@ var (
 // before any access unit is read, so the payload never has to be real AAC.
 func buildAACContainer(t *testing.T, asc []byte) []byte {
 	t.Helper()
-	var ws memWriteSeeker
+	var ws testutil.WriteSeeker
 	w, err := m4a.NewWriter(&ws, m4a.WriterConfig{SampleRate: 48000, Channels: 1, ASC: asc})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -46,7 +48,7 @@ func buildAACContainer(t *testing.T, asc []byte) []byte {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 // rewriteASC returns a copy of an AAC .m4a with its AudioSpecificConfig replaced by

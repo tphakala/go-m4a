@@ -11,17 +11,18 @@ import (
 
 	m4a "github.com/tphakala/go-m4a"
 	"github.com/tphakala/go-m4a/internal/reservation"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // encodeFile encodes PCM to a FLAC .mp4 and returns the file bytes.
 func encodeFile(t *testing.T, pcm []byte, channels int) []byte {
 	t.Helper()
-	var buf memWS
+	var buf testutil.WriteSeeker
 	cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: 16, CompressionLevel: 5}
 	if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	return buf.buf
+	return buf.Bytes()
 }
 
 // encodeSilence returns a FLAC .mp4 holding samplesPerCh samples of digital

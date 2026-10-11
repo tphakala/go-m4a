@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/tphakala/go-m4a/aacm4a"
 	"github.com/tphakala/go-m4a/flacm4a"
 	"github.com/tphakala/go-m4a/internal/box"
+	"github.com/tphakala/go-m4a/internal/testutil"
 	"github.com/tphakala/go-m4a/opusm4a"
 )
 
@@ -139,48 +141,10 @@ func sourcePCM(c corpusCase) []byte {
 	return out
 }
 
-// memWS is an in-memory io.WriteSeeker, what the writer needs to patch the mdat
-// size and append moov.
-type memWS struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWS) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		grown := make([]byte, end)
-		copy(grown, m.buf)
-		m.buf = grown
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWS) Seek(offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = int64(len(m.buf)) + offset
-	default:
-		return 0, fmt.Errorf("memWS: bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("memWS: negative position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
-}
-
 // encode runs the case's bridge encoder over pcm and returns the file bytes.
 func encode(t *testing.T, c corpusCase, pcm []byte) []byte {
 	t.Helper()
-	var ws memWS
+	var ws testutil.WriteSeeker
 	var err error
 	switch c.codec {
 	case codecAAC:
@@ -193,7 +157,7 @@ func encode(t *testing.T, c corpusCase, pcm []byte) []byte {
 	if err != nil {
 		t.Fatalf("encode %s: %v", c.name, err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 // decode runs the case's bridge decoder over a file and returns the full decoded
@@ -260,21 +224,10 @@ func inspect(t *testing.T, data []byte) facts {
 	t.Helper()
 	var f facts
 	var moov []byte
-	for off := int64(0); off < int64(len(data)); {
-		h, err := box.ParseHeader(data[off:])
-		if err != nil {
-			t.Fatalf("top-level box at %d: %v", off, err)
-		}
-		total := h.Total
-		if h.ToEnd {
-			total = int64(len(data)) - off
-		}
-		if total < h.HeaderLen || off+total > int64(len(data)) {
-			t.Fatalf("top-level %q at %d: size %d overruns the %d-byte file", h.Type[:], off, total, len(data))
-		}
-		body := data[off+h.HeaderLen : off+total]
-		f.topLevel = append(f.topLevel, string(h.Type[:]))
-		switch string(h.Type[:]) {
+	err := box.WalkChildren(data, func(typ box.FourCC, body []byte) error {
+		name := string(typ[:])
+		f.topLevel = append(f.topLevel, name)
+		switch name {
 		case "ftyp":
 			if len(body) >= 4 {
 				f.brand = string(body[:4])
@@ -282,7 +235,10 @@ func inspect(t *testing.T, data []byte) facts {
 		case "moov":
 			moov = body
 		}
-		off += total
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the top-level boxes of the %d-byte file (read so far: %v): %v", len(data), f.topLevel, err)
 	}
 	if moov == nil {
 		t.Fatal("no moov box")
@@ -458,11 +414,7 @@ func checkStructure(t *testing.T, c corpusCase, f facts, info m4a.Info) {
 		t.Errorf("top-level boxes %v: ftyp must come first", f.topLevel)
 	}
 	for _, want := range []string{"moov", "mdat"} {
-		found := false
-		for _, got := range f.topLevel {
-			found = found || got == want
-		}
-		if !found {
+		if !slices.Contains(f.topLevel, want) {
 			t.Errorf("top-level boxes %v: missing %s", f.topLevel, want)
 		}
 	}
@@ -493,35 +445,6 @@ func checkStructure(t *testing.T, c corpusCase, f facts, info m4a.Info) {
 	if d := info.Duration - wantDur; d < -time.Microsecond || d > time.Microsecond {
 		t.Errorf("Info.Duration %v, want %v", info.Duration, wantDur)
 	}
-}
-
-// channelOf returns channel ch of 16-bit interleaved PCM as float64 samples.
-func channelOf(pcm []byte, channels, ch int) []float64 {
-	stride := channels * 2
-	out := make([]float64, 0, len(pcm)/stride)
-	for off := ch * 2; off+2 <= len(pcm); off += stride {
-		out = append(out, float64(int16(binary.LittleEndian.Uint16(pcm[off:]))))
-	}
-	return out
-}
-
-// normXCorr is the normalized cross-correlation of a[n] against b[n+lag], in
-// [-1, 1] and invariant to a constant gain, which a lossy codec need not keep.
-func normXCorr(a, b []float64, lag int) float64 {
-	var dot, na, nb float64
-	for n := range a {
-		m := n + lag
-		if m < 0 || m >= len(b) {
-			continue
-		}
-		dot += a[n] * b[m]
-		na += a[n] * a[n]
-		nb += b[m] * b[m]
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / math.Sqrt(na*nb)
 }
 
 func rms(x []float64) float64 {
@@ -558,10 +481,10 @@ func checkSignal(t *testing.T, c corpusCase, src, trimmed []byte) {
 		return
 	}
 	for ch := range c.channels {
-		a, b := channelOf(src, c.channels, ch), channelOf(trimmed, c.channels, ch)
+		a, b := testutil.ChannelS16(src, c.channels, ch), testutil.ChannelS16(trimmed, c.channels, ch)
 		bestLag, best := 0, math.Inf(-1)
 		for lag := -maxLag; lag <= maxLag; lag++ {
-			if v := normXCorr(a, b, lag); v > best {
+			if v := testutil.NormXCorr(a, b, lag); v > best {
 				best, bestLag = v, lag
 			}
 		}

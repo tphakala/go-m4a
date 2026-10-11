@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // benchFrameCount is the number of AAC-LC access units each mux/demux benchmark
@@ -44,7 +46,7 @@ func benchTotalPayload(frames [][]byte) int64 {
 // buildBenchFile muxes frames into an in-memory M4A and returns the bytes.
 func buildBenchFile(b *testing.B, frames [][]byte) []byte {
 	b.Helper()
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
 	if err != nil {
 		b.Fatal(err)
@@ -57,36 +59,37 @@ func buildBenchFile(b *testing.B, frames [][]byte) []byte {
 	if err := w.Close(); err != nil {
 		b.Fatal(err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 // BenchmarkWriteFrames muxes benchFrameCount frames, including Close, into an
 // in-memory io.WriteSeeker. The backing buffer is reused across iterations (only
-// pos is reset) so the numbers isolate the Writer's own allocations from the
+// the position is rewound) so the numbers isolate the Writer's own allocations from the
 // sink's growth. Per-frame cost is (reported value / benchFrameCount).
 func BenchmarkWriteFrames(b *testing.B) {
 	frames := benchFrames()
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
 
-	ws := &memWS{}
-	// Warm-up mux grows the in-memory sink to the final file size. memWS.Write
-	// reallocates and full-copies whenever the buffer must grow, so without this
-	// the first measured iteration would charge an O(N^2) sink-growth cost to the
-	// numbers. Pre-growing it makes later iterations reuse the backing buffer, so
-	// the measured cost is the Writer's, not the test sink's. b.Loop excludes this
-	// pre-loop work from the timer and allocation counters.
+	ws := &testutil.WriteSeeker{}
+	// Warm-up mux grows the in-memory sink to the final file size.
+	// testutil.WriteSeeker.Write reallocates and full-copies whenever the buffer
+	// must grow, so without this the first measured iteration would charge an
+	// O(N^2) sink-growth cost to the numbers. Pre-growing it makes later
+	// iterations reuse the backing buffer, so the measured cost is the Writer's,
+	// not the test sink's. b.Loop excludes this pre-loop work from the timer and
+	// allocation counters.
 	muxOnce(b, ws, cfg, frames)
 
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()
 	for b.Loop() {
-		ws.pos = 0 // reuse the backing buffer; measure only the Writer's allocs
+		ws.Rewind() // reuse the backing buffer; measure only the Writer's allocs
 		muxOnce(b, ws, cfg, frames)
 	}
 }
 
 // muxOnce writes all frames to ws with a fresh Writer and closes it.
-func muxOnce(b *testing.B, ws *memWS, cfg WriterConfig, frames [][]byte) {
+func muxOnce(b *testing.B, ws *testutil.WriteSeeker, cfg WriterConfig, frames [][]byte) {
 	b.Helper()
 	w, err := NewWriter(ws, cfg)
 	if err != nil {

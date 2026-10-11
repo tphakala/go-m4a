@@ -17,6 +17,8 @@ import (
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 
+	"github.com/tphakala/go-m4a/internal/testutil"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -64,12 +66,12 @@ func encodeAUs(t *testing.T, cfg aacpcm.Config, pcm []byte) ([][]byte, m4a.Write
 }
 
 // decodePCM runs ffmpeg over path and returns the decoded interleaved S16 PCM.
-func decodePCM(t *testing.T, path string, channels int) []byte {
+func decodePCM(t *testing.T, ffmpeg, path string, channels int) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	out := filepath.Join(t.TempDir(), "out.raw")
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error",
+	cmd := exec.CommandContext(ctx, ffmpeg, "-v", "error",
 		"-i", path, "-f", "s16le", "-ac", strconv.Itoa(channels), "-y", out)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -89,9 +91,7 @@ func decodePCM(t *testing.T, path string, channels int) []byte {
 // byte-identical PCM. It catches a wrong sample duration, a wrong data offset, a
 // dropped or duplicated sample, and a mis-signalled edit list in one assertion.
 func TestFragmentedMatchesNonFragmented(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not found on PATH")
-	}
+	ffmpeg := testutil.LookTool(t, "ffmpeg")
 
 	const (
 		sampleRate = 48000
@@ -176,8 +176,8 @@ func TestFragmentedMatchesNonFragmented(t *testing.T) {
 	}
 
 	// The decisive comparison.
-	plainPCM := decodePCM(t, plainPath, channels)
-	fragPCM := decodePCM(t, fragPath, channels)
+	plainPCM := decodePCM(t, ffmpeg, plainPath, channels)
+	fragPCM := decodePCM(t, ffmpeg, fragPath, channels)
 	if len(plainPCM) == 0 {
 		t.Fatal("non-fragmented file decoded to nothing")
 	}
@@ -202,10 +202,7 @@ func TestFragmentedMatchesNonFragmented(t *testing.T) {
 // TestFragmentedFFprobe checks ffprobe reads the stream as the track it claims to
 // be, and finds every access unit.
 func TestFragmentedFFprobe(t *testing.T) {
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe not found on PATH")
-	}
+	ffprobe := testutil.LookTool(t, "ffprobe")
 
 	const sampleRate, channels = 48000, 2
 	cfg := aacpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels, Bitrate: 128000}
@@ -295,9 +292,7 @@ func TestFragmentedFFprobe(t *testing.T) {
 // -movflags +empty_moov path writes none at all, so this is the difference that
 // would go unnoticed without an explicit check.
 func TestFragmentedEditListTrimsPriming(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not found on PATH")
-	}
+	ffmpeg := testutil.LookTool(t, "ffmpeg")
 
 	const sampleRate, channels = 48000, 1
 	cfg := aacpcm.Config{SampleRate: sampleRate, BitDepth: 16, Channels: channels, Bitrate: 96000}
@@ -328,7 +323,7 @@ func TestFragmentedEditListTrimsPriming(t *testing.T) {
 		if err := os.WriteFile(path, stream, 0o600); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		return decodePCM(t, path, channels)
+		return decodePCM(t, ffmpeg, path, channels)
 	}
 
 	trimmed := build(t, 0)            // default AAC-LC priming

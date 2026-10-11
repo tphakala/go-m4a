@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tphakala/go-m4a/internal/box"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // ascMono16k and ascMono44k are valid AAC-LC AudioSpecificConfigs for mono at
@@ -31,7 +32,7 @@ var (
 // maximal equal-duration stretches.
 func writeTimed(t *testing.T, cfg WriterConfig, durs []uint32) []byte {
 	t.Helper()
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, cfg)
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
@@ -44,7 +45,7 @@ func writeTimed(t *testing.T, cfg WriterConfig, durs []uint32) []byte {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	return ws.buf
+	return ws.Bytes()
 }
 
 // tickOracle maps a media tick to the (unit, offset) pair whose duration span

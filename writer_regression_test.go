@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // errInjectedWrite and errInjectedSeek are the sentinels the failing
@@ -256,7 +258,7 @@ func TestWriterBrandOverride(t *testing.T) {
 // TestWriterBrandWrongLength confirms a brand that is not exactly four bytes is
 // rejected by NewWriter.
 func TestWriterBrandWrongLength(t *testing.T) {
-	_, err := NewWriter(&memWS{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, Brand: "qt"})
+	_, err := NewWriter(&testutil.WriteSeeker{}, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, Brand: "qt"})
 	if err == nil {
 		t.Fatal("NewWriter accepted a 2-byte brand, want error")
 	}
@@ -289,7 +291,7 @@ func TestValidateConfigBranches(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewWriter(&memWS{}, tc.cfg); err == nil {
+			if _, err := NewWriter(&testutil.WriteSeeker{}, tc.cfg); err == nil {
 				t.Fatal("NewWriter succeeded, want a validation error")
 			}
 		})

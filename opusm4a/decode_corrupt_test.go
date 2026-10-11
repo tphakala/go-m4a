@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // mdatPayloadRange returns the byte range of the mdat payload (the raw access
@@ -50,12 +51,12 @@ func mdatPayloadRange(tb testing.TB, buf []byte) (start, end int) {
 // exactly the path the production wrap covers.
 func TestDecodeCorruptPacketIsErrCorrupt(t *testing.T) {
 	pcm := genSine(48000, 1) // one second, mono
-	var buf memWS
+	var buf testutil.WriteSeeker
 	cfg := Config{SampleRate: 48000, Channels: 1, Bitrate: 96000}
 	if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 		t.Fatalf("EncodeInterleaved: %v", err)
 	}
-	data := buf.buf
+	data := buf.Bytes()
 	start, end := mdatPayloadRange(t, data)
 	if start+2 > end {
 		t.Fatalf("mdat payload too short to corrupt: [%d,%d)", start, end)

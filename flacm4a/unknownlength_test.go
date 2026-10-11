@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // clearTotalSamples rewrites the STREAMINFO total-samples field of a FLAC-in-MP4
@@ -64,14 +65,14 @@ func TestDecodeUnknownLength(t *testing.T) {
 		t.Run(map[int]string{1: "mono", 2: "stereo"}[channels], func(t *testing.T) {
 			const samplesPerCh = 12000
 			pcm := genS16(samplesPerCh, channels)
-			var buf memWS
+			var buf testutil.WriteSeeker
 			cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: 16, CompressionLevel: 5}
 			if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 				t.Fatalf("EncodeInterleaved: %v", err)
 			}
-			clearTotalSamples(t, buf.buf, samplesPerCh)
+			clearTotalSamples(t, buf.Bytes(), samplesPerCh)
 
-			got, info, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+			got, info, err := DecodeInterleaved(bytes.NewReader(buf.Bytes()))
 			if err != nil {
 				t.Fatalf("DecodeInterleaved: %v", err)
 			}

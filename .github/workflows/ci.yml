@@ -45,8 +45,10 @@ jobs:
 
       # The interop tests decode this writer's output with a third-party demuxer,
       # which is the only check that a real player agrees with the container we
-      # emit. They skip when ffmpeg is absent, so without an explicit install the
-      # suite would report success having never run them.
+      # emit. They skip when ffmpeg or ffprobe is absent unless M4A_REQUIRE_FFMPEG
+      # is set, so without an explicit install the suite would report success
+      # having never run them. Every Linux step that runs them sets the variable,
+      # so a missing tool fails there.
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -64,8 +66,8 @@ jobs:
       # under test.
       - name: Run tests with coverage
         if: matrix.os == 'ubuntu-latest'
-        # ffmpeg is installed on this runner, so the integrity gate's ffmpeg
-        # cross-checks must run here rather than skip.
+        # ffmpeg is installed on this runner, so every ffmpeg and ffprobe
+        # interop test must run here rather than skip.
         env:
           M4A_REQUIRE_FFMPEG: "1"
         run: go test -race -shuffle=on -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
@@ -98,6 +100,9 @@ jobs:
       # go-flac and go-opus link github.com/tphakala/simd unconditionally.
       - name: Run tests (-tags noasm)
         if: matrix.os == 'ubuntu-latest'
+        # ffmpeg was installed earlier in this job, so the interop tests must run.
+        env:
+          M4A_REQUIRE_FFMPEG: "1"
         run: go test -race -tags noasm ./...
 
   # The container parses untrusted bytes and does size/offset arithmetic that

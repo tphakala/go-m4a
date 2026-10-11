@@ -7,6 +7,8 @@ import (
 
 	aacpcm "github.com/tphakala/go-aac/pcm"
 
+	"github.com/tphakala/go-m4a/internal/testutil"
+
 	m4a "github.com/tphakala/go-m4a"
 )
 
@@ -50,7 +52,7 @@ func BenchmarkWriteADTSFrames(b *testing.B) {
 	adts := buildADTS(benchADTSFrames)
 	cfg := m4a.WriterConfig{SampleRate: 48000, Channels: 1, ASC: []byte{0x11, 0x88}}
 
-	ws := &memWriteSeeker{}
+	ws := &testutil.WriteSeeker{}
 	// Warm-up mux grows the in-memory sink to the final file size so the measured
 	// iterations reuse the backing buffer and isolate the bridge plus Writer cost
 	// from the sink's O(N^2) growth. b.Loop excludes this from the counters.
@@ -59,13 +61,13 @@ func BenchmarkWriteADTSFrames(b *testing.B) {
 	b.SetBytes(int64(len(adts)))
 	b.ReportAllocs()
 	for b.Loop() {
-		ws.pos = 0
+		ws.Rewind()
 		muxADTSOnce(b, ws, cfg, adts)
 	}
 }
 
 // muxADTSOnce de-ADTS-splits adts into a fresh Writer over ws and closes it.
-func muxADTSOnce(b *testing.B, ws *memWriteSeeker, cfg m4a.WriterConfig, adts []byte) {
+func muxADTSOnce(b *testing.B, ws *testutil.WriteSeeker, cfg m4a.WriterConfig, adts []byte) {
 	b.Helper()
 	wr, err := m4a.NewWriter(ws, cfg)
 	if err != nil {
@@ -89,7 +91,7 @@ func BenchmarkEncodeInterleaved(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(pcm)))
 	for b.Loop() {
-		var ws memWriteSeeker
+		var ws testutil.WriteSeeker
 		if err := EncodeInterleaved(&ws, cfg, pcm); err != nil {
 			b.Fatalf("EncodeInterleaved: %v", err)
 		}

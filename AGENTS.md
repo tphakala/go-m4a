@@ -21,6 +21,7 @@ Packages:
 | `internal/box` | ISO BMFF byte primitives: big-endian append-style marshalers and total, size-capped parsers |
 | `internal/reservation` | Shared buffer-reservation policy for the accumulating decodes |
 | `internal/integrity` | Round-trip integrity gate (tests only, pinned baseline, ffmpeg cross-checks) |
+| `internal/testutil` | Test-only helpers: in-memory `WriteSeeker`, signal helpers, `LookTool`; imported only from `_test.go` files |
 | `rules` | gocritic ruleguard matchers (build tag `ruleguard`, lint-only) |
 
 Non-goals: video or multiple audio tracks, other codecs, writing metadata tags, HE-AAC (typed as unsupported by the `aacm4a` decoder), more-than-stereo Opus (tracked in issue #5, blocked upstream).
@@ -72,6 +73,7 @@ internal/box/         box.go (FourCC, byte primitives), marshal.go (typed marsha
                       (table parsers), plus fuzz targets for each parser
 internal/reservation/ NewLimit, MaxPCMReservation, MaxRetainedSlack, ShouldTrim
 internal/integrity/   Round-trip gate, testdata/baseline.json
+internal/testutil/    Test-only helpers shared by every package's tests (WriteSeeker, NormXCorr, LookTool)
 
 aacm4a/ opusm4a/ flacm4a/   Codec bridges (one file each plus tests)
 rules/                gocritic ruleguard matchers; rules/rulestest runs the probe test
@@ -86,7 +88,7 @@ Tests run without audio hardware and, apart from the ffmpeg cross-checks, withou
 
 - **Regression tests.** New behaviour gets a test. A bug fix gets a regression test that fails before the fix. A test must be able to fail: break the line it pins and confirm it fails, and avoid fixtures where every path gives the same result.
 - **Fuzzing.** Root: `FuzzReader`, `FuzzFragmentWriter`. `internal/box`: one target per table parser (`FuzzParseStsz`, `Stsc`, `Stco`, `Co64`, `Stts`, `Dfla`, `Dops`, `Tfhd`, `Trun`). `internal/reservation`: `FuzzShouldTrim`. Bridges: `FuzzDecodeInterleaved` (flacm4a, opusm4a), `FuzzRoundTrip` and `FuzzPCMReservation` (flacm4a), `FuzzPCMReservation` (opusm4a). A `-fuzz` pattern that matches nothing passes without running, so run a new target in the package that defines it. New parsing paths get a fuzz target or a seed under `testdata/fuzz`. Discovered crashers are committed as regression data.
-- **Integrity gate.** `internal/integrity` encodes a small deterministic corpus through each bridge and checks box layout, edit list (priming trim and presented length), sample-accurate decode, and bit-exact FLAC. Its integer facts are pinned in `testdata/baseline.json`; regenerate with `task integrity:update` only for an intended container change or a codec dependency bump that moves the lossy frame and duration fields, and explain the diff in the PR. ffmpeg cross-checks skip locally without ffmpeg; the Linux CI test step sets `M4A_REQUIRE_FFMPEG` so they cannot skip there.
+- **Integrity gate.** `internal/integrity` encodes a small deterministic corpus through each bridge and checks box layout, edit list (priming trim and presented length), sample-accurate decode, and bit-exact FLAC. Its integer facts are pinned in `testdata/baseline.json`; regenerate with `task integrity:update` only for an intended container change or a codec dependency bump that moves the lossy frame and duration fields, and explain the diff in the PR. Every ffmpeg and ffprobe interop test finds its tool with `testutil.LookTool`: it skips locally without the tool and fails on the Linux CI steps that set `M4A_REQUIRE_FFMPEG`. New interop tests use `LookTool`, never `exec.LookPath` plus `t.Skip`.
 - **Decode-limit seams.** The bridges hold their default ceiling as an atomic built by `reservation.NewLimit` so a test can lower it without decoding a gigabyte. Keep that shape.
 - **Allocation tests.** Steady-state fragment writing is allocation-free and guarded by allocation tests; a change on that path keeps them green.
 - **Architectures.** The suite also runs as `GOARCH=386` binaries, because the size and offset arithmetic must hold on 32-bit.

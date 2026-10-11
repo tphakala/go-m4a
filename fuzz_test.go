@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // isReaderSentinel reports whether err is one of the errors the Reader is allowed
@@ -28,7 +30,7 @@ func isReaderSentinel(err error) bool {
 // produced. It returns ok=false rather than failing if the Writer path errors,
 // so a seed hiccup never breaks corpus setup.
 func writerSeed() (data []byte, ok bool) {
-	ws := &memWS{}
+	ws := &testutil.WriteSeeker{}
 	w, err := NewWriter(ws, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k})
 	if err != nil {
 		return nil, false
@@ -41,7 +43,7 @@ func writerSeed() (data []byte, ok bool) {
 	if err := w.Close(); err != nil {
 		return nil, false
 	}
-	return ws.buf, true
+	return ws.Bytes(), true
 }
 
 // fragmentedSeed builds a valid fragmented (CMAF) stream, an init segment plus two

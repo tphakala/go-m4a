@@ -5,6 +5,8 @@ package flacm4a
 import (
 	"bytes"
 	"testing"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
 // FuzzRoundTrip proves the one property FLAC guarantees: it is lossless, so for
@@ -51,14 +53,14 @@ func FuzzRoundTrip(f *testing.F) {
 
 		cfg := Config{SampleRate: 48000, Channels: channels, BitDepth: bitDepth, CompressionLevel: compression}
 
-		var buf memWS
+		var buf testutil.WriteSeeker
 		if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 			// A legal config over whole samples must always encode. A failure here
 			// is a real bug, not an expected rejection.
 			t.Fatalf("EncodeInterleaved(%d ch, %d-bit, %d bytes): %v", channels, bitDepth, len(pcm), err)
 		}
 
-		got, _, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+		got, _, err := DecodeInterleaved(bytes.NewReader(buf.Bytes()))
 		if err != nil {
 			t.Fatalf("DecodeInterleaved: %v", err)
 		}

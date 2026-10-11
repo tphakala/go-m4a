@@ -5,50 +5,12 @@ package flacm4a
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
-	"io"
 	"math"
 	"testing"
 
 	m4a "github.com/tphakala/go-m4a"
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
-
-// memWS is an in-memory io.WriteSeeker for the round-trip tests.
-type memWS struct {
-	buf []byte
-	pos int64
-}
-
-func (m *memWS) Write(p []byte) (int, error) {
-	end := m.pos + int64(len(p))
-	if end > int64(len(m.buf)) {
-		grown := make([]byte, end)
-		copy(grown, m.buf)
-		m.buf = grown
-	}
-	copy(m.buf[m.pos:end], p)
-	m.pos = end
-	return len(p), nil
-}
-
-func (m *memWS) Seek(offset int64, whence int) (int64, error) {
-	var abs int64
-	switch whence {
-	case io.SeekStart:
-		abs = offset
-	case io.SeekCurrent:
-		abs = m.pos + offset
-	case io.SeekEnd:
-		abs = int64(len(m.buf)) + offset
-	default:
-		return 0, fmt.Errorf("memWS: bad whence %d", whence)
-	}
-	if abs < 0 {
-		return 0, fmt.Errorf("memWS: negative position %d", abs)
-	}
-	m.pos = abs
-	return abs, nil
-}
 
 // genS16 builds interleaved little-endian 16-bit PCM: a per-channel sine at a
 // distinct frequency.
@@ -80,13 +42,13 @@ func TestFLACRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pcm := genS16(tc.samplesPerCh, tc.channels)
 
-			var buf memWS
+			var buf testutil.WriteSeeker
 			cfg := Config{SampleRate: tc.sampleRate, Channels: tc.channels, BitDepth: 16, CompressionLevel: 5}
 			if err := EncodeInterleaved(&buf, cfg, pcm); err != nil {
 				t.Fatalf("EncodeInterleaved: %v", err)
 			}
 
-			got, info, err := DecodeInterleaved(bytes.NewReader(buf.buf))
+			got, info, err := DecodeInterleaved(bytes.NewReader(buf.Bytes()))
 			if err != nil {
 				t.Fatalf("DecodeInterleaved: %v", err)
 			}
@@ -120,7 +82,7 @@ func TestFLACEncodeErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var buf memWS
+			var buf testutil.WriteSeeker
 			if err := EncodeInterleaved(&buf, tc.cfg, tc.pcm); err == nil {
 				t.Errorf("EncodeInterleaved(%+v) returned nil error, want a validation error", tc.cfg)
 			}
