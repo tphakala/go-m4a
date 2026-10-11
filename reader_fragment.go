@@ -33,9 +33,11 @@ func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
 		return err
 	}
 	rd.fillFormatInfo(tr, movieTS, movieDur)
-	if err := rd.buildFragmentGeometry(moofs, tr, trex); err != nil {
+	runs, err := rd.buildFragmentGeometry(moofs, tr, trex)
+	if err != nil {
 		return err
 	}
+	rd.setTiming(tr, movieTS, runs)
 	rd.info.FrameCount = rd.sampleCount
 	return nil
 }
@@ -88,12 +90,13 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 // per-chunk geometry (sizes, chunk offsets, samples-per-chunk) that the read path
 // consumes, modeling each trun run as one contiguous chunk. It reuses the plain
 // path's validateOffsets to confirm every access unit lies within the stream, and
-// sets Info.Duration from the summed sample durations at the media timescale.
-func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) error {
+// sets Info.Duration from the summed sample durations at the media timescale. It
+// also returns those durations in run-length form for setTiming.
+func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) ([]box.SttsRun, error) {
 	var (
 		sizes        []uint32
+		timeRuns     []box.SttsRun
 		totalSamples int64
-		totalDur     uint64
 	)
 	// One chunk per movie fragment is the common CMAF layout, so size to the
 	// fragment count; a fragment carrying several trun runs or none makes this an
@@ -108,7 +111,7 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 		chunks:    &chunkOffsets,
 		perChunk:  &perChunk,
 		samples:   &totalSamples,
-		duration:  &totalDur,
+		timeRuns:  &timeRuns,
 	}
 
 	// One buffer, grown to the largest moof body and reused across fragments rather
@@ -130,7 +133,7 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 			// each moof body so the fragmented path is bounded uniformly. A
 			// memory-exhaustion limit, not a malformation, so it wraps ErrBoxTooLarge;
 			// the remedy is a larger WithMaxBoxBuffer.
-			return fmt.Errorf("go-m4a: moof body at %d length %d exceeds the %d-byte box-buffer limit: %w", ext.offset, ext.bodyLen, rd.maxBoxBuffer, ErrBoxTooLarge)
+			return nil, fmt.Errorf("go-m4a: moof body at %d length %d exceeds the %d-byte box-buffer limit: %w", ext.offset, ext.bodyLen, rd.maxBoxBuffer, ErrBoxTooLarge)
 		}
 		if ext.bodyLen > maxInt {
 			// bodyLen is already bounded by the stream length: scanTopLevel rejected any
@@ -142,17 +145,17 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 			// panic with "len out of range", so reject it as ErrCorrupt ahead of the
 			// make rather than crash. On a 64-bit build maxInt exceeds any real stream,
 			// so this never fires.
-			return fmt.Errorf("go-m4a: moof body at %d length %d exceeds addressable memory: %w", ext.offset, ext.bodyLen, ErrCorrupt)
+			return nil, fmt.Errorf("go-m4a: moof body at %d length %d exceeds addressable memory: %w", ext.offset, ext.bodyLen, ErrCorrupt)
 		}
 		if int64(cap(moofBody)) < ext.bodyLen {
 			moofBody = make([]byte, ext.bodyLen)
 		}
 		moofBody = moofBody[:ext.bodyLen]
 		if _, err := rd.r.Seek(ext.bodyStart, io.SeekStart); err != nil {
-			return fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
+			return nil, fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
 		}
 		if _, err := io.ReadFull(rd.r, moofBody); err != nil {
-			return fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
+			return nil, fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
 		}
 		acc.moofOffset = ext.offset
 		if err := box.WalkChildren(moofBody, func(typ box.FourCC, body []byte) error {
@@ -161,12 +164,12 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 			}
 			return acc.addTraf(body)
 		}); err != nil {
-			return wrapParse(err)
+			return nil, wrapParse(err)
 		}
 	}
 
 	if totalSamples > maxInt {
-		return fmt.Errorf("go-m4a: fragmented sample count %d exceeds addressable memory: %w", totalSamples, ErrCorrupt)
+		return nil, fmt.Errorf("go-m4a: fragmented sample count %d exceeds addressable memory: %w", totalSamples, ErrCorrupt)
 	}
 	// The stream carried moof boxes (that is why this path runs), so no sample
 	// matching the selected track means the fragments belong to another track or
@@ -176,22 +179,22 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	// rather than hand back a reader that reports zero frames, which a caller cannot
 	// tell apart from a genuine track-binding failure.
 	if totalSamples == 0 {
-		return fmt.Errorf("go-m4a: no movie fragment carries samples for track_ID %d: %w", tr.trackID, ErrCorrupt)
+		return nil, fmt.Errorf("go-m4a: no movie fragment carries samples for track_ID %d: %w", tr.trackID, ErrCorrupt)
 	}
 	rd.sizes = sizes
 	rd.sampleCount = int(totalSamples)
 	rd.chunkOffsets = chunkOffsets
 	rd.samplesPerChunk = perChunk
 	if err := rd.validateOffsets(); err != nil {
-		return err
+		return nil, err
 	}
 	// The init segment's durations are all zero, so presentationDuration reported
 	// zero; the real presentation length is the sum of the fragments' sample
 	// durations at the media timescale.
-	if tr.mdhdTS > 0 && totalDur > 0 {
+	if totalDur := sumTicks(timeRuns); tr.mdhdTS > 0 && totalDur > 0 {
 		rd.info.Duration = ticksToDuration(totalDur, tr.mdhdTS)
 	}
-	return nil
+	return timeRuns, nil
 }
 
 // fragAccumulator threads the growing geometry and the fixed per-track context
@@ -207,7 +210,7 @@ type fragAccumulator struct {
 	chunks   *[]int64
 	perChunk *[]int64
 	samples  *int64
-	duration *uint64
+	timeRuns *[]box.SttsRun
 }
 
 // addTraf decodes one track fragment: it reads the tfhd, binds the fragment to
@@ -403,7 +406,13 @@ func (a *fragAccumulator) addRun(tn *box.Trun, base, dataCursor int64, tfhd box.
 		}
 		*a.sizes = append(*a.sizes, size)
 		runBytes += int64(size)
-		*a.duration += uint64(resolveSampleDuration(tn, i, tfhd, a.trex))
+		if tn.HasSampleDuration {
+			*a.timeRuns = appendTimeRun(*a.timeRuns, 1, tn.SampleDuration(i))
+		}
+	}
+	if !tn.HasSampleDuration {
+		// Every sample takes the tfhd or trex default, so the run is one entry.
+		*a.timeRuns = appendTimeRun(*a.timeRuns, tn.SampleCount, resolveSampleDuration(tn, 0, tfhd, a.trex))
 	}
 	*a.samples += int64(tn.SampleCount)
 	return runStart + runBytes, nil

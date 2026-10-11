@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // isReaderSentinel reports whether err is one of the errors the Reader is allowed
@@ -120,6 +122,32 @@ func FuzzReader(f *testing.F) {
 		}
 
 		n := r.Info().FrameCount
+
+		// Time seeks over the timing table built at open. Any outcome must be nil,
+		// ErrOutOfRange or ErrUnsupported (never ErrCorrupt, never a panic), a
+		// negative time must be ErrOutOfRange, an error must leave the cursor
+		// where it was, and a success must land the cursor on the returned unit.
+		for _, d := range []time.Duration{-1, 0, r.Info().Duration / 2, r.Info().Duration, math.MaxInt64} {
+			before := [4]int64{int64(r.nextSample), int64(r.curChunk), r.sampleInChunk, r.curOffset}
+			sample, skip, terr := r.SeekTime(d)
+			after := [4]int64{int64(r.nextSample), int64(r.curChunk), r.sampleInChunk, r.curOffset}
+			switch {
+			case terr != nil:
+				if !errors.Is(terr, ErrOutOfRange) && !errors.Is(terr, ErrUnsupported) {
+					t.Errorf("SeekTime(%v) error = %v, want ErrOutOfRange or ErrUnsupported", d, terr)
+				}
+				if d < 0 && !errors.Is(terr, ErrOutOfRange) {
+					t.Errorf("SeekTime(%v) error = %v, want ErrOutOfRange for a negative time", d, terr)
+				}
+				if before != after || sample != 0 || skip != 0 {
+					t.Errorf("SeekTime(%v) failed but returned (%d, %d) or moved the cursor", d, sample, skip)
+				}
+			case d < 0:
+				t.Errorf("SeekTime(%v) succeeded for a negative time", d)
+			case sample < 0 || sample >= n || skip < 0 || r.nextSample != sample:
+				t.Errorf("SeekTime(%v) = (%d, %d) with cursor at %d, FrameCount %d", d, sample, skip, r.nextSample, n)
+			}
+		}
 
 		// Seek around the sample tables before reading. Any in-range index must be
 		// accepted (the tables were validated at open), and an index past the end

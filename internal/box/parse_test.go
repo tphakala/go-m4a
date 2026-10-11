@@ -5,6 +5,7 @@ package box
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"testing"
 )
 
@@ -158,6 +159,9 @@ func TestParseSampleTablesRoundTrip(t *testing.T) {
 	if cnt, dur, err := ParseStts(bodyOf(t, AppendStts(nil, 30, 1024))); err != nil || cnt != 30 || dur != 30*1024 {
 		t.Fatalf("ParseStts = %d/%d err=%v", cnt, dur, err)
 	}
+	if _, _, err := ParseStts([]byte{0, 0, 0, 0, 0, 0, 0, 1}); !errors.Is(err, errParse) {
+		t.Fatalf("ParseStts overrun err = %v, want errParse", err)
+	}
 }
 
 func TestParseElstRoundTrip(t *testing.T) {
@@ -192,4 +196,31 @@ func u32s(v []uint32) []byte {
 		b = binary.BigEndian.AppendUint32(b, x)
 	}
 	return b
+}
+
+func TestParseSttsRunsRoundTrip(t *testing.T) {
+	want := []SttsRun{{Count: 29, Delta: 1024}, {Count: 0, Delta: 5}, {Count: 1, Delta: 128}}
+	got, err := ParseSttsRuns(bodyOf(t, AppendSttsRuns(nil, want)))
+	if err != nil {
+		t.Fatalf("ParseSttsRuns: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d runs, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("run %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseSttsRunsOverrun(t *testing.T) {
+	body := bodyOf(t, AppendSttsRuns(nil, []SttsRun{{Count: 1, Delta: 1}}))
+	binary.BigEndian.PutUint32(body[4:], 2) // claims two entries, carries one
+	if _, err := ParseSttsRuns(body); !errors.Is(err, errParse) {
+		t.Fatalf("overrun error = %v, want errParse", err)
+	}
+	if _, err := ParseSttsRuns(body[:4]); !errors.Is(err, errParse) {
+		t.Fatalf("short body error = %v, want errParse", err)
+	}
 }

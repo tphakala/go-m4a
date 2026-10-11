@@ -123,8 +123,13 @@ func FuzzParseStts(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		defer noPanic(t, payload)
-		if _, _, err := ParseStts(payload); err != nil {
+		runs, err := ParseSttsRuns(payload)
+		if err != nil {
 			mustParseSentinel(t, err)
+			return
+		}
+		if int64(len(runs)) != int64(binary.BigEndian.Uint32(payload[4:])) {
+			t.Fatalf("got %d runs, header declares %d", len(runs), binary.BigEndian.Uint32(payload[4:]))
 		}
 	})
 }
