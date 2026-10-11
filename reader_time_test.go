@@ -622,3 +622,36 @@ func TestSumTicksSaturates(t *testing.T) {
 		t.Errorf("sumTicks past 2^64 = %d, want saturation at MaxUint64", got)
 	}
 }
+
+func TestSeekTimeSkipRescalesToSampleRate(t *testing.T) {
+	durs := []uint32{1024, 1024}
+	data := writeTimed(t, WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k, EncoderDelay: NoEdit}, durs)
+	r, err := NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	d := tickToDuration(1124, 16000) // 100 ticks into unit 1
+	if s, k, err := r.SeekTime(d); err != nil || s != 1 || k != 100 {
+		t.Fatalf("equal rate: SeekTime = (%d, %d, %v), want (1, 100, nil)", s, k, err)
+	}
+	// A media timescale below the decode rate (here 16 kHz ticks, 48 kHz samples)
+	// scales the tick offset up to decoded samples; floor division on the way.
+	r.info.SampleRate = 48000
+	if s, k, err := r.SeekTime(d); err != nil || s != 1 || k != 300 {
+		t.Fatalf("rate 48000: SeekTime = (%d, %d, %v), want (1, 300, nil)", s, k, err)
+	}
+	r.info.SampleRate = 8000
+	if s, k, err := r.SeekTime(d); err != nil || s != 1 || k != 50 {
+		t.Fatalf("rate 8000: SeekTime = (%d, %d, %v), want (1, 50, nil)", s, k, err)
+	}
+	// An odd offset (101 ticks) pins rounding down: 101*8000/16000 is 50.5.
+	if s, k, err := r.SeekTime(tickToDuration(1125, 16000)); err != nil || s != 1 || k != 50 {
+		t.Fatalf("rate 8000, odd offset: SeekTime = (%d, %d, %v), want (1, 50, nil)", s, k, err)
+	}
+}
+
+func TestErrOutOfRangeMessage(t *testing.T) {
+	if got, want := ErrOutOfRange.Error(), "go-m4a: seek position out of range"; got != want {
+		t.Fatalf("ErrOutOfRange = %q, want %q", got, want)
+	}
+}
