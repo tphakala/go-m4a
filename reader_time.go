@@ -36,8 +36,9 @@ import (
 // outside it, including the last half tick before end, returns an error
 // wrapping ErrOutOfRange with the cursor unchanged. A track with no sample
 // timing, or whose edit list opens with an empty edit (a media_time of -1, which
-// the reader does not resolve), returns an error wrapping ErrUnsupported, also
-// with the cursor unchanged. On any error the results are 0, 0.
+// the reader does not resolve), returns an error wrapping ErrUnsupported for any
+// d >= 0, also with the cursor unchanged; a negative d is always ErrOutOfRange.
+// On any error the results are 0, 0.
 //
 // The result depends only on d and the file, never on the cursor, so SeekTime may
 // be repeated and may be called after the end of the stream. As for SeekSample,

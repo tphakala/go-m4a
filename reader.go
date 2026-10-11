@@ -100,9 +100,10 @@ type Reader struct {
 	// Sample timing for SeekTime, built at open by setTiming. timeRuns is
 	// run-length (one 8-byte run per stretch of equal durations, never a per-sample
 	// array), timescale is the media timescale and presentEnd the presented end in
-	// media ticks. seekTimeErr is the ErrUnsupported error SeekTime returns for a
-	// track without usable timing or whose edit list opens with an empty edit, an
-	// origin the reader does not resolve; nil when the track can be time-sought.
+	// media ticks. seekTimeErr is the ErrUnsupported error SeekTime returns, for a
+	// non-negative time, on a track without usable timing or whose edit list opens
+	// with an empty edit (an origin the reader does not resolve); nil when the track
+	// can be time-sought.
 	timeRuns    []box.SttsRun
 	timescale   uint32
 	presentEnd  uint64
