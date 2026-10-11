@@ -17,7 +17,8 @@ func TestChannelS16(t *testing.T) {
 		}
 		return b
 	}
-	// Three stereo frames plus a trailing partial frame (one left sample).
+	// Three stereo frames plus a trailing partial frame holding only a left
+	// sample, which channel 0 keeps and channel 1 lacks.
 	stereo := put(1, -2, 3, -4, 5, -6, 7)
 	if got, want := ChannelS16(stereo, 2, 0), []float64{1, 3, 5, 7}; !slices.Equal(got, want) {
 		t.Errorf("ch0 = %v, want %v", got, want)

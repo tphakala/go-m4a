@@ -213,8 +213,8 @@ func TestInteropDecode(t *testing.T) {
 }
 
 // TestFFprobeValidates encodes a real file and asks ffprobe to demux it, proving
-// the bridge output is valid to a third-party tool. It is skipped when ffprobe is
-// not on PATH.
+// the bridge output is valid to a third-party tool. Without ffprobe on PATH it
+// skips, or fails when M4A_REQUIRE_FFMPEG is set.
 func TestFFprobeValidates(t *testing.T) {
 	ffprobe := testutil.LookTool(t, "ffprobe")
 

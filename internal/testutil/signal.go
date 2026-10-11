@@ -8,7 +8,8 @@ import (
 )
 
 // ChannelS16 returns channel ch of little-endian 16-bit interleaved PCM as
-// float64 samples. A trailing partial frame is ignored.
+// float64 samples. A trailing partial frame contributes channel ch only when it
+// holds that channel's sample.
 func ChannelS16(pcm []byte, channels, ch int) []float64 {
 	stride := channels * 2
 	out := make([]float64, 0, len(pcm)/stride)

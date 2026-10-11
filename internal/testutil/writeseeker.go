@@ -61,5 +61,6 @@ func (m *WriteSeeker) Seek(offset int64, whence int) (int64, error) {
 func (m *WriteSeeker) Bytes() []byte { return m.buf }
 
 // Rewind moves the position to 0 and keeps the buffer, so rewriting the same
-// length allocates nothing in the sink.
+// length allocates nothing in the sink. A shorter rewrite leaves the earlier
+// tail in place, and Bytes still returns it.
 func (m *WriteSeeker) Rewind() { m.pos = 0 }
