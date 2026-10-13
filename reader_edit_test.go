@@ -417,3 +417,73 @@ func TestFFprobeLeadingEmptyEdit(t *testing.T) {
 		t.Errorf("StartOffset = %v, want 500ms", r.Info().StartOffset)
 	}
 }
+
+// TestStartOffsetUsesMovieTimescale pins that leading empty edits are converted
+// with the movie timescale, not the media timescale: an empty edit of 500 movie
+// ticks at 1000 ticks per second is 500 ms whatever the media rate.
+func TestStartOffsetUsesMovieTimescale(t *testing.T) {
+	tr := &track{mdhdTS: 48000, edits: []box.ElstEntry{edit(500, -1), edit(1000, 1024)}}
+	var rd Reader
+	rd.setPresentation(tr, 1000, []box.SttsRun{{Count: 10, Delta: 1024}}, false)
+	if got := rd.Info().StartOffset; got != 500*time.Millisecond {
+		t.Errorf("StartOffset = %v, want 500ms", got)
+	}
+	// The 1000-tick segment is one second of movie time: 48000 media ticks, clipped
+	// to the 10240 ticks that follow media_time 1024.
+	if want := ticksToDuration(10240-1024, 48000); rd.Info().Duration != want {
+		t.Errorf("Duration = %v, want %v", rd.Info().Duration, want)
+	}
+}
+
+// TestTruncatedEditListIsCorrupt pins that an elst whose entry_count overruns its
+// body fails NewReader with ErrCorrupt, on the plain and the fragmented path.
+func TestTruncatedEditListIsCorrupt(t *testing.T) {
+	cfg := WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k}
+	plain := writeTimed(t, cfg, []uint32{1024, 1024})
+	frag := buildFragmentedStream(t, cfg, [][]fragAU{{{au: []byte{1, 0, 1}, dur: 1024}}})
+	for name, data := range map[string][]byte{"plain": plain, "fragmented": frag} {
+		t.Run(name, func(t *testing.T) {
+			data = setEditList(t, data, []box.ElstEntry{edit(1000, 1024)})
+			moov := topLevelBoxOffset(t, data, "moov")
+			elst := moov + bytes.Index(data[moov:], []byte("elst"))
+			binary.BigEndian.PutUint32(data[elst+8:], 5) // entry_count after version/flags
+			if _, err := NewReader(bytes.NewReader(data)); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("NewReader err = %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+// TestStartOffsetWiring pins that NewReader passes the movie timescale from the
+// mvhd, not the media timescale, to the edit-list resolver, on the plain and the
+// fragmented path. The movie header is patched to 1000 ticks per second while the
+// media stays at 16000.
+func TestStartOffsetWiring(t *testing.T) {
+	cfg := WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k}
+	durs := []uint32{1024, 1024, 1024, 1024}
+	au := make([]fragAU, 0, len(durs))
+	for i, d := range durs {
+		au = append(au, fragAU{au: []byte{byte(i), 0, 1}, dur: d})
+	}
+	files := map[string][]byte{
+		"plain":      writeTimed(t, cfg, durs),
+		"fragmented": buildFragmentedStream(t, cfg, [][]fragAU{au}),
+	}
+	for name, data := range files {
+		t.Run(name, func(t *testing.T) {
+			data = setEditList(t, data, []box.ElstEntry{edit(500, -1), edit(100, 1024)})
+			moov := topLevelBoxOffset(t, data, "moov")
+			mvhd := moov + bytes.Index(data[moov:], []byte("mvhd"))
+			// mvhd version 0: type(4) version/flags(4) creation(4) modification(4) timescale(4).
+			binary.BigEndian.PutUint32(data[mvhd+16:], 1000)
+			info := mustReader(t, data).Info()
+			if info.StartOffset != 500*time.Millisecond {
+				t.Errorf("StartOffset = %v, want 500ms", info.StartOffset)
+			}
+			// 100 movie ticks are 100 ms: 1600 media ticks.
+			if want := ticks16k(1600); info.Duration != want {
+				t.Errorf("Duration = %v, want %v", info.Duration, want)
+			}
+		})
+	}
+}
