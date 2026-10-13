@@ -285,7 +285,7 @@ pcmOut, info, err = flacm4a.DecodeInterleaved(r)
 As with `aacm4a`, `opusm4a.DecodeInterleaved` returns every decoded sample,
 including the Opus pre-skip priming and the trailing padding, so trim
 `info.EncoderDelay` leading samples then keep `info.Duration`-worth for
-sample-accurate output. `flacm4a` needs no trimming (FLAC has no priming).
+sample-accurate output, with the same multi-edit exception as above. `flacm4a` needs no trimming (FLAC has no priming).
 
 Both `DecodeInterleaved` calls stop at `m4a.DefaultMaxDecodedBytes`. For a file
 the caller did not produce, or one longer than that ceiling, decode it a frame at

@@ -62,11 +62,12 @@ type Info struct {
 	// EncoderDelay (so an Opus pre-skip is excluded), and a fragmented stream's
 	// open-ended edit runs to the end of its fragments. Skipping EncoderDelay and
 	// keeping Duration's worth of samples yields the presented audio, and
-	// SeekTime accepts the times in [0, Duration), except that a time within half a
-	// media tick of Duration rounds to the end and is refused. When SeekTime reports ErrUnsupported
-	// for the edit list itself (several non-empty edits, a trailing empty edit, a
-	// non-unit media rate, no non-empty edit, a media_time below -1), Duration is the sum of the presented edits and that
-	// skip-and-keep recipe does not reproduce the presentation.
+	// SeekTime accepts the times in [0, Duration), except that a time within half
+	// a media tick of Duration rounds to the end and is refused. When SeekTime
+	// reports ErrUnsupported for the edit list itself (several non-empty edits, a
+	// trailing empty edit, a non-unit media rate, no non-empty edit, a media_time
+	// below -1), Duration is the sum of the presented edits and that skip-and-keep
+	// recipe does not reproduce the presentation.
 	Duration time.Duration
 
 	// StartOffset is the presentation time of the first presented sample: the
