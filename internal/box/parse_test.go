@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -164,16 +165,63 @@ func TestParseSampleTablesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestParseElstRoundTrip(t *testing.T) {
-	// Version 0.
-	seg, mt, has, err := ParseElst(bodyOf(t, AppendElst(nil, 600, 1024)))
-	if err != nil || !has || seg != 600 || mt != 1024 {
-		t.Fatalf("elst v0 = seg %d mt %d has %v err %v", seg, mt, has, err)
+func TestParseElst(t *testing.T) {
+	// v0Body builds a version-0 body of (segment, media_time, rate) triples.
+	v0Body := func(rows ...[3]uint32) []byte {
+		b := []byte{0, 0, 0, 0, 0, 0, 0, byte(len(rows))}
+		for _, r := range rows {
+			b = binary.BigEndian.AppendUint32(b, r[0])
+			b = binary.BigEndian.AppendUint32(b, r[1])
+			b = binary.BigEndian.AppendUint32(b, r[2])
+		}
+		return b
 	}
-	// Version 1 and a negative (empty-edit) media_time.
-	seg, mt, has, err = ParseElst(bodyOf(t, AppendElst(nil, 1<<33, -1)))
-	if err != nil || !has || seg != 1<<33 || mt != -1 {
-		t.Fatalf("elst v1 = seg %d mt %d has %v err %v", seg, mt, has, err)
+	v1Body := func() []byte {
+		b := []byte{1, 0, 0, 0, 0, 0, 0, 2}
+		b = binary.BigEndian.AppendUint64(b, 1<<33)
+		b = binary.BigEndian.AppendUint64(b, ^uint64(0)) // -1
+		b = binary.BigEndian.AppendUint32(b, 0x00010000)
+		b = binary.BigEndian.AppendUint64(b, 7)
+		b = binary.BigEndian.AppendUint64(b, 1024)
+		b = binary.BigEndian.AppendUint32(b, 0)
+		return b
+	}
+	tests := []struct {
+		name    string
+		payload []byte
+		want    []ElstEntry
+		wantErr bool
+	}{
+		{"v0 round trip", bodyOf(t, AppendElst(nil, 600, 1024)), []ElstEntry{{600, 1024, 0x00010000}}, false},
+		{"v1 round trip", bodyOf(t, AppendElst(nil, 1<<33, -1)), []ElstEntry{{1 << 33, -1, 0x00010000}}, false},
+		{
+			"v0 two entries", v0Body([3]uint32{500, 0xFFFFFFFF, 0x00010000}, [3]uint32{1000, 1024, 0x00010000}),
+			[]ElstEntry{{500, -1, 0x00010000}, {1000, 1024, 0x00010000}},
+			false,
+		},
+		{"v1 two entries", v1Body(), []ElstEntry{{1 << 33, -1, 0x00010000}, {7, 1024, 0}}, false},
+		{"v0 negative media_time", v0Body([3]uint32{1, 0xFFFFFFFE, 0x00010000}), []ElstEntry{{1, -2, 0x00010000}}, false},
+		{"count zero", []byte{0, 0, 0, 0, 0, 0, 0, 0}, nil, false},
+		{"truncated count", func() []byte { b := v0Body([3]uint32{1, 2, 3}); b[7] = 3; return b }(), nil, true},
+		{"count overruns body", []byte{0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0}, nil, true},
+		{"under 8 bytes", []byte{0, 0, 0, 0, 0, 0, 0}, nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseElst(tc.payload)
+			if tc.wantErr {
+				if !errors.Is(err, errParse) {
+					t.Fatalf("err = %v, want errParse", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("entries = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 

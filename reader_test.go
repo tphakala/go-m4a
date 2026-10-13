@@ -4,14 +4,50 @@ package m4a
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tphakala/go-m4a/internal/testutil"
 )
+
+// ffprobeStreamField returns one stream field (for example "duration" or
+// "start_time") that ffprobe reports for the first audio stream of path, in
+// seconds, as a time.Duration. It skips the test when ffprobe is absent (and
+// fails it where CI requires ffmpeg).
+func ffprobeStreamField(t *testing.T, path, field string) time.Duration {
+	t.Helper()
+	ffprobe := testutil.LookTool(t, "ffprobe")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "a:0",
+		"-show_entries", "stream="+field, "-of", "default=nw=1:nk=1", path).Output()
+	if err != nil {
+		t.Fatalf("ffprobe %s: %v", path, err)
+	}
+	sec, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		t.Fatalf("ffprobe %s %s = %q: %v", path, field, out, err)
+	}
+	return time.Duration(sec * float64(time.Second))
+}
+
+// assertWithinMicrosecond fails when got and want differ by more than 1 us, the
+// precision of ffprobe's six-digit seconds.
+func assertWithinMicrosecond(t *testing.T, what string, got, want time.Duration) {
+	t.Helper()
+	if d := got - want; d < -time.Microsecond || d > time.Microsecond {
+		t.Errorf("%s = %v, want %v", what, got, want)
+	}
+}
 
 // readerFromWriter writes cfg + frames with the Writer and returns a Reader over
 // the produced bytes, so the round-trip tests exercise the exact byte layout the
@@ -146,7 +182,7 @@ func TestRoundTripEditListVariants(t *testing.T) {
 			if info.EncoderDelay != tc.wantDelay {
 				t.Errorf("EncoderDelay = %d, want %d", info.EncoderDelay, tc.wantDelay)
 			}
-			want := time.Duration(float64(tc.wantSeg) / 48000 * float64(time.Second))
+			want := time.Duration(tc.wantSeg * uint64(time.Second) / 48000)
 			if info.Duration != want {
 				t.Errorf("Duration = %v, want %v", info.Duration, want)
 			}
@@ -221,7 +257,9 @@ func TestNewReaderNil(t *testing.T) {
 // movie timescale (1000) differs from the media timescale, so duration pins the
 // timescale the Reader converts the edit segment with. afconvert's files use one
 // timescale and matching mvhd and mdhd durations, so they cannot tell which of
-// those the Reader used.
+// those the Reader used. ffmpeg_noedit_mono48k.m4a has no edit list and a movie
+// header (1000, 622) rounded away from the media (48000, 29824): the Duration is
+// the exact media length, 621.333 ms, not the movie header's 622 ms.
 var interopFiles = []struct {
 	name         string
 	sampleRate   int
@@ -231,6 +269,7 @@ var interopFiles = []struct {
 	duration     time.Duration
 }{
 	{"ffmpeg_mono48k.m4a", 48000, 1, 30, true, 600 * time.Millisecond},
+	{"ffmpeg_noedit_mono48k.m4a", 48000, 1, 30, false, 621333333},
 	{"afconvert_mono48k.m4a", 48000, 1, 31, false, 661333333},
 	{"ffmpeg_stereo44k.m4a", 44100, 2, 27, true, 600 * time.Millisecond},
 	{"afconvert_stereo44k.m4a", 44100, 2, 28, false, 650158730},
@@ -259,6 +298,10 @@ func TestInterop(t *testing.T) {
 			if d := info.Duration - tc.duration; d < -time.Microsecond || d > time.Microsecond {
 				t.Errorf("Duration = %v, want %v (ffprobe)", info.Duration, tc.duration)
 			}
+
+			t.Run("ffprobe", func(t *testing.T) {
+				assertWithinMicrosecond(t, "Duration", info.Duration, ffprobeStreamField(t, path, "duration"))
+			})
 
 			total := assertInteropFrames(t, r, tc.frameCount, fileSize(t, path))
 			t.Logf("%s: %d Hz, %d ch, %d frames, %d AU bytes, EncoderDelay=%d, Duration=%v",

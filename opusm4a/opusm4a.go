@@ -165,7 +165,9 @@ func EncodeInterleaved(w io.WriteSeeker, cfg Config, pcm []byte) error {
 // returned PCM includes the leading pre-skip priming and the trailing final-frame
 // padding: for sample-accurate output, skip Info.EncoderDelay leading samples per
 // channel, then keep Info.Duration-worth of samples (Duration times 48000 per
-// channel) and discard the rest.
+// channel) and discard the rest. The recipe does not hold for a file whose edit
+// list m4a.Reader.SeekTime rejects with m4a.ErrUnsupported (several non-empty
+// edits, for one): Duration is then the summed presented edits, see m4a.Info.
 //
 // The decode is bounded at m4a.DefaultMaxDecodedBytes: a stream that decodes to
 // more stops with an error wrapping m4a.ErrDecodeLimit instead of growing the

@@ -280,7 +280,9 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 // padding. For sample-accurate output, skip Info.EncoderDelay leading samples
 // per channel, then keep only as many samples per channel as Info.Duration
 // represents (Duration*SampleRate), discarding the trailing padding the edit
-// list excludes.
+// list excludes. The recipe does not hold for a file whose edit list
+// m4a.Reader.SeekTime rejects with m4a.ErrUnsupported (several non-empty edits,
+// for one): Duration is then the summed presented edits, see m4a.Info.
 //
 // This package has no counterpart to flacm4a.DecodeInterleaved or
 // opusm4a.DecodeInterleaved, so it has no counterpart to their

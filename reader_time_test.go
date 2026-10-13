@@ -79,11 +79,11 @@ func tickToDuration(tick uint64, ts uint32) time.Duration {
 // sweepTicks checks SeekTime against tickOracle for every tick in
 // [0, presented) and ErrOutOfRange for the few ticks after, and that the result
 // is monotone (I5). origin is the media tick that presentation time 0 maps to.
-func sweepTicks(t *testing.T, r *Reader, durs []uint32, ts uint32, origin, presentEnd uint64) {
+func sweepTicks(t *testing.T, r *Reader, durs []uint32, ts uint32, origin, windowEnd uint64) {
 	t.Helper()
 	var prevS int
 	var prevK int64 = -1
-	for tick := range presentEnd - origin {
+	for tick := range windowEnd - origin {
 		d := tickToDuration(tick, ts)
 		s, k, err := r.SeekTime(d)
 		ws, wk, ok := tickOracle(durs, origin+tick)
@@ -98,7 +98,7 @@ func sweepTicks(t *testing.T, r *Reader, durs []uint32, ts uint32, origin, prese
 		}
 		prevS, prevK = s, k
 	}
-	for tick := presentEnd - origin; tick < presentEnd-origin+3; tick++ {
+	for tick := windowEnd - origin; tick < windowEnd-origin+3; tick++ {
 		s, k, err := r.SeekTime(tickToDuration(tick, ts))
 		if !errors.Is(err, ErrOutOfRange) || s != 0 || k != 0 {
 			t.Fatalf("SeekTime(tick %d) = (%d, %d, %v), want (0, 0, ErrOutOfRange)", tick, s, k, err)
@@ -129,11 +129,25 @@ func TestSeekTimeInteropFixtures(t *testing.T) {
 			{d: 500 * time.Millisecond, sample: 22, skip: 546},
 			{d: 600 * time.Millisecond, oor: true},
 		}},
+		// No edit list and a movie timescale (1000) coarser than the media's: the
+		// end is the exact media end (29824 ticks), not the rounded movie duration.
+		{"ffmpeg_noedit_mono48k.m4a", 2, []probe{
+			{d: 0, sample: 0, skip: 0},
+			{d: tickToDuration(29823, 48000), sample: 29, skip: 127},
+			{d: 621333333, oor: true},
+		}},
 		{"opus_mono48k.mp4", 2, []probe{
 			{d: 0, sample: 0, skip: 312},
 			{d: 13500 * time.Microsecond, sample: 1, skip: 0},
 			{d: time.Second - 20833, sample: 50, skip: 311},
 			{d: time.Second, oor: true},
+		}},
+		// No edit list, so the window starts at the dOps PreSkip (312) and ends at
+		// the media end (29112 ticks): 600 ms, not the movie header's 607 ms.
+		{"opus_noedit_mono48k.mp4", 2, []probe{
+			{d: 0, sample: 0, skip: 312},
+			{d: 600*time.Millisecond - 20833, sample: 30, skip: 311},
+			{d: 600 * time.Millisecond, oor: true},
 		}},
 		{"flac_mono44k.mp4", 2, []probe{
 			{d: 0, sample: 0, skip: 0},
@@ -159,11 +173,16 @@ func TestSeekTimeInteropFixtures(t *testing.T) {
 			}
 			ref := mustReader(t, data)
 			want := drainFrames(t, ref)
-			probes := tc.probes
-			if tc.name == "afconvert_mono48k.m4a" {
-				// The no-elst end is the media end: Info().Duration is the last
-				// presented instant and must be refused.
-				probes = append(probes, probe{d: r.Info().Duration, oor: true})
+			// Info().Duration is the first instant past the presented window, so
+			// SeekTime refuses it and accepts the tick before it.
+			probes := append(slices.Clone(tc.probes), probe{d: r.Info().Duration, oor: true})
+			if dur := r.Info().Duration; dur > 0 {
+				// Duration is a floor, so round its tick count up to get the window length.
+				presented := (uint64(dur)*uint64(r.timescale) + uint64(time.Second) - 1) / uint64(time.Second)
+				last := tickToDuration(presented-1, r.timescale)
+				if _, _, err := r.SeekTime(last); err != nil {
+					t.Errorf("SeekTime(Duration - 1 tick = %v): %v", last, err)
+				}
 			}
 			for _, p := range probes {
 				s, k, err := r.SeekTime(p.d)
@@ -196,7 +215,7 @@ func TestSeekTimeMatchesTickOracle(t *testing.T) {
 		delay  int
 		mlen   int64
 		origin uint64
-		end    uint64 // presentEnd in media ticks
+		end    uint64 // window end in media ticks
 	}
 	cases := make([]cfgCase, 0, 9)
 	for _, dly := range []int{NoEdit, 1, 1024, 1500} {
@@ -406,7 +425,10 @@ func TestSeekTimeSkipsZeroDurationUnit(t *testing.T) {
 	}
 }
 
-func TestSeekTimeLeadingEmptyEdit(t *testing.T) {
+// TestSeekTimeOnlyEmptyEdit covers an edit list with nothing but an empty edit:
+// there is no presented media to seek in. A leading empty edit followed by a real
+// one is supported; see TestPresentationWindow.
+func TestSeekTimeOnlyEmptyEdit(t *testing.T) {
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
 	data := writeTimed(t, cfg, []uint32{1024, 1024, 1024})
 	moov := topLevelBoxOffset(t, data, "moov")

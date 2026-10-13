@@ -96,26 +96,26 @@ func aacFragmentConfig() WriterConfig {
 // given type, walking the box tree. Scanning for the four type bytes would be
 // wrong: an mdat payload is arbitrary audio data and can contain any four-byte
 // sequence, including a box type.
-func topLevelBoxOffset(t *testing.T, data []byte, typ string) int {
-	t.Helper()
+func topLevelBoxOffset(tb testing.TB, data []byte, typ string) int {
+	tb.Helper()
 	for off := 0; off+8 <= len(data); {
 		size := int(binary.BigEndian.Uint32(data[off:]))
 		if size == 1 {
 			// The 64-bit largesize form, which a non-fragmented file's mdat uses.
 			if off+16 > len(data) {
-				t.Fatalf("truncated largesize header at offset %d while looking for %q", off, typ)
+				tb.Fatalf("truncated largesize header at offset %d while looking for %q", off, typ)
 			}
 			size = int(binary.BigEndian.Uint64(data[off+8:]))
 		}
 		if size < 8 || off+size > len(data) {
-			t.Fatalf("malformed box at offset %d while looking for %q", off, typ)
+			tb.Fatalf("malformed box at offset %d while looking for %q", off, typ)
 		}
 		if string(data[off+4:off+8]) == typ {
 			return off
 		}
 		off += size
 	}
-	t.Fatalf("top-level box %q not found", typ)
+	tb.Fatalf("top-level box %q not found", typ)
 	return 0
 }
 

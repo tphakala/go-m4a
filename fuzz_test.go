@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tphakala/go-m4a/internal/box"
 	"github.com/tphakala/go-m4a/internal/testutil"
 )
 
@@ -104,6 +105,11 @@ func FuzzReader(f *testing.F) {
 	if b, ok := fragmentedSeed(); ok {
 		f.Add(b)
 	}
+	// Seed with a multi-entry edit list (a leading empty edit) so the fuzzer starts
+	// from the resolver's supported multi-entry shape.
+	if b, ok := writerSeed(); ok {
+		f.Add(setEditList(f, b, []box.ElstEntry{edit(500, -1), edit(2000, 1024)}))
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		defer func() {
@@ -148,6 +154,23 @@ func FuzzReader(f *testing.F) {
 				t.Errorf("SeekTime(%v) succeeded for a negative time", d)
 			case sample < 0 || sample >= n || skip < 0 || r.nextSample != sample:
 				t.Errorf("SeekTime(%v) = (%d, %d) with cursor at %d, FrameCount %d", d, sample, skip, r.nextSample, n)
+			}
+		}
+
+		// One window feeds Info.Duration and SeekTime, so for any supported edit
+		// list SeekTime refuses Duration itself and accepts 0 exactly when the
+		// window is not empty. The rounding argument needs a media timescale of at
+		// most 5e8 and a Duration that did not saturate.
+		info := r.Info()
+		if info.Duration < 0 || info.StartOffset < 0 {
+			t.Errorf("negative Duration %v or StartOffset %v", info.Duration, info.StartOffset)
+		}
+		if _, _, zerr := r.SeekTime(0); !errors.Is(zerr, ErrUnsupported) && r.timescale <= 5e8 && info.Duration < math.MaxInt64 {
+			if _, _, derr := r.SeekTime(info.Duration); !errors.Is(derr, ErrOutOfRange) {
+				t.Errorf("SeekTime(Duration %v) error = %v, want ErrOutOfRange", info.Duration, derr)
+			}
+			if (zerr == nil) != (info.Duration > 0) {
+				t.Errorf("SeekTime(0) error = %v with Duration %v", zerr, info.Duration)
 			}
 		}
 

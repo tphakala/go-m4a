@@ -18,27 +18,29 @@ import (
 // timing table built at open (stts for a plain file, the trun durations for a
 // fragmented stream) and the cursor move is SeekSample's.
 //
-// Presentation time 0 is media tick Info().EncoderDelay, the priming the edit
-// list skips, so a seek to 0 selects the first sample a gapless player presents
-// and SeekTime(d) selects the same sample as decoding from the start and dropping
-// EncoderDelay plus d's worth of samples. d is rounded to the nearest media tick
-// (halves up), so a time derived from a tick through a float or a truncated
-// nanosecond count still lands on that tick's unit.
+// Presentation time 0 is the first presented sample: media tick
+// Info().EncoderDelay, the priming the edit list skips, after any leading empty
+// edits (whose length is Info().StartOffset and is not part of the time axis). A
+// seek to 0 selects the first sample a gapless player presents and SeekTime(d)
+// selects the same sample as decoding from the start and dropping EncoderDelay
+// plus d's worth of samples. d is rounded to the nearest media tick (halves up),
+// so a time derived from a tick through a float or a truncated nanosecond count
+// still lands on that tick's unit.
 //
 // skip counts samples at Info().SampleRate. It equals the offset in media ticks
 // whenever the media timescale equals the sample rate, which holds for every file
 // this package writes; otherwise it is rescaled and rounded down. A unit with a
 // zero duration is never returned.
 //
-// The valid range is [0, end) where end is the presented length: the edit list's
-// segment_duration when there is one (so trailing padding is excluded, like
-// Info().Duration), else the summed sample durations minus EncoderDelay. A d
-// outside it, including the last half tick before end, returns an error
+// The valid range is [0, Info().Duration): the window the edit list presents,
+// the same one Info().Duration reports, so trailing padding is excluded. A d
+// outside it, including the last half tick before the end, returns an error
 // wrapping ErrOutOfRange with the cursor unchanged. A track with no sample
-// timing, or whose edit list opens with an empty edit (a media_time of -1, which
-// the reader does not resolve), returns an error wrapping ErrUnsupported for any
-// d >= 0, also with the cursor unchanged; a negative d is always ErrOutOfRange.
-// On any error the results are 0, 0.
+// timing, or whose edit list does not reduce to one presented window (more than
+// one non-empty edit, a trailing empty edit, a non-unit media rate, no non-empty
+// edit, a media_time below -1), returns an error wrapping ErrUnsupported for any
+// d >= 0, also with the cursor unchanged; a negative d is always ErrOutOfRange. On any error the
+// results are 0, 0.
 //
 // The result depends only on d and the file, never on the cursor, so SeekTime may
 // be repeated and may be called after the end of the stream. As for SeekSample,
@@ -51,20 +53,19 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 	if d < 0 {
 		return 0, 0, fmt.Errorf("go-m4a: seek to negative time %v: %w", d, ErrOutOfRange)
 	}
-	if rd.seekTimeErr != nil {
-		return 0, 0, rd.seekTimeErr
+	if rd.window.seekErr != nil {
+		return 0, 0, rd.window.seekErr
 	}
 	ticks, ok := rescaleTicks(uint64(d), uint32(time.Second), rd.timescale)
 	if !ok {
 		return 0, 0, fmt.Errorf("go-m4a: seek time %v overflows the media timescale: %w", d, ErrOutOfRange)
 	}
-	// EncoderDelay is never negative: it is an elst media_time >= 0 or a PreSkip.
-	target, carry := bits.Add64(uint64(rd.info.EncoderDelay), ticks, 0)
-	if carry != 0 || target >= rd.presentEnd {
+	target, carry := bits.Add64(rd.window.start, ticks, 0)
+	if carry != 0 || target >= rd.window.end {
 		return 0, 0, fmt.Errorf("go-m4a: seek time %v is at or past the presented end: %w", d, ErrOutOfRange)
 	}
 	idx, off, ok := locateTick(rd.timeRuns, target)
-	// Unreachable while target < presentEnd <= the summed durations and the runs
+	// Unreachable while target < window.end <= the summed durations and the runs
 	// cover every sample; kept so a table inconsistency is an error, not a wrong unit.
 	if !ok || idx >= int64(rd.sampleCount) {
 		return 0, 0, fmt.Errorf("go-m4a: seek time %v is beyond the timing table: %w", d, ErrOutOfRange)
@@ -78,38 +79,6 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 		off = off * rate / uint64(rd.timescale)
 	}
 	return int(idx), int64(off), nil
-}
-
-// setTiming stores the run-length timing table and the values SeekTime needs
-// beside it: the media timescale, the presented end in media ticks and, when the
-// track cannot be time-sought, the error SeekTime returns. It is shared by the plain and fragmented paths so they cannot
-// drift. The retained state is at most one 8-byte run per distinct stretch of
-// equal durations: bounded by the stts entries (inside the capped moov) on the
-// plain path and by the sample count on the fragmented path, never an array of
-// cumulative ticks per sample.
-//
-// The presented end is the media end, clipped to media_time + segment_duration
-// (rescaled from the movie to the media timescale) when the edit list has a
-// positive segment_duration; a zero segment_duration is open-ended.
-func (rd *Reader) setTiming(tr *track, movieTS uint32, runs []box.SttsRun) {
-	rd.timeRuns = runs
-	rd.timescale = tr.mdhdTS
-	mediaEnd := sumTicks(runs)
-	switch {
-	case tr.mdhdTS == 0 || mediaEnd == 0:
-		rd.seekTimeErr = fmt.Errorf("go-m4a: track has no sample timing: %w", ErrUnsupported)
-	case tr.hasElst && tr.elstMedia < 0:
-		rd.seekTimeErr = fmt.Errorf("go-m4a: time seek with a leading empty edit is unsupported: %w", ErrUnsupported)
-	}
-	end := mediaEnd
-	if tr.hasElst && tr.elstMedia >= 0 && tr.elstSeg > 0 && movieTS > 0 {
-		if seg, ok := rescaleTicks(tr.elstSeg, movieTS, tr.mdhdTS); ok {
-			if e, carry := bits.Add64(uint64(tr.elstMedia), seg, 0); carry == 0 && e < end {
-				end = e
-			}
-		}
-	}
-	rd.presentEnd = end
 }
 
 // appendTimeRun appends count samples of the given duration to runs, dropping an

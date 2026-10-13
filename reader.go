@@ -50,13 +50,29 @@ type Info struct {
 	// FrameCount is the number of access units (MP4 "samples") in the track.
 	FrameCount int
 
-	// EncoderDelay is the leading priming sample count taken verbatim from the
-	// edit list media_time. It is 0 when there is no edit list or the first edit
-	// is an empty edit (media_time -1).
+	// EncoderDelay is the media tick presented first: the media_time of the first
+	// non-empty edit in the edit list, else the Opus dOps PreSkip, else 0. Leading
+	// empty edits (media_time -1) do not zero it; they are StartOffset. It is the
+	// number of leading decoded samples per channel to skip when the media
+	// timescale equals the sample rate.
 	EncoderDelay int64
 
-	// Duration is the track presentation duration after the edit list.
+	// Duration is the presented media length from the edit list window, excluding
+	// any leading empty edit. Without an edit list it is the media length less
+	// EncoderDelay (so an Opus pre-skip is excluded), and a fragmented stream's
+	// open-ended edit runs to the end of its fragments. Skipping EncoderDelay and
+	// keeping Duration's worth of samples yields the presented audio, and
+	// SeekTime accepts the times in [0, Duration), except that a time within half
+	// a media tick of Duration rounds to the end and is refused. When SeekTime
+	// reports ErrUnsupported for the edit list itself (several non-empty edits, a
+	// trailing empty edit, a non-unit media rate, no non-empty edit, a media_time
+	// below -1), Duration is the sum of the presented edits and that skip-and-keep
+	// recipe does not reproduce the presentation.
 	Duration time.Duration
+
+	// StartOffset is the presentation time of the first presented sample: the
+	// summed leading empty edits of the edit list. It is 0 for most files.
+	StartOffset time.Duration
 
 	// Brand is the ftyp major brand.
 	Brand string
@@ -97,17 +113,13 @@ type Reader struct {
 	sampleInChunk int64
 	curOffset     int64
 
-	// Sample timing for SeekTime, built at open by setTiming. timeRuns is
+	// Sample timing for SeekTime, built at open by setPresentation. timeRuns is
 	// run-length (one 8-byte run per stretch of equal durations, never a per-sample
-	// array), timescale is the media timescale and presentEnd the presented end in
-	// media ticks. seekTimeErr is the ErrUnsupported error SeekTime returns, for a
-	// non-negative time, on a track without usable timing or whose edit list opens
-	// with an empty edit (an origin the reader does not resolve); nil when the track
-	// can be time-sought.
-	timeRuns    []box.SttsRun
-	timescale   uint32
-	presentEnd  uint64
-	seekTimeErr error
+	// array), timescale is the media timescale and window the presented window the
+	// edit list resolves to, which also feeds Info.
+	timeRuns  []box.SttsRun
+	timescale uint32
+	window    presentation
 }
 
 // Box and brand codes the reader matches while walking the tree.
@@ -362,9 +374,7 @@ type track struct {
 	mdhdTS  uint32
 	mdhdDur uint64
 
-	hasElst   bool
-	elstSeg   uint64
-	elstMedia int64
+	edits []box.ElstEntry
 }
 
 // selectSounTrack keeps the first supported soun track while walking a moov's
@@ -404,18 +414,17 @@ func errNoSupportedSoun(sawSoun bool) error {
 // AAC-LC, Opus, or fLaC) and builds its sample geometry.
 func (rd *Reader) parseMoov(moov []byte) error {
 	var movieTS uint32
-	var movieDur uint64
 	var chosen *track
 	var sawSoun bool
 
 	err := box.WalkChildren(moov, func(typ box.FourCC, body []byte) error {
 		switch typ {
 		case fourccMvhd:
-			ts, dur, perr := box.ParseMvhd(body)
+			ts, _, perr := box.ParseMvhd(body)
 			if perr != nil {
 				return perr
 			}
-			movieTS, movieDur = ts, dur
+			movieTS = ts
 		case fourccMvex:
 			return fmt.Errorf("go-m4a: fragmented input (mvex): %w", ErrUnsupported)
 		case fourccTrak:
@@ -430,7 +439,7 @@ func (rd *Reader) parseMoov(moov []byte) error {
 		return errNoSupportedSoun(sawSoun)
 	}
 
-	return rd.applyTrack(chosen, movieTS, movieDur)
+	return rd.applyTrack(chosen, movieTS)
 }
 
 // parseTrak walks one trak box, collecting its handler type, edit list, media
@@ -458,7 +467,7 @@ func parseTrak(trak []byte) (*track, error) {
 	return tr, nil
 }
 
-// parseEdts reads the first elst entry from an edts box.
+// parseEdts reads the edit list from an edts box.
 func parseEdts(edts []byte, tr *track) error {
 	body, found, err := box.FindChild(edts, fourccElst)
 	if err != nil {
@@ -467,13 +476,11 @@ func parseEdts(edts []byte, tr *track) error {
 	if !found {
 		return nil
 	}
-	seg, media, has, perr := box.ParseElst(body)
+	edits, perr := box.ParseElst(body)
 	if perr != nil {
 		return perr
 	}
-	tr.hasElst = has
-	tr.elstSeg = seg
-	tr.elstMedia = media
+	tr.edits = edits
 	return nil
 }
 
@@ -646,7 +653,7 @@ func parseFlacConfig(children []byte, tr *track) error {
 
 // applyTrack validates the selected track's tables, fills Info, and builds the
 // sample geometry (per-sample sizes plus per-chunk sample counts and offsets).
-func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
+func (rd *Reader) applyTrack(tr *track, movieTS uint32) error {
 	// Codec-specific configuration must be present and, for AAC, the object type
 	// must be MPEG-4 Audio. The sample geometry below is codec-agnostic.
 	if err := rd.validateCodec(tr); err != nil {
@@ -690,8 +697,8 @@ func (rd *Reader) applyTrack(tr *track, movieTS uint32, movieDur uint64) error {
 		}
 	}
 
-	rd.fillFormatInfo(tr, movieTS, movieDur)
-	rd.setTiming(tr, movieTS, runs)
+	rd.fillFormatInfo(tr)
+	rd.setPresentation(tr, movieTS, runs, false)
 	rd.info.FrameCount = rd.sampleCount
 	return nil
 }
@@ -727,10 +734,11 @@ func (rd *Reader) validateCodec(tr *track) error {
 }
 
 // fillFormatInfo copies the codec configuration into the Reader and fills the
-// format fields that do not depend on the sample geometry: sample rate, channel
-// count, encoder delay, and presentation duration. It is shared by the plain and
-// fragmented paths; the caller sets FrameCount once the geometry is built.
-func (rd *Reader) fillFormatInfo(tr *track, movieTS uint32, movieDur uint64) {
+// format fields that do not depend on the sample geometry: the codec
+// configuration, sample rate and channel count. The edit-list values come from
+// setPresentation. It is shared by the plain and fragmented paths; the caller
+// sets FrameCount once the geometry is built.
+func (rd *Reader) fillFormatInfo(tr *track) {
 	// Copy the codec config (and the ASC for AAC) so the Reader is independent of
 	// the moov buffer. tr.asc is nil for Opus and FLAC, so ASC stays nil there.
 	if tr.asc != nil {
@@ -738,16 +746,6 @@ func (rd *Reader) fillFormatInfo(tr *track, movieTS uint32, movieDur uint64) {
 	}
 	rd.info.CodecConfig = bytes.Clone(tr.codecConfig)
 	rd.info.SampleRate, rd.info.Channels = resolveFormat(tr)
-
-	if tr.hasElst && tr.elstMedia >= 0 {
-		rd.info.EncoderDelay = tr.elstMedia
-	} else if tr.codec == fourccOpus && tr.opusPreSkip > 0 {
-		// No edit list: fall back to the dOps PreSkip, the canonical Opus priming
-		// signal per the Encapsulation of Opus in ISOBMFF (RFC 7845). A file this
-		// package writes always carries the elst, so this covers foreign Opus files.
-		rd.info.EncoderDelay = int64(tr.opusPreSkip)
-	}
-	rd.info.Duration = presentationDuration(tr, movieTS, movieDur)
 }
 
 // buildGeometry decodes the size and chunk tables, cross-checks their counts,
@@ -952,32 +950,6 @@ func resolveFormat(tr *track) (sampleRate, channels int) {
 		}
 	}
 	return sampleRate, channels
-}
-
-// presentationDuration converts the track's presentation length to a
-// time.Duration. With an edit list the segment_duration is in the movie
-// timescale; without one the movie header duration applies, and the media
-// header is the last resort.
-func presentationDuration(tr *track, movieTS uint32, movieDur uint64) time.Duration {
-	switch {
-	case tr.hasElst && movieTS > 0:
-		return ticksToDuration(tr.elstSeg, movieTS)
-	case movieTS > 0 && movieDur > 0:
-		return ticksToDuration(movieDur, movieTS)
-	case tr.mdhdTS > 0:
-		return ticksToDuration(tr.mdhdDur, tr.mdhdTS)
-	default:
-		return 0
-	}
-}
-
-// ticksToDuration converts ticks at the given timescale (ticks per second) to a
-// time.Duration.
-func ticksToDuration(ticks uint64, timescale uint32) time.Duration {
-	if timescale == 0 {
-		return 0
-	}
-	return time.Duration(float64(ticks) / float64(timescale) * float64(time.Second))
 }
 
 // sizeOf returns the byte length of sample i, from the per-sample table or the

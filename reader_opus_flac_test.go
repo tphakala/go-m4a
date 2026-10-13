@@ -21,11 +21,17 @@ var opusFlacFixtures = []struct {
 	encDelay   int64 // elst media_time: Opus pre-skip 312; FLAC has none
 	cfgLen     int   // expected CodecConfig length: dOps body 11, STREAMINFO 34
 	duration   time.Duration
+
+	// ffprobeExtra is what ffprobe's stream duration counts beyond Duration. With
+	// no edit list ffprobe reports the whole media length, PreSkip included, while
+	// ffmpeg's decode (and so Duration) drops the PreSkip.
+	ffprobeExtra time.Duration
 }{
-	{"opus_mono48k.mp4", CodecOpus, 48000, 1, 51, 312, 11, time.Second},
-	{"opus_stereo48k.mp4", CodecOpus, 48000, 2, 51, 312, 11, time.Second},
-	{"flac_mono44k.mp4", CodecFLAC, 44100, 1, 10, 0, 34, time.Second},
-	{"flac_stereo48k.mp4", CodecFLAC, 48000, 2, 11, 0, 34, time.Second},
+	{"opus_mono48k.mp4", CodecOpus, 48000, 1, 51, 312, 11, time.Second, 0},
+	{"opus_stereo48k.mp4", CodecOpus, 48000, 2, 51, 312, 11, time.Second, 0},
+	{"opus_noedit_mono48k.mp4", CodecOpus, 48000, 1, 31, 312, 11, 600 * time.Millisecond, 6500 * time.Microsecond},
+	{"flac_mono44k.mp4", CodecFLAC, 44100, 1, 10, 0, 34, time.Second, 0},
+	{"flac_stereo48k.mp4", CodecFLAC, 48000, 2, 11, 0, 34, time.Second, 0},
 }
 
 func TestInteropOpusFLAC(t *testing.T) {
@@ -69,6 +75,9 @@ func TestInteropOpusFLAC(t *testing.T) {
 			if d := info.Duration - tc.duration; d < -time.Microsecond || d > time.Microsecond {
 				t.Errorf("Duration = %v, want %v (ffprobe)", info.Duration, tc.duration)
 			}
+			t.Run("ffprobe", func(t *testing.T) {
+				assertWithinMicrosecond(t, "Duration+extra", info.Duration+tc.ffprobeExtra, ffprobeStreamField(t, path, "duration"))
+			})
 
 			// Every access unit must extract at its recorded (offset, size).
 			frames := collectFrames(t, r)
