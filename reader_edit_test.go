@@ -487,3 +487,18 @@ func TestStartOffsetWiring(t *testing.T) {
 		})
 	}
 }
+
+// TestSeekTimeHalfTickBeforeEnd pins the documented boundary: a time less than
+// half a media tick past the last tick still selects it, and one more than half a
+// tick past it rounds to the end and is refused.
+func TestSeekTimeHalfTickBeforeEnd(t *testing.T) {
+	cfg := WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k, EncoderDelay: NoEdit}
+	r := mustReader(t, writeTimed(t, cfg, []uint32{1024, 1024, 1024, 1024}))
+	last := ticks16k(4095)
+	if s, _, err := r.SeekTime(last + ticks16k(1)*4/10); err != nil || s != 3 {
+		t.Errorf("SeekTime(last tick + 0.4 tick) = (%d, %v), want unit 3", s, err)
+	}
+	if _, _, err := r.SeekTime(last + ticks16k(1)*6/10); !errors.Is(err, ErrOutOfRange) {
+		t.Errorf("SeekTime(last tick + 0.6 tick) err = %v, want ErrOutOfRange", err)
+	}
+}
