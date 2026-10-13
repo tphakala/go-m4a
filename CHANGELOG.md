@@ -6,11 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-13
+
 ### Added
 
-- `Reader.SeekSample` positions the reader at any access unit without reading the ones before it, for plain and fragmented input. It does no I/O itself, so a jump costs one seek on the next read. An index outside the track returns the new `ErrOutOfRange` sentinel.
+- `Reader.SeekSample` positions the reader at any access unit without reading the ones before it, for plain and fragmented input. It does no I/O itself, so a jump costs one seek on the next read. An index outside the track returns the new `ErrOutOfRange` sentinel. By @vst93 (#69).
 
 - `Reader.SeekTime` seeks to a presentation time instead of a sample index. It maps the time (measured from the end of the encoder priming, `Info.EncoderDelay`) to the access unit that holds it using timing the reader now keeps from `stts` or the fragment `trun` durations, moves the cursor there, and returns the number of decoded samples per channel to drop from that unit. A time outside the presented range returns `ErrOutOfRange` with the cursor unchanged; a track with no sample timing, or whose edit list is not one presented window (several non-empty edits, a trailing empty edit, a media rate other than 1.0, no non-empty edit, a `media_time` below -1), returns `ErrUnsupported`.
+
 - `Info.StartOffset` reports the length of the leading empty edits of the edit list, the presentation time of the first presented sample (ffprobe's `start_time`).
 
 ### Changed
@@ -19,7 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An `elst` whose entry count overruns its body is now rejected as `ErrCorrupt`.
 - The `ErrOutOfRange` message is now "go-m4a: seek position out of range", since it covers a seek time as well as a sample index.
 - The minimum Go version is now 1.27.
+- The `aacm4a` bridge now builds against go-aac v0.7.0.
 
 Releases up to and including v0.5.0 predate this file; see the [GitHub releases](https://github.com/tphakala/go-m4a/releases) and the git tags for their history.
 
-[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tphakala/go-m4a/compare/v0.5.0...v0.6.0
