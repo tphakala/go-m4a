@@ -227,21 +227,22 @@ func TestFragmentBufferReuseVaryingSegments(t *testing.T) {
 	assertFramesEqual(t, drainFrames(t, rd), all)
 }
 
-// TestFragmentDuration checks that Info.Duration is the sum of the fragments'
-// sample durations at the media timescale, since the init segment's own durations
+// TestFragmentDuration checks that Info.Duration is the presented length of a
+// fragmented stream: the summed fragment sample durations less the priming the
+// init segment's open-ended edit skips, since the init segment's own durations
 // are all zero.
 func TestFragmentDuration(t *testing.T) {
 	t.Parallel()
-	frames := synthFrames(48) // 48 * 1024 / 48000 = 1.024 s
+	frames := synthFrames(48)
 	data := buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{uniformSegment(frames)})
 	rd, err := NewReader(bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
-	want := time.Duration(float64(48*1024) / 48000 * float64(time.Second))
-	got := rd.Info().Duration
-	if got < want-want/100 || got > want+want/100 {
-		t.Errorf("Duration = %v, want about %v", got, want)
+	// 48 units less the 1024-tick media_time, floored to nanoseconds.
+	want := time.Duration(47 * 1024 * uint64(time.Second) / 48000)
+	if got := rd.Info().Duration; got != want {
+		t.Errorf("Duration = %v, want %v", got, want)
 	}
 }
 

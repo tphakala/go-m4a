@@ -10,10 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `Reader.SeekSample` positions the reader at any access unit without reading the ones before it, for plain and fragmented input. It does no I/O itself, so a jump costs one seek on the next read. An index outside the track returns the new `ErrOutOfRange` sentinel.
 
-- `Reader.SeekTime` seeks to a presentation time instead of a sample index. It maps the time (measured from the end of the encoder priming, `Info.EncoderDelay`) to the access unit that holds it using timing the reader now keeps from `stts` or the fragment `trun` durations, moves the cursor there, and returns the number of decoded samples per channel to drop from that unit. A time outside the presented range returns `ErrOutOfRange` with the cursor unchanged; a track with no sample timing, or whose edit list opens with an empty edit, returns `ErrUnsupported`.
+- `Reader.SeekTime` seeks to a presentation time instead of a sample index. It maps the time (measured from the end of the encoder priming, `Info.EncoderDelay`) to the access unit that holds it using timing the reader now keeps from `stts` or the fragment `trun` durations, moves the cursor there, and returns the number of decoded samples per channel to drop from that unit. A time outside the presented range returns `ErrOutOfRange` with the cursor unchanged; a track with no sample timing, or whose edit list is not one presented window (several non-empty edits, a trailing empty edit, a media rate other than 1.0), returns `ErrUnsupported`.
+- `Info.StartOffset` reports the length of the leading empty edits of the edit list, the presentation time of the first presented sample (ffprobe's `start_time`).
 
 ### Changed
 
+- `Info.Duration`, `Info.EncoderDelay` and `Reader.SeekTime` now come from one presented window resolved from the edit list. For the same file this changes some reported values: a fragmented stream excludes its priming (a stream of 48 AAC frames at 48 kHz reports 1.002667 s, not 1.024 s); an Opus file without an edit list excludes the `dOps` pre-skip; a file without an edit list uses the exact media length instead of the rounded movie header duration; a segment duration longer than the media is clipped to the media; a leading empty edit no longer zeroes `EncoderDelay` or becomes the `Duration`; an edit list with several non-empty edits reports the summed presented edits; a plain file whose edit has `segment_duration` 0 presents nothing. `Duration` is now computed in integer arithmetic, rounding down to the nanosecond.
+- An `elst` whose entry count overruns its body is now rejected as `ErrCorrupt`.
 - The `ErrOutOfRange` message is now "go-m4a: seek position out of range", since it covers a seek time as well as a sample index.
 - The minimum Go version is now 1.27.
 

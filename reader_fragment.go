@@ -25,19 +25,19 @@ var (
 // would, fills Info from the sample entry, then walks every fragment's
 // tfhd/trun to lay out the shared per-chunk geometry the read path consumes.
 func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
-	tr, movieTS, movieDur, trex, err := parseInitMoov(moov)
+	tr, movieTS, trex, err := parseInitMoov(moov)
 	if err != nil {
 		return err
 	}
 	if err := rd.validateCodec(tr); err != nil {
 		return err
 	}
-	rd.fillFormatInfo(tr, movieTS, movieDur)
+	rd.fillFormatInfo(tr)
 	runs, err := rd.buildFragmentGeometry(moofs, tr, trex)
 	if err != nil {
 		return err
 	}
-	rd.setTiming(tr, movieTS, runs)
+	rd.setPresentation(tr, movieTS, runs, true)
 	rd.info.FrameCount = rd.sampleCount
 	return nil
 }
@@ -45,9 +45,9 @@ func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
 // parseInitMoov walks the init segment's moov like parseMoov, but tolerates the
 // mvex box (which declares the movie fragmented) instead of rejecting it, and
 // ignores the structurally-present but empty sample tables. It returns the chosen
-// track, the movie timescale and duration, and the trex defaults matching the
+// track, the movie timescale, and the trex defaults matching the
 // chosen track's track_ID (a zero Trex when the init segment carries none).
-func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, trex box.Trex, err error) {
+func parseInitMoov(moov []byte) (tr *track, movieTS uint32, trex box.Trex, err error) {
 	var chosen *track
 	var sawSoun bool
 	trexByID := make(map[uint32]box.Trex)
@@ -55,11 +55,11 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 	walkErr := box.WalkChildren(moov, func(typ box.FourCC, body []byte) error {
 		switch typ {
 		case fourccMvhd:
-			ts, dur, perr := box.ParseMvhd(body)
+			ts, _, perr := box.ParseMvhd(body)
 			if perr != nil {
 				return perr
 			}
-			movieTS, movieDur = ts, dur
+			movieTS = ts
 		case fourccMvex:
 			return box.WalkChildren(body, func(t box.FourCC, b []byte) error {
 				if t != fourccTrex {
@@ -78,20 +78,19 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, movieDur uint64, tre
 		return nil
 	})
 	if walkErr != nil {
-		return nil, 0, 0, box.Trex{}, wrapParse(walkErr)
+		return nil, 0, box.Trex{}, wrapParse(walkErr)
 	}
 	if chosen == nil {
-		return nil, 0, 0, box.Trex{}, errNoSupportedSoun(sawSoun)
+		return nil, 0, box.Trex{}, errNoSupportedSoun(sawSoun)
 	}
-	return chosen, movieTS, movieDur, trexByID[chosen.trackID], nil
+	return chosen, movieTS, trexByID[chosen.trackID], nil
 }
 
 // buildFragmentGeometry walks every movie fragment and lays out the shared
 // per-chunk geometry (sizes, chunk offsets, samples-per-chunk) that the read path
 // consumes, modeling each trun run as one contiguous chunk. It reuses the plain
-// path's validateOffsets to confirm every access unit lies within the stream, and
-// sets Info.Duration from the summed sample durations at the media timescale. It
-// also returns those durations in run-length form for setTiming.
+// path's validateOffsets to confirm every access unit lies within the stream. It
+// returns the sample durations in run-length form for setPresentation.
 func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) ([]box.SttsRun, error) {
 	var (
 		sizes        []uint32
@@ -187,12 +186,6 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 	rd.samplesPerChunk = perChunk
 	if err := rd.validateOffsets(); err != nil {
 		return nil, err
-	}
-	// The init segment's durations are all zero, so presentationDuration reported
-	// zero; the real presentation length is the sum of the fragments' sample
-	// durations at the media timescale.
-	if totalDur := sumTicks(timeRuns); tr.mdhdTS > 0 && totalDur > 0 {
-		rd.info.Duration = ticksToDuration(totalDur, tr.mdhdTS)
 	}
 	return timeRuns, nil
 }

@@ -488,30 +488,59 @@ func ParseSttsRuns(payload []byte) ([]SttsRun, error) {
 	return runs, nil
 }
 
-// ParseElst decodes the first entry of an elst (edit list) FullBox body,
-// honoring the version-0 (32-bit) and version-1 (64-bit) layouts. hasEntry is
-// false when entry_count is zero. media_time is returned as-is: a value of -1
-// marks an empty edit, which the caller treats as zero encoder delay.
-func ParseElst(payload []byte) (segmentDuration uint64, mediaTime int64, hasEntry bool, err error) {
+// ElstEntry is one edit of an elst (edit list) box.
+type ElstEntry struct {
+	// SegmentDuration is the length of the edit in the movie timescale. Zero is
+	// literal on a plain file; the caller decides what it means on a fragmented one.
+	SegmentDuration uint64
+
+	// MediaTime is the media tick the edit starts at, in the media timescale. A
+	// value of -1 marks an empty edit (a dwell of silence).
+	MediaTime int64
+
+	// MediaRate is the playback rate as the 16.16 fixed-point value
+	// media_rate_integer<<16 | media_rate_fraction, so 1.0 is 0x00010000.
+	MediaRate int32
+}
+
+// ParseElst decodes every entry of an elst (edit list) FullBox body, honoring the
+// version-0 (32-bit) and version-1 (64-bit) layouts. The entry count is checked
+// against the bytes present before the slice is allocated, so the result is
+// proportional to the body. A count of zero returns nil. The caller resolves the
+// list; entries are returned as-is, with media_time -1 marking an empty edit.
+func ParseElst(payload []byte) ([]ElstEntry, error) {
 	if len(payload) < 8 {
-		return 0, 0, false, fmt.Errorf("elst: %d bytes: %w", len(payload), errParse)
+		return nil, fmt.Errorf("elst: %d bytes: %w", len(payload), errParse)
 	}
-	version := payload[0]
 	count := binary.BigEndian.Uint32(payload[4:])
 	if count == 0 {
-		return 0, 0, false, nil
+		return nil, nil
 	}
+	v1 := payload[0] == 1
+	size := int64(12) // segment_duration(4) + media_time(4) + media_rate(4)
+	if v1 {
+		size = 20 // segment_duration(8) + media_time(8) + media_rate(4)
+	}
+	if 8+int64(count)*size > int64(len(payload)) {
+		return nil, fmt.Errorf("elst: %d entries in %d bytes: %w", count, len(payload), errParse)
+	}
+	entries := make([]ElstEntry, count)
 	p := payload[8:]
-	if version == 1 {
-		if len(p) < 20 { // segment_duration(8) + media_time(8) + media_rate(4)
-			return 0, 0, false, fmt.Errorf("elst v1 entry: %d bytes: %w", len(p), errParse)
+	for i := range entries {
+		e := &entries[i]
+		if v1 {
+			e.SegmentDuration = binary.BigEndian.Uint64(p)
+			e.MediaTime = int64(binary.BigEndian.Uint64(p[8:]))
+			e.MediaRate = int32(binary.BigEndian.Uint32(p[16:]))
+			p = p[20:]
+			continue
 		}
-		return binary.BigEndian.Uint64(p), int64(binary.BigEndian.Uint64(p[8:])), true, nil
+		e.SegmentDuration = uint64(binary.BigEndian.Uint32(p))
+		e.MediaTime = int64(int32(binary.BigEndian.Uint32(p[4:])))
+		e.MediaRate = int32(binary.BigEndian.Uint32(p[8:]))
+		p = p[12:]
 	}
-	if len(p) < 12 { // segment_duration(4) + media_time(4) + media_rate(4)
-		return 0, 0, false, fmt.Errorf("elst v0 entry: %d bytes: %w", len(p), errParse)
-	}
-	return uint64(binary.BigEndian.Uint32(p)), int64(int32(binary.BigEndian.Uint32(p[4:]))), true, nil
+	return entries, nil
 }
 
 // ParseHdlr decodes the handler_type from an hdlr (handler reference) FullBox

@@ -177,7 +177,7 @@ Read an `.m4a` back into access units:
 
 ```go
 r, err := m4a.NewReader(f) // io.ReadSeeker
-info := r.Info()           // SampleRate, Channels, ASC, FrameCount, EncoderDelay, Duration
+info := r.Info()           // SampleRate, Channels, ASC, FrameCount, EncoderDelay, Duration, StartOffset
 for {
     au, err := r.ReadFrame()
     if err == io.EOF { break }
@@ -213,15 +213,17 @@ number of decoded samples per channel to drop from that unit's output to land on
 sample, skip, err := rd.SeekTime(90 * time.Second)
 ```
 
-Time 0 is media tick `Info().EncoderDelay`, the priming the edit list skips, so
-`SeekTime(d)` selects the same sample as decoding from the start and dropping
-`EncoderDelay` plus `d`'s worth of samples (see the trim recipe below). `d`
-rounds to the nearest media tick. The valid range is `[0, end)`, where `end` is
-the presented length (the edit list's segment duration when present, so trailing
-padding is excluded; otherwise the summed sample durations less `EncoderDelay`).
-A time outside it wraps `m4a.ErrOutOfRange` and leaves the cursor unchanged, so a
-player that wants to clamp can match it. A track with no sample timing, or an edit
-list that starts with an empty edit, wraps `m4a.ErrUnsupported`. A lossy decoder
+Time 0 is the first presented sample, media tick `Info().EncoderDelay`, the
+priming the edit list skips, so `SeekTime(d)` selects the same sample as decoding
+from the start and dropping `EncoderDelay` plus `d`'s worth of samples (see the
+trim recipe below). Leading empty edits are skipped: their length is
+`Info().StartOffset` and is not part of this time axis. `d` rounds to the nearest
+media tick. The valid range is `[0, Info().Duration)`, the window the edit list
+presents, so trailing padding is excluded. A time outside it wraps
+`m4a.ErrOutOfRange` and leaves the cursor unchanged, so a player that wants to
+clamp can match it. A track with no sample timing, or an edit list that does not
+reduce to one presented window (several non-empty edits, a trailing empty edit, a
+media rate other than 1.0), wraps `m4a.ErrUnsupported`. A lossy decoder
 started cold at the returned unit has no overlap state from the unit before it,
 so its first output is degraded; for clean audio seek a few units earlier with
 `SeekSample` and discard that output as well as `skip` samples.
@@ -251,7 +253,12 @@ The go-aac decoder is not edit-list aware: `NewDecoder` emits every decoded
 sample, including both the leading priming and the trailing final-frame padding.
 For sample-accurate output, skip `info.EncoderDelay` leading samples per channel,
 then keep only `info.Duration`-worth of samples (`Duration * SampleRate` per
-channel) and discard the rest.
+channel) and discard the rest. Without an edit list `Duration` is the media
+length less `EncoderDelay` (so the Opus pre-skip is excluded), and for a
+fragmented stream it runs to the end of the fragments, less the priming. The
+recipe does not apply when `SeekTime` reports `ErrUnsupported` for the edit list
+itself (several non-empty edits): `Duration` is then the summed presented edits,
+and skipping and keeping does not reproduce the splice.
 
 ### opusm4a and flacm4a: the go-opus and go-flac bridges
 
@@ -362,8 +369,15 @@ frame: AAC-LC primes 1024 samples (go-aac), Opus 312 at 48 kHz (`dOps` pre-skip)
 go-m4a writes an `elst` edit list whose `media_time` skips the priming and whose
 `segment_duration` (set from `WriterConfig.MediaLength`) excludes the trailing
 padding, so a compliant player presents exactly the original audio. The reader
-surfaces the edit list as `Info.EncoderDelay` and `Info.Duration`. FLAC is lossless
-and has no priming, so no edit list is written.
+surfaces the edit list as `Info.EncoderDelay`, `Info.Duration` and
+`Info.StartOffset`. FLAC is lossless and has no priming, so no edit list is
+written.
+
+The reader resolves a foreign edit list once into one presented window. Leading
+empty edits become `StartOffset` rather than part of `Duration`. A segment
+duration of 0 presents nothing in a plain file and runs to the end of the
+fragments in a fragmented stream, as ffmpeg reads them, and a segment longer than
+the media is clipped to the media end.
 
 The fragmented writer trims the priming the same way, with `segment_duration` 0,
 the open-ended form used by fragmented-MP4 packagers for a stream whose length is

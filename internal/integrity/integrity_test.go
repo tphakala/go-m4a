@@ -256,11 +256,14 @@ func inspect(t *testing.T, data []byte) facts {
 		t.Fatalf("edts: %v", err)
 	} else if ok {
 		elst := child(t, edts, fourccElst)
-		seg, mt, has, err := box.ParseElst(elst)
+		entries, err := box.ParseElst(elst)
 		if err != nil {
 			t.Fatalf("elst: %v", err)
 		}
-		f.hasEdit, f.editSegment, f.editMediaTime = has, seg, mt
+		// Own output and ffmpeg remuxes carry a single entry.
+		if len(entries) > 0 {
+			f.hasEdit, f.editSegment, f.editMediaTime = true, entries[0].SegmentDuration, entries[0].MediaTime
+		}
 	}
 	mdia := child(t, trak, fourccMdia)
 	f.mediaTimescale, f.mediaDuration, err = box.ParseMdhd(child(t, mdia, fourccMdhd))

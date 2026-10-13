@@ -177,6 +177,10 @@ func TestWriterEditListClamp(t *testing.T) {
 	if info.EncoderDelay != delay {
 		t.Errorf("EncoderDelay = %d, want %d", info.EncoderDelay, delay)
 	}
+	// The presented window is empty, so there is nothing to seek to.
+	if _, _, err := r.SeekTime(0); !errors.Is(err, ErrOutOfRange) {
+		t.Errorf("SeekTime(0) err = %v, want ErrOutOfRange", err)
+	}
 }
 
 // TestWriterBrandOverride confirms WriterConfig.Brand overrides the ftyp major

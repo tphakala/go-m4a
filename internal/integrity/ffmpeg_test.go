@@ -5,6 +5,7 @@ package integrity
 import (
 	"bytes"
 	"context"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,12 +110,12 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			// segment with the wrong timescale shows up; 9.0 writes equal
 			// timescales, and the root package's interop tests pin the same
 			// conversion on committed fixtures without ffmpeg. The expectation
-			// mirrors the Reader's float64 arithmetic, so the two agree exactly on
-			// one platform; the 1us slack only absorbs float differences between
-			// platforms and is far below one tick of any timescale in use.
+			// repeats the Reader's integer arithmetic: the segment is rescaled to the
+			// media timescale (rounding to nearest), clipped to the media end, and
+			// converted to time rounding down, so the match is exact.
 			if f.hasEdit && f.movieTimescale > 0 {
-				want := time.Duration(float64(f.editSegment) / float64(f.movieTimescale) * float64(time.Second))
-				if d := info.Duration - want; d < -time.Microsecond || d > time.Microsecond {
+				want := expectedDuration(f)
+				if info.Duration != want {
 					t.Errorf("ffmpeg's remux: Info.Duration %v, want %v (edit segment %d at movie timescale %d)",
 						info.Duration, want, f.editSegment, f.movieTimescale)
 				}
@@ -149,4 +150,28 @@ func TestFFmpegRemuxReadsBack(t *testing.T) {
 			}
 		})
 	}
+}
+
+// expectedDuration is the presented length the Reader should report for a file
+// with one edit: floor((min(start+round(segment*mediaTS/movieTS), mediaEnd)-start)
+// * 1e9 / mediaTS), computed with big integers so it shares no code with the
+// Reader.
+func expectedDuration(f facts) time.Duration {
+	mts := new(big.Int).SetUint64(uint64(f.mediaTimescale))
+	seg := new(big.Int).SetUint64(f.editSegment)
+	seg.Mul(seg, mts)
+	seg.Add(seg, big.NewInt(int64(f.movieTimescale/2)))
+	seg.Div(seg, big.NewInt(int64(f.movieTimescale)))
+	start := big.NewInt(f.editMediaTime)
+	end := new(big.Int).Add(start, seg)
+	if mediaEnd := new(big.Int).SetUint64(f.sttsDuration); end.Cmp(mediaEnd) > 0 {
+		end = mediaEnd
+	}
+	length := end.Sub(end, start)
+	if length.Sign() < 0 {
+		length.SetInt64(0)
+	}
+	length.Mul(length, big.NewInt(int64(time.Second)))
+	length.Div(length, mts)
+	return time.Duration(length.Int64())
 }

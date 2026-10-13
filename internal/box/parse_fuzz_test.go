@@ -262,3 +262,33 @@ func mustParseSentinel(t *testing.T, err error) {
 		t.Fatalf("error %v is not errParse", err)
 	}
 }
+
+func FuzzParseElst(f *testing.F) {
+	f.Add(seedTableBody(0, 12))
+	f.Add(seedTableBody(2, 12))
+	// A version-1 body with two 20-byte entries.
+	v1 := seedTableBody(2, 20)
+	v1[0] = 1
+	f.Add(v1)
+	// A truncated body: count 3, one entry present.
+	trunc := seedTableBody(1, 12)
+	trunc[7] = 3
+	f.Add(trunc)
+	f.Add([]byte{0, 0, 0, 0}) // shorter than the 8-byte minimum
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		defer noPanic(t, payload)
+		entries, err := ParseElst(payload)
+		if err != nil {
+			mustParseSentinel(t, err)
+			return
+		}
+		if want := binary.BigEndian.Uint32(payload[4:]); uint32(len(entries)) != want {
+			t.Fatalf("elst: %d entries for count %d", len(entries), want)
+		}
+		// Even the smaller (version 0) entry must be backed by the payload.
+		if 12*int64(len(entries)) > int64(len(payload))-8 {
+			t.Fatalf("elst: %d entries overrun %d payload bytes", len(entries), len(payload))
+		}
+	})
+}
