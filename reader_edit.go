@@ -58,60 +58,51 @@ func resolvePresentation(tr *track, movieTS uint32, runs []box.SttsRun, fragment
 	}
 
 	w.start = fallbackStart(tr)
-	edits := tr.edits
-	if len(edits) == 0 {
-		w.end = max(mediaEnd, w.start)
-		w.presented = w.end - w.start
-		w.setNoTiming(noTiming)
-		return w
-	}
+	w.end = max(mediaEnd, w.start)
+	w.presented = w.end - w.start
 
-	// Leading empty edits.
-	i := 0
-	for i < len(edits) && edits[i].MediaTime == -1 {
-		var carry uint64
-		w.lead, carry = bits.Add64(w.lead, edits[i].SegmentDuration, 0)
-		if carry != 0 {
-			w.lead = math.MaxUint64
+	if edits := tr.edits; len(edits) > 0 {
+		// Leading empty edits.
+		i := 0
+		for i < len(edits) && edits[i].MediaTime == -1 {
+			w.lead = satAdd(w.lead, edits[i].SegmentDuration)
+			i++
 		}
-		i++
-	}
-	rest := edits[i:]
+		rest := edits[i:]
 
-	haveStart := false
-	for _, e := range rest {
-		if e.MediaTime < 0 {
-			continue
+		w.presented = 0
+		haveStart := false
+		for _, e := range rest {
+			if e.MediaTime < 0 {
+				continue
+			}
+			if !haveStart {
+				w.start, haveStart = uint64(e.MediaTime), true
+			}
+			w.presented = satAdd(w.presented, editLength(e, mediaEnd, movieTS, tr.mdhdTS, fragmented))
 		}
-		if !haveStart {
-			w.start, haveStart = uint64(e.MediaTime), true
-		}
-		length := editLength(e, mediaEnd, movieTS, tr.mdhdTS, fragmented)
-		var carry uint64
-		w.presented, carry = bits.Add64(w.presented, length, 0)
-		if carry != 0 {
-			w.presented = math.MaxUint64
+		w.end = satAdd(w.start, w.presented)
+
+		if reason := unsupportedShape(rest); reason != "" {
+			w.seekErr = fmt.Errorf("go-m4a: time seek on an edit list with %s is unsupported: %w", reason, ErrUnsupported)
 		}
 	}
-	var carry uint64
-	w.end, carry = bits.Add64(w.start, w.presented, 0)
-	if carry != 0 {
-		w.end = math.MaxUint64
-	}
 
-	if reason := unsupportedShape(rest); reason != "" {
-		w.seekErr = fmt.Errorf("go-m4a: time seek on an edit list with %s is unsupported: %w", reason, ErrUnsupported)
-	}
-	w.setNoTiming(noTiming)
-	return w
-}
-
-// setNoTiming records the no-timing error, which takes precedence over a shape
-// error so the message names the first thing a caller would have to fix.
-func (w *presentation) setNoTiming(noTiming bool) {
+	// The no-timing error takes precedence over a shape error, so the message
+	// names the first thing a caller would have to fix.
 	if noTiming {
 		w.seekErr = fmt.Errorf("go-m4a: track has no sample timing: %w", ErrUnsupported)
 	}
+	return w
+}
+
+// satAdd returns a+b, saturating at MaxUint64.
+func satAdd(a, b uint64) uint64 {
+	sum, carry := bits.Add64(a, b, 0)
+	if carry != 0 {
+		return math.MaxUint64
+	}
+	return sum
 }
 
 // fallbackStart is the window start without a usable edit: the Opus dOps
