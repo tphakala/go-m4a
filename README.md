@@ -219,11 +219,12 @@ from the start and dropping `EncoderDelay` plus `d`'s worth of samples (see the
 trim recipe below). Leading empty edits are skipped: their length is
 `Info().StartOffset` and is not part of this time axis. `d` rounds to the nearest
 media tick. The valid range is `[0, Info().Duration)`, the window the edit list
-presents, so trailing padding is excluded. A time outside it wraps
+presents, so trailing padding is excluded; a time within half a media tick of
+`Duration` rounds to the end and is refused. A time outside it wraps
 `m4a.ErrOutOfRange` and leaves the cursor unchanged, so a player that wants to
 clamp can match it. A track with no sample timing, or an edit list that does not
 reduce to one presented window (several non-empty edits, a trailing empty edit, a
-media rate other than 1.0), wraps `m4a.ErrUnsupported`. A lossy decoder
+media rate other than 1.0, no non-empty edit, a `media_time` below -1), wraps `m4a.ErrUnsupported`. A lossy decoder
 started cold at the returned unit has no overlap state from the unit before it,
 so its first output is degraded; for clean audio seek a few units earlier with
 `SeekSample` and discard that output as well as `skip` samples.
@@ -257,8 +258,9 @@ channel) and discard the rest. Without an edit list `Duration` is the media
 length less `EncoderDelay` (so the Opus pre-skip is excluded), and for a
 fragmented stream it runs to the end of the fragments, less the priming. The
 recipe does not apply when `SeekTime` reports `ErrUnsupported` for the edit list
-itself (several non-empty edits): `Duration` is then the summed presented edits,
-and skipping and keeping does not reproduce the splice.
+itself (several non-empty edits, or another shape listed above): `Duration` is
+then the summed presented edits, and skipping and keeping does not reproduce
+the splice.
 
 ### opusm4a and flacm4a: the go-opus and go-flac bridges
 

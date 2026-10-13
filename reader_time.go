@@ -38,8 +38,8 @@ import (
 // wrapping ErrOutOfRange with the cursor unchanged. A track with no sample
 // timing, or whose edit list does not reduce to one presented window (more than
 // one non-empty edit, a trailing empty edit, a non-unit media rate, no non-empty
-// edit), returns an error wrapping ErrUnsupported for any d >= 0, also with the
-// cursor unchanged; a negative d is always ErrOutOfRange. On any error the
+// edit, a media_time below -1), returns an error wrapping ErrUnsupported for any
+// d >= 0, also with the cursor unchanged; a negative d is always ErrOutOfRange. On any error the
 // results are 0, 0.
 //
 // The result depends only on d and the file, never on the cursor, so SeekTime may
