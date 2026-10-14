@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `aacm4a.NewSeekableDecoder` and `aacm4a.Decoder` stream the same S16 PCM as `NewDecoder` and add `SeekSample` and `SeekTime`. The decoder handles the codec pre-roll itself, so the output after a seek starts at the exact requested sample. On a stream that uses perceptual noise substitution the noise bands after a seek differ from a linear decode, which go-aac cannot avoid; the position and length stay exact.
+
+### Changed
+
+- `aacm4a.NewDecoder` accepts `m4a.ReaderOption`s, for example `m4a.WithMaxBoxBuffer`. Existing calls compile unchanged.
+
 ## [0.6.0] - 2026-10-13
 
 ### Added

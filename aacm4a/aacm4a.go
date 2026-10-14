@@ -3,7 +3,8 @@
 // Package aacm4a is an optional convenience bridge that couples go-aac's AAC-LC
 // codec to the go-m4a container. EncodeInterleaved takes interleaved PCM straight
 // to a gapless .m4a; NewDecoder opens an .m4a and hands back a go-aac decoder
-// that streams PCM. It is a thin seam over the two libraries: the core m4a
+// that streams PCM, and NewSeekableDecoder does the same with SeekSample and
+// SeekTime that handle the codec pre-roll. It is a thin seam over the two libraries: the core m4a
 // package stays stdlib-only, and only this subpackage imports go-aac, so a
 // consumer that merely muxes or demuxes never pulls the codec.
 package aacm4a
@@ -310,8 +311,13 @@ func writeADTSFrames(wr *m4a.Writer, adts []byte) error {
 // to single out HE-AACv2. HE-AACv2 is distinguished only from ASC signalling, so a
 // stream that signals SBR without PS matches ErrUnsupportedSBR but not
 // ErrUnsupportedPS even if it is in fact HE-AACv2.
-func NewDecoder(r io.ReadSeeker) (*aacpcm.Decoder, m4a.Info, error) {
-	rd, err := m4a.NewReader(r)
+//
+// opts configure the internal m4a.Reader, for example m4a.WithMaxBoxBuffer. The
+// returned go-aac decoder streams forward only; for random access use
+// NewSeekableDecoder, which returns an *aacm4a.Decoder that does the codec
+// pre-roll itself.
+func NewDecoder(r io.ReadSeeker, opts ...m4a.ReaderOption) (*aacpcm.Decoder, m4a.Info, error) {
+	rd, err := m4a.NewReader(r, opts...)
 	if err != nil {
 		return nil, m4a.Info{}, err
 	}
