@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Added
 
 - `aacm4a.NewSeekableDecoder` and `aacm4a.Decoder` stream the same S16 PCM as `NewDecoder` and add `SeekSample` and `SeekTime`. The decoder handles the codec pre-roll itself, so the output after a seek starts at the exact requested sample. On a stream that uses perceptual noise substitution the noise bands after a seek differ from a linear decode, which go-aac cannot avoid; the position and length stay exact.
@@ -34,5 +36,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Releases up to and including v0.5.0 predate this file; see the [GitHub releases](https://github.com/tphakala/go-m4a/releases) and the git tags for their history.
 
-[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/tphakala/go-m4a/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tphakala/go-m4a/compare/v0.5.0...v0.6.0
