@@ -262,3 +262,5 @@ jobs:
           go test -run='^$' -fuzz=FuzzDecodeInterleaved -fuzztime=20s ./flacm4a
       - name: Fuzz opusm4a bridge
         run: go test -run='^$' -fuzz=FuzzDecodeInterleaved -fuzztime=20s ./opusm4a
+      - name: Fuzz aacm4a bridge
+        run: go test -run='^$' -fuzz=FuzzSeekableDecoder -fuzztime=20s ./aacm4a

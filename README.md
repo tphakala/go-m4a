@@ -71,7 +71,7 @@ limit itself, so a file that declares an implausible length cannot make the
 decoder allocate for the claim before decoding anything.
 
 `aacm4a` needs none of this and gets none of it: it has no accumulating decode,
-because `NewDecoder` returns a streaming decoder. A caller that accumulates that
+because `NewDecoder` and `NewSeekableDecoder` return streaming decoders. A caller that accumulates that
 decoder's output itself owns the bound, and should size it against the audio
 rather than against the file.
 
@@ -227,7 +227,8 @@ reduce to one presented window (several non-empty edits, a trailing empty edit, 
 media rate other than 1.0, no non-empty edit, a `media_time` below -1), wraps `m4a.ErrUnsupported`. A lossy decoder
 started cold at the returned unit has no overlap state from the unit before it,
 so its first output is degraded; for clean audio seek a few units earlier with
-`SeekSample` and discard that output as well as `skip` samples.
+`SeekSample` and discard that output as well as `skip` samples. For AAC-LC,
+`aacm4a.NewSeekableDecoder` does exactly that for you (see below).
 
 ### aacm4a: the go-aac bridge
 
@@ -261,6 +262,43 @@ recipe does not apply when `SeekTime` reports `ErrUnsupported` for the edit list
 itself (several non-empty edits, or another shape listed above): `Duration` is
 then the summed presented edits, and skipping and keeping does not reproduce
 the splice.
+
+To read a window from the middle of a long file without decoding what comes
+before it, use `NewSeekableDecoder`. It returns an `*aacm4a.Decoder` that streams
+the same S16 PCM and adds `SeekSample` and `SeekTime`; it decodes and discards the
+codec pre-roll itself and starts the output exactly at the requested sample:
+
+```go
+dec, info, err := aacm4a.NewSeekableDecoder(f, m4a.WithMaxBoxBuffer(1<<20))
+if err != nil {
+    return err
+}
+if err := dec.SeekTime(90 * time.Second); err != nil {
+    return err // errors.Is(err, m4a.ErrOutOfRange) for a time outside the track
+}
+window := 3 * info.SampleRate * info.Channels * 2 // three seconds of bytes
+_, err = io.CopyN(pcmOut, dec, int64(window))
+```
+
+After `SeekSample(i)` the next byte is byte `i*1024*channels*2` of what
+`NewDecoder` would produce. After `SeekTime(t)` it is the sample at presentation
+time `t`, that is sample `EncoderDelay + round(t * SampleRate)` of that output for
+every file this package writes. The output is still not edit-list aware at the
+tail: it runs to the end of the decoded track, trailing padding included, so keep
+`presented - round(t * SampleRate)` samples per channel, where `presented` is
+`info.Duration` at `SampleRate` rounded up (`Duration` is a floor). Seeks are
+lazy: the pre-roll is decoded by the next `Read`, so a decode error in it appears
+there, and a successful seek clears a latched decode error.
+
+One caveat applies to streams that use perceptual noise substitution (PNS).
+go-aac's encoder emits PNS by default on noisy material, and ffmpeg's native
+encoder does too. PNS draws its noise from a generator that runs across the whole
+stream, and a seek cannot reconstruct that state. After a seek such a stream
+decodes to the right samples in the right position, but the noise-substituted
+bands differ from a linear decode for the rest of the stream. The output is the
+same on every run for the same target, and on noisy go-aac encodes the energy of
+each frame stays within 0.1 dB of the linear decode (measured) with a correlation
+of at least 0.96. A stream with no PNS band is bit-exact after a seek.
 
 ### opusm4a and flacm4a: the go-opus and go-flac bridges
 

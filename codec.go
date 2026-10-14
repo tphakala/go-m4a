@@ -16,10 +16,10 @@ const (
 	// whole MPEG-4 Audio family, not AAC-LC specifically, so the reader does not
 	// verify the AudioSpecificConfig audio object type and reports CodecAACLC for an
 	// HE-AAC or HE-AACv2 track too. Verifying the profile is the decoder's job: the
-	// stdlib-only core cannot parse the codec bitstream, and aacm4a.NewDecoder
-	// returns an error matching pcm.ErrUnsupportedSBR (HE-AAC) or pcm.ErrUnsupportedPS
-	// (HE-AACv2) for a stream this container labels CodecAACLC but that is not
-	// plain AAC-LC.
+	// stdlib-only core cannot parse the codec bitstream, and aacm4a.NewDecoder and
+	// aacm4a.NewSeekableDecoder return an error matching pcm.ErrUnsupportedSBR
+	// (HE-AAC) or pcm.ErrUnsupportedPS (HE-AACv2) for a stream this container
+	// labels CodecAACLC but that is not plain AAC-LC.
 	CodecAACLC Codec = iota
 	// CodecOpus is Opus, carried in an Opus sample entry with a dOps
 	// OpusSpecificBox, per the Encapsulation of Opus in ISOBMFF.
