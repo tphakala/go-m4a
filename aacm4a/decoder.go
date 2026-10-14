@@ -230,11 +230,12 @@ func (d *Decoder) SeekSample(sample int) error {
 // SeekTime positions the output at presentation time t, as m4a.Reader.SeekTime
 // defines it: the range is [0, Info().Duration), and an edit list that does not
 // reduce to one presented window returns an error wrapping m4a.ErrUnsupported.
-// On any such error nothing changes. The output then starts at the sample the
-// type documentation describes. A file whose unit durations are not 1024 at the
+// Those errors change nothing. When the seek succeeds, the output starts at the
+// sample the type documentation describes. A file whose unit durations are not 1024 at the
 // sample rate is mapped through the container's timing, which does not match the
-// decoded timeline. A time that lands 1024 or more samples into an access unit
-// (possible only with a broken timing table) returns m4a.ErrUnsupported and
+// decoded timeline. A time that lands 1024 or more samples into an access unit,
+// which a unit whose container duration exceeds the 1024 samples it decodes to
+// allows, returns an error wrapping m4a.ErrUnsupported, drops pending output and
 // blocks reads until the next successful seek. The seek is lazy, as SeekSample.
 func (d *Decoder) SeekTime(t time.Duration) error {
 	idx, skip, err := d.rd.SeekTime(t)
