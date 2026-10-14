@@ -699,3 +699,75 @@ const (
 	ffmpegMaxDB   = 0.1
 	ffmpegMinCorr = 0.99
 )
+
+// failingWriter accepts limit bytes, then fails (err set) or short-writes (err
+// nil, the writer reports fewer bytes than given without an error).
+type failingWriter struct {
+	buf   bytes.Buffer
+	limit int
+	err   error
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	n := min(len(p), max(0, w.limit-w.buf.Len()))
+	w.buf.Write(p[:n])
+	if n < len(p) {
+		return n, w.err
+	}
+	return n, nil
+}
+
+func TestSeekableDecoderWriteToFailures(t *testing.T) {
+	f := exactFixture(t, 44100, 1)
+	clean := linear(t, f.data)
+	ranges := auRanges(t, f.data)
+	k := len(ranges) / 2
+
+	t.Run("decode error", func(t *testing.T) {
+		bad := bytes.Clone(f.data)
+		for i := ranges[k][0]; i < ranges[k][1]; i++ {
+			bad[i] = 0xFF
+		}
+		d, _ := newSeekable(t, bad)
+		var buf bytes.Buffer
+		n, err := d.WriteTo(&buf)
+		if !errors.Is(err, aacpcm.ErrCorruptStream) || !errors.Is(err, m4a.ErrCorrupt) {
+			t.Fatalf("WriteTo error = %v, want both aacpcm.ErrCorruptStream and m4a.ErrCorrupt", err)
+		}
+		if n != int64(k*frameBytes(&f)) {
+			t.Errorf("WriteTo count = %d, want %d", n, k*frameBytes(&f))
+		}
+		requireSame(t, "bytes written before the error", buf.Bytes(), clean[:k*frameBytes(&f)])
+	})
+
+	t.Run("writer error", func(t *testing.T) {
+		d, _ := newSeekable(t, f.data)
+		boom := errors.New("disk full")
+		w := &failingWriter{limit: 1000, err: boom}
+		n, err := d.WriteTo(w)
+		if !errors.Is(err, boom) || n != 1000 {
+			t.Fatalf("WriteTo = %d, %v, want 1000 and the writer's own error", n, err)
+		}
+		// The writer's failure is not a decode error: the decoder keeps going
+		// from the bytes the writer did not take.
+		rest, err := io.ReadAll(d)
+		if err != nil {
+			t.Fatalf("ReadAll after a writer error: %v", err)
+		}
+		requireSame(t, "tail after a writer error", rest, clean[1000:])
+	})
+
+	t.Run("short write", func(t *testing.T) {
+		d, _ := newSeekable(t, f.data)
+		w := &failingWriter{limit: 700}
+		n, err := d.WriteTo(w)
+		if !errors.Is(err, io.ErrShortWrite) || n != 700 {
+			t.Fatalf("WriteTo = %d, %v, want 700 and io.ErrShortWrite", n, err)
+		}
+		rest, err := io.ReadAll(d)
+		if err != nil {
+			t.Fatalf("ReadAll after a short write: %v", err)
+		}
+		requireSame(t, "tail after a short write", rest, clean[700:])
+	})
+}
