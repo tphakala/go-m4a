@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- A frame read that fails in `Reader.ReadFrame`, `Reader.ReadFrameInto` or `Reader.RawStream`, and in the bridges that read through them, no longer reports `ErrCorrupt`. An error from the underlying reader is wrapped with its cause, so `errors.Is` and `errors.As` reach it (for example an `*fs.PathError`). A stream that ends before a frame the sample table places inside it is a wrapped `io.ErrUnexpectedEOF`, and no read failure matches `io.EOF`. Frame errors in the container itself (a zero length, an extent outside the stream) are still `ErrCorrupt`. Code that matched `ErrCorrupt` to catch I/O failures during frame reads should check for the cause instead.
+- A frame read that fails in `Reader.ReadFrame`, `Reader.ReadFrameInto` or `Reader.RawStream`, and in the bridges that read through them, no longer reports `ErrCorrupt`. An error from the underlying reader is wrapped with its cause, so `errors.Is` and `errors.As` reach it (for example an `*fs.PathError`). A stream that ends before a frame the sample table places inside it is a wrapped `io.ErrUnexpectedEOF`, and no read failure matches `io.EOF`. Through `aacm4a.NewDecoder`, go-aac reports that case as `aacpcm.ErrCorruptStream` with `io.ErrUnexpectedEOF` still in the chain. Frame errors in the container itself (a zero length, an extent outside the stream) are still `ErrCorrupt`. Code that matched `ErrCorrupt` to catch I/O failures during frame reads should check for the cause instead.
 
 ## [0.7.0] - 2026-10-14
 
