@@ -85,9 +85,10 @@ type Info struct {
 // movie fragments carry; ReadFrame then returns each access unit in order from
 // its computed (offset, size). Frames are read through a read-ahead window of up
 // to 64 KiB, so a forward read seeks and reads once per window rather than once
-// per access unit, and the stream's bytes must not change after NewReader. The
-// reader is not safe for concurrent use, and ReadFrame, RawStream, and their
-// shared cursor advance together.
+// per access unit (a frame larger than half the window is read on its own), and
+// the stream's bytes must not change after NewReader. The reader is not safe for
+// concurrent use, and ReadFrame, RawStream, and their shared cursor advance
+// together.
 type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
@@ -183,10 +184,11 @@ const DefaultMaxBoxBuffer = 256 << 20
 // read through. Reading one access unit at a time cost a Seek and a Read per
 // unit, two syscalls each on an *os.File: about 2830 for an 846 KiB AAC clip,
 // measured at 8 to 20 ms per cold decode on a Raspberry Pi 5 SD card (issue
-// #80). With 64 KiB the same clip takes about 13 refills, the window holds
+// #80). With 64 KiB the same clip takes about 14 refills, the window holds
 // several FLAC frames, and the cost per Reader stays bounded. A network source
-// pays up to 64 KiB of transfer for the first read after a jump. The size is
-// fixed and never derived from the file.
+// pays up to 64 KiB of transfer for the first read after a jump, or one frame
+// when it is larger than half the window. The size is a constant, capped only by
+// the stream length, never by a claim in the file.
 const frameWindowSize = 64 << 10
 
 // readerConfig holds the resolved NewReader options.
