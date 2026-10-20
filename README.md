@@ -201,9 +201,11 @@ required length with `io.ErrShortBuffer` if `dst` is too small).
 Frames are read through a 64 KiB read-ahead window, so a forward decode makes a
 seek and a large read per window rather than per access unit (a frame larger
 than half the window is read on its own), and a plain `*os.File` needs no extra
-buffering. Every refill seeks first, so the reader does
-not rely on where the stream was left, but the file must not change after
-`NewReader`.
+buffering. `NewReader` reads box headers and small box bodies the same way
+through a 4 KiB window, so opening a fragmented stream costs about two seeks and
+reads per media segment rather than one per box. Every refill seeks first, so the
+reader does not rely on where the stream was left, but the file must not change
+after `NewReader`.
 
 `Reader.SeekSample(n)` moves the cursor to access unit `n` (0-based, below
 `Info().FrameCount`) so the next read returns it, computing the position from the

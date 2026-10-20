@@ -42,6 +42,22 @@ func (f *failingReadSeeker) Read(p []byte) (int, error) {
 	return n, f.err
 }
 
+// shortSource reports a stream length its data does not back: a Seek from the
+// end lands relative to claim, so NewReader sees a stream of claim bytes while a
+// Read past the data returns io.EOF, as a file that shrank or was cut short.
+type shortSource struct {
+	*bytes.Reader
+
+	claim int64
+}
+
+func (s *shortSource) Seek(off int64, whence int) (int64, error) {
+	if whence == io.SeekEnd {
+		return s.Reader.Seek(s.claim+off, io.SeekStart)
+	}
+	return s.Reader.Seek(off, whence)
+}
+
 // TestReadFrameErrorKeepsCause pins how a frame read that fails after NewReader
 // accepted the file is reported, through every public frame path. An error from
 // the underlying reader keeps its cause and is not ErrCorrupt; any end of file
@@ -166,7 +182,7 @@ func TestFrameRefillFailure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
-			rd.win = make([]byte, 0, window)
+			rd.win.buf = make([]byte, 0, window)
 
 			for i := range tc.failAt {
 				if _, err := rd.ReadFrame(); err != nil {

@@ -4,7 +4,6 @@ package m4a
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/tphakala/go-m4a/internal/box"
 )
@@ -24,7 +23,7 @@ var (
 // by moofs. It selects the same first supported "soun" track the plain path
 // would, fills Info from the sample entry, then walks every fragment's
 // tfhd/trun to lay out the shared per-chunk geometry the read path consumes.
-func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
+func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent, src *openReader) error {
 	tr, movieTS, trex, err := parseInitMoov(moov)
 	if err != nil {
 		return err
@@ -33,7 +32,7 @@ func (rd *Reader) parseFragmented(moov []byte, moofs []moofExtent) error {
 		return err
 	}
 	rd.fillFormatInfo(tr)
-	runs, err := rd.buildFragmentGeometry(moofs, tr, trex)
+	runs, err := rd.buildFragmentGeometry(moofs, tr, trex, src)
 	if err != nil {
 		return err
 	}
@@ -91,7 +90,7 @@ func parseInitMoov(moov []byte) (tr *track, movieTS uint32, trex box.Trex, err e
 // consumes, modeling each trun run as one contiguous chunk. It reuses the plain
 // path's validateOffsets to confirm every access unit lies within the stream. It
 // returns the sample durations in run-length form for setPresentation.
-func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex) ([]box.SttsRun, error) {
+func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.Trex, src *openReader) ([]box.SttsRun, error) {
 	var (
 		sizes        []uint32
 		timeRuns     []box.SttsRun
@@ -136,7 +135,7 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 		}
 		if ext.bodyLen > maxInt {
 			// bodyLen is already bounded by the stream length: scanTopLevel rejected any
-			// box whose total ran past the stream, and io.ReadFull below reads exactly
+			// box whose total ran past the stream, and the read below takes exactly
 			// this many bytes, so the body can never exceed the file and the allocation
 			// is not unbounded. This guard is the 32-bit slice-length ceiling that
 			// readSection also applies: on a 32-bit build a body between maxInt (~2 GiB)
@@ -150,10 +149,7 @@ func (rd *Reader) buildFragmentGeometry(moofs []moofExtent, tr *track, trex box.
 			moofBody = make([]byte, ext.bodyLen)
 		}
 		moofBody = moofBody[:ext.bodyLen]
-		if _, err := rd.r.Seek(ext.bodyStart, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
-		}
-		if _, err := io.ReadFull(rd.r, moofBody); err != nil {
+		if err := src.read(ext.bodyStart, moofBody); err != nil {
 			return nil, fmt.Errorf("go-m4a: read moof body at %d: %w", ext.offset, err)
 		}
 		acc.moofOffset = ext.offset

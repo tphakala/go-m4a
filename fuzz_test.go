@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -122,7 +124,16 @@ func FuzzReader(f *testing.F) {
 			}
 		}()
 
-		r, err := NewReader(bytes.NewReader(data))
+		// An open window of len(data)%61 bytes (the default when that is 0) varies
+		// the open-time reads against the box layout independently of the frame
+		// window below.
+		r, err := NewReader(bytes.NewReader(data), openWindow(len(data)%61))
+		// Window size 1 reads every box on its own, so the windowed open must decide
+		// exactly as that unbuffered open does.
+		ref, refErr := NewReader(bytes.NewReader(data), openWindow(1))
+		if (err == nil) != (refErr == nil) || (err != nil && err.Error() != refErr.Error()) {
+			t.Fatalf("windowed open = %v, unbuffered open = %v", err, refErr)
+		}
 		if err != nil {
 			// A rejected input is a valid outcome, but the rejection must carry a
 			// typed sentinel, exactly as the ReadFrame/RawStream errors below are
@@ -132,11 +143,15 @@ func FuzzReader(f *testing.F) {
 			}
 			return
 		}
+		if !reflect.DeepEqual(r.Info(), ref.Info()) || !slices.Equal(r.sizes, ref.sizes) || r.constSize != ref.constSize ||
+			!slices.Equal(r.chunkOffsets, ref.chunkOffsets) || !slices.Equal(r.samplesPerChunk, ref.samplesPerChunk) {
+			t.Fatalf("windowed open geometry differs from the unbuffered open")
+		}
 
 		// A window of len(data)%128 bytes (the default when that is 0) makes the
 		// fuzzer vary the window against the frame layout.
 		if w := len(data) % 128; w > 0 {
-			r.win = make([]byte, 0, w)
+			r.win.buf = make([]byte, 0, w)
 		}
 
 		n := r.Info().FrameCount
