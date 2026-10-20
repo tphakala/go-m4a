@@ -10,7 +10,7 @@ require (
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/tphakala/go-aac v0.7.1
 	github.com/tphakala/go-flac v1.4.0
-	github.com/tphakala/go-opus v1.2.1
+	github.com/tphakala/go-opus v1.3.0
 )
 
 require (

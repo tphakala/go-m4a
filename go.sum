@@ -6,8 +6,8 @@ github.com/tphakala/go-aac v0.7.1 h1:/aspCjUIl+7i+Xs6K43Xm7P+yucn3V6WSvEbdzOyebU
 github.com/tphakala/go-aac v0.7.1/go.mod h1:5BL5jIIhw7Q1R6Tl7mUOHSoEQeKG7EUVNAGYRIQ7xbg=
 github.com/tphakala/go-flac v1.4.0 h1:P+ZFIohr67hYN3ayLQaGAlhroIRXJRSG9fFZIVo/wLU=
 github.com/tphakala/go-flac v1.4.0/go.mod h1:85Qszl3Z+lnrtXuVZIdF4KhjKef0W6YyJlhPsmBUhMM=
-github.com/tphakala/go-opus v1.2.1 h1:j3DlcDf+9VTUzOEZ6kODoZoLMb/MTN2+ft24VuO8FaQ=
-github.com/tphakala/go-opus v1.2.1/go.mod h1:CzYWGAXjMJHIqu/aTowxgmut2D0+OFJCjQ9+YJHDJV0=
+github.com/tphakala/go-opus v1.3.0 h1:0lpjV0HMAhStV7/oKkZRaQgdzNT5pdFDiWhBqteobxE=
+github.com/tphakala/go-opus v1.3.0/go.mod h1:BjrAk2Jf16arkoj6aeIeE/Nnsnq3IRJgzY+kNn3jlH4=
 github.com/tphakala/simd v1.14.0 h1:f1ZBojSE3udWggptQpGyTynVfVdCZxd/KTTfaiDeoCA=
 github.com/tphakala/simd v1.14.0/go.mod h1:eO53GkWg40mRbr2tzs0Xb1IMZQ5U8cMR+Aa1RlXUinE=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
