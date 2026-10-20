@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-20
+
 ### Changed
 
 - A frame read that fails in `Reader.ReadFrame`, `Reader.ReadFrameInto` or `Reader.RawStream`, and in the bridges that read through them, no longer reports `ErrCorrupt`. An error from the underlying reader is wrapped with its cause, so `errors.Is` and `errors.As` reach it (for example an `*fs.PathError`). A stream that ends before a frame the sample table places inside it is a wrapped `io.ErrUnexpectedEOF`, and no read failure matches `io.EOF`. Through `aacm4a.NewDecoder`, go-aac reports that case as `aacpcm.ErrCorruptStream` with `io.ErrUnexpectedEOF` still in the chain. `NewReader` follows the same rule for its own reads: a stream that ends before the length its `Seek` from the end reported, such as a file cut short after that `Seek`, is a wrapped `io.ErrUnexpectedEOF` instead of an error matching `io.EOF`. Frame errors in the container itself (a zero length, an extent outside the stream) are still `ErrCorrupt`. Code that matched `ErrCorrupt` to catch I/O failures during frame reads should check for the cause instead.
@@ -43,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Releases up to and including v0.5.0 predate this file; see the [GitHub releases](https://github.com/tphakala/go-m4a/releases) and the git tags for their history.
 
-[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tphakala/go-m4a/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/tphakala/go-m4a/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tphakala/go-m4a/compare/v0.5.0...v0.6.0
