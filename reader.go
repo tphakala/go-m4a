@@ -271,7 +271,7 @@ type moofExtent struct {
 	bodyLen   int64 // moof body length
 }
 
-// scanTopLevel walks the top-level boxes of r, returning the ftyp major brand,
+// scanTopLevel walks the top-level boxes of src, returning the ftyp major brand,
 // the moov box body, and the extent of every top-level moof box. A non-empty
 // moofs slice marks fragmented (CMAF) input, which NewReader demuxes through the
 // movie fragments rather than the moov sample tables. styp, sidx, and mfra are

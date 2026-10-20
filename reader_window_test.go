@@ -261,7 +261,8 @@ func TestReadAheadWindowFitsShortStream(t *testing.T) {
 // TestOpenReadsThroughWindow pins that NewReader reads box headers and bodies
 // through its open window: a refill serves a segment's styp, moof and mdat header
 // together, so opening N segments costs about two Seek and Read pairs each rather
-// than one per box, and no Read is offered more than the window.
+// than one per box, and while every ftyp, moov and moof body is at most the window
+// no Read is offered more than the window.
 func TestOpenReadsThroughWindow(t *testing.T) {
 	t.Run("fragmented", func(t *testing.T) {
 		const segments = 30
