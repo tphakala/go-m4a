@@ -330,8 +330,13 @@ func openOutcome(src io.ReadSeeker, opts ...ReaderOption) string {
 			errors.Is(err, ErrCorrupt), errors.Is(err, ErrUnsupported), errors.Is(err, ErrBoxTooLarge),
 			errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF))
 	}
-	return fmt.Sprintf("%#v|%v|%d|%v|%v|%v|%#v", rd.Info(), rd.sizes, rd.constSize, rd.chunkOffsets,
-		rd.samplesPerChunk, rd.timeRuns, rd.window)
+	// The presentation window holds an error; render its text, since %#v would print
+	// the error's address, which differs between two opens of the same stream.
+	win := rd.window
+	seekErr := fmt.Sprint(win.seekErr)
+	win.seekErr = nil
+	return fmt.Sprintf("%#v|%v|%d|%v|%v|%v|%#v|%s", rd.Info(), rd.sizes, rd.constSize, rd.chunkOffsets,
+		rd.samplesPerChunk, rd.timeRuns, win, seekErr)
 }
 
 // TestOpenOutcomeIndependentOfWindow pins that the open window changes how
