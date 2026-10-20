@@ -86,7 +86,7 @@ func drainMatchesStream(t *testing.T, rd *Reader, data []byte, between func()) {
 func TestFrameReadsMatchStreamBytes(t *testing.T) {
 	frames := synthFrames(13)
 	fixtures := map[string][]byte{
-		"single chunk": writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(40)),
+		"single chunk": plainFixture(t),
 		"fragmented": buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{
 			uniformSegment(frames[0:3]),
 			uniformSegment(frames[3:8]),
@@ -237,11 +237,18 @@ func TestLargeFramesReadDirectly(t *testing.T) {
 	}
 }
 
+// plainFixture is a plain (non-fragmented) M4A of 40 short AAC frames, 2870
+// bytes long, small enough to fit one window of either kind.
+func plainFixture(t *testing.T) []byte {
+	t.Helper()
+	return writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(40))
+}
+
 // TestReadAheadWindowFitsShortStream pins that the frame window never exceeds
 // the stream it reads: a 2870-byte file gets a 2870-byte window, not the 64 KiB
 // a long stream gets (TestForwardDecodeReadsInWindows pins that side).
 func TestReadAheadWindowFitsShortStream(t *testing.T) {
-	data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(40))
+	data := plainFixture(t)
 	rd := mustReader(t, data)
 	if _, err := rd.ReadFrame(); err != nil {
 		t.Fatal(err)
@@ -258,12 +265,7 @@ func TestReadAheadWindowFitsShortStream(t *testing.T) {
 func TestOpenReadsThroughWindow(t *testing.T) {
 	t.Run("fragmented", func(t *testing.T) {
 		const segments = 30
-		frames := benchFrames()
-		segs := make([][]fragAU, segments)
-		for i := range segs {
-			segs[i] = uniformSegment(frames[16*i : 16*i+16])
-		}
-		data := buildFragmentedStream(t, aacFragmentConfig(), segs)
+		data := buildFragmentedStream(t, aacFragmentConfig(), benchFragSegments(benchFrames()[:16*segments], 16))
 
 		src := &countingReadSeeker{ReadSeeker: bytes.NewReader(data)}
 		if _, err := NewReader(src); err != nil {
@@ -283,7 +285,7 @@ func TestOpenReadsThroughWindow(t *testing.T) {
 	// ftyp and moov occur once per file, so only a plain file shows whether
 	// readSection goes through the window: the 2870-byte file fits one refill.
 	t.Run("plain", func(t *testing.T) {
-		data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(40))
+		data := plainFixture(t)
 		src := &countingReadSeeker{ReadSeeker: bytes.NewReader(data)}
 		if _, err := NewReader(src); err != nil {
 			t.Fatal(err)
@@ -321,7 +323,7 @@ func TestOpenOutcomeIndependentOfWindow(t *testing.T) {
 		name string
 		data []byte
 	}{
-		{"plain", writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(40))},
+		{"plain", plainFixture(t)},
 		{"fragmented", buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{
 			uniformSegment(frames[0:3]),
 			uniformSegment(frames[3:8]),

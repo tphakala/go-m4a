@@ -19,6 +19,17 @@ func newWindow(size int, end int64) window {
 	return window{buf: make([]byte, 0, int(min(int64(size), end)))}
 }
 
+// lookup copies stream[off, off+len(dst)) into dst and reports true when the range
+// lies wholly inside the window. It is small enough to inline, so the frame path
+// pays no call for a hit.
+func (w *window) lookup(off int64, dst []byte) bool {
+	if off < w.start || off+int64(len(dst)) > w.start+int64(len(w.buf)) {
+		return false
+	}
+	copy(dst, w.buf[off-w.start:])
+	return true
+}
+
 // read copies stream[off, off+len(dst)) into dst. A range wholly inside the window
 // is copied from it. Otherwise read seeks to off, and a range up to half the
 // window refills the window from off, reading until the window is full or the
@@ -33,8 +44,7 @@ func (w *window) read(r io.ReadSeeker, off, end int64, dst []byte) (op string, e
 	if len(dst) == 0 {
 		return "", nil
 	}
-	if off >= w.start && off+int64(len(dst)) <= w.start+int64(len(w.buf)) {
-		copy(dst, w.buf[off-w.start:])
+	if w.lookup(off, dst) {
 		return "", nil
 	}
 	if _, err := r.Seek(off, io.SeekStart); err != nil {

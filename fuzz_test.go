@@ -9,8 +9,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"reflect"
-	"slices"
 	"testing"
 	"time"
 
@@ -130,9 +128,8 @@ func FuzzReader(f *testing.F) {
 		r, err := NewReader(bytes.NewReader(data), openWindow(len(data)%61))
 		// Window size 1 reads every box on its own, so the windowed open must decide
 		// exactly as that unbuffered open does.
-		ref, refErr := NewReader(bytes.NewReader(data), openWindow(1))
-		if (err == nil) != (refErr == nil) || (err != nil && err.Error() != refErr.Error()) {
-			t.Fatalf("windowed open = %v, unbuffered open = %v", err, refErr)
+		if got, want := openOutcome(bytes.NewReader(data), openWindow(len(data)%61)), openOutcome(bytes.NewReader(data), openWindow(1)); got != want {
+			t.Fatalf("windowed open = %s, unbuffered open = %s", got, want)
 		}
 		if err != nil {
 			// A rejected input is a valid outcome, but the rejection must carry a
@@ -142,10 +139,6 @@ func FuzzReader(f *testing.F) {
 				t.Errorf("NewReader error = %v, want ErrCorrupt/ErrUnsupported/io.EOF", err)
 			}
 			return
-		}
-		if !reflect.DeepEqual(r.Info(), ref.Info()) || !slices.Equal(r.sizes, ref.sizes) || r.constSize != ref.constSize ||
-			!slices.Equal(r.chunkOffsets, ref.chunkOffsets) || !slices.Equal(r.samplesPerChunk, ref.samplesPerChunk) {
-			t.Fatalf("windowed open geometry differs from the unbuffered open")
 		}
 
 		// A window of len(data)%128 bytes (the default when that is 0) makes the

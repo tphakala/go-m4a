@@ -87,9 +87,9 @@ type Info struct {
 // to 64 KiB, so a forward read seeks and reads once per window rather than once
 // per access unit (a frame larger than half the window is read on its own), and
 // the stream's bytes must not change after NewReader. NewReader itself reads box
-// headers and small box bodies through a 4 KiB window that it drops on return. The reader is not safe for
-// concurrent use, and ReadFrame, RawStream, and their shared cursor advance
-// together.
+// headers and small box bodies through a smaller window (openWindowSize) that it
+// drops on return. The reader is not safe for concurrent use, and ReadFrame,
+// RawStream, and their shared cursor advance together.
 type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
@@ -1138,12 +1138,15 @@ func (rd *Reader) nextFrameSize() (uint32, error) {
 // Splitting the read from allocation lets RawStream reuse one buffer across
 // frames instead of allocating per frame.
 func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
-	if cap(rd.win.buf) == 0 {
-		rd.win = newWindow(frameWindowSize, rd.streamLen)
-	}
-	// nextFrameSize keeps the frame's extent within streamLen.
-	if op, err := rd.win.read(rd.r, rd.curOffset, rd.streamLen, dst[:size]); err != nil {
-		return rd.frameReadErr(op, err)
+	dst = dst[:size]
+	if !rd.win.lookup(rd.curOffset, dst) {
+		if cap(rd.win.buf) == 0 {
+			rd.win = newWindow(frameWindowSize, rd.streamLen)
+		}
+		// nextFrameSize keeps the frame's extent within streamLen.
+		if op, err := rd.win.read(rd.r, rd.curOffset, rd.streamLen, dst); err != nil {
+			return rd.frameReadErr(op, err)
+		}
 	}
 	rd.advance(size)
 	return nil
