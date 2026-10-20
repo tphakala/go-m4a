@@ -89,16 +89,15 @@ const openWindowSize = 4 << 10
 // openReader serves NewReader's reads (box headers, ftyp and moov bodies, moof
 // bodies) through a window of its own, so the stream's position and the frame
 // window are not involved. The open-time error messages do not distinguish a Seek
-// from a Read, so read drops the op, and it maps any EOF to io.ErrUnexpectedEOF,
-// as frame reads do.
+// from a Read, so read drops the op.
 type openReader struct {
 	r   io.ReadSeeker
 	end int64
 	win window
 }
 
-// read copies stream[off, off+len(dst)) into dst. Any EOF becomes
-// io.ErrUnexpectedEOF.
+// read copies stream[off, off+len(dst)) into dst, with any EOF mapped by
+// unexpectedEOF.
 func (o *openReader) read(off int64, dst []byte) error {
 	_, err := o.win.read(o.r, off, o.end, dst)
 	return unexpectedEOF(err)

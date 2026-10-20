@@ -4,6 +4,7 @@ package m4a
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -125,10 +126,8 @@ func TestOpenErrorKeepsCause(t *testing.T) {
 // io.EOF, whichever read meets the end: the file is smaller than measured, which
 // is not a clean end. The plain fixture is cut at every length. The cuts reach
 // the box header read and both readSection callers (ftyp, moov), and the test
-// requires each, so it cannot quietly stop covering one. A moof body read is not
-// in the list: a prefix cut cannot reach it, because the scan reads the next
-// top-level header after each moof, which lies past the moof body, so a cut
-// inside a moof body fails at that header read first.
+// requires each, so it cannot quietly stop covering one. A prefix cut never fails
+// at a moof body read: the scan meets the cut at the next top-level header first.
 func TestOpenShortStreamIsUnexpectedEOF(t *testing.T) {
 	data := plainFixture(t)
 	prefixes := []string{"go-m4a: read box header at ", "go-m4a: read ftyp: ", "go-m4a: read moov: "}
@@ -229,10 +228,7 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 				if !errors.Is(err, fc.want) {
 					t.Errorf("error %q does not match %v", err, fc.want)
 				}
-				for _, injected := range []error{fc.err, fc.seekErr} {
-					if _, ok := errors.AsType[*fs.PathError](injected); !ok {
-						continue
-					}
+				if _, injected := errors.AsType[*fs.PathError](cmp.Or(fc.err, fc.seekErr)); injected {
 					if _, ok := errors.AsType[*fs.PathError](err); !ok {
 						t.Errorf("error %q lost the *fs.PathError cause", err)
 					}
