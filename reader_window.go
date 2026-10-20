@@ -2,7 +2,10 @@
 
 package m4a
 
-import "io"
+import (
+	"errors"
+	"io"
+)
 
 // window is a read-ahead buffer keyed by absolute stream offset: buf holds the
 // stream bytes [start, start+len(buf)), and cap(buf) is the window size. A refill
@@ -86,15 +89,29 @@ const openWindowSize = 4 << 10
 // openReader serves NewReader's reads (box headers, ftyp and moov bodies, moof
 // bodies) through a window of its own, so the stream's position and the frame
 // window are not involved. The open-time error messages do not distinguish a Seek
-// from a Read, so read drops the op.
+// from a Read, so read drops the op, and it maps any EOF to io.ErrUnexpectedEOF,
+// as frame reads do.
 type openReader struct {
 	r   io.ReadSeeker
 	end int64
 	win window
 }
 
-// read copies stream[off, off+len(dst)) into dst.
+// read copies stream[off, off+len(dst)) into dst. Any EOF becomes
+// io.ErrUnexpectedEOF.
 func (o *openReader) read(off int64, dst []byte) error {
 	_, err := o.win.read(o.r, off, o.end, dst)
+	return unexpectedEOF(err)
+}
+
+// unexpectedEOF maps any EOF to io.ErrUnexpectedEOF and returns other errors
+// unchanged. Every Reader read covers a range already bounded against the
+// stream length measured at open, so running out of bytes means the stream is
+// shorter than that, never a clean end; io.ReadFull passes a reader's wrapped
+// io.EOF through, and a Seek may report one.
+func unexpectedEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
 	return err
 }
