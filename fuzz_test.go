@@ -76,10 +76,13 @@ func fragmentedSeed() (data []byte, ok bool) {
 }
 
 // FuzzReader is the continuous demuxer fuzz target the CI workflow drives. It
-// asserts a single safety contract: over any input, NewReader plus a full
+// asserts a safety contract: over any input, NewReader plus a full
 // ReadFrame/RawStream drain never panics, and every error surfaced is a wrapped
 // ErrCorrupt, ErrUnsupported, or io.EOF. A crash, or any other error class, is a
-// real reader bug.
+// real reader bug. Each frame ReadFrame returns must also be the input's bytes at
+// the frame's offset, read through a read-ahead window sized from the input
+// length so small inputs still exercise refills and frames larger than the
+// window.
 func FuzzReader(f *testing.F) {
 	// Seed with the interop fixtures. A missing or unreadable fixture is skipped,
 	// not fatal, so the fuzzer still runs in a trimmed checkout. Both the AAC-LC
@@ -128,6 +131,12 @@ func FuzzReader(f *testing.F) {
 				t.Errorf("NewReader error = %v, want ErrCorrupt/ErrUnsupported/io.EOF", err)
 			}
 			return
+		}
+
+		// A window of len(data)%128 bytes (the default when that is 0) makes the
+		// fuzzer vary the window against the frame layout.
+		if w := len(data) % 128; w > 0 {
+			r.win = make([]byte, 0, w)
 		}
 
 		n := r.Info().FrameCount
@@ -192,14 +201,19 @@ func FuzzReader(f *testing.F) {
 		}
 
 		// Drain the access units. ReadFrame ends at a non-nil error, which must be
-		// io.EOF or a wrapped corruption/unsupported sentinel.
+		// io.EOF or a wrapped corruption/unsupported sentinel, and every frame
+		// before it must be the input's bytes at the offset the cursor named.
 		for {
-			_, ferr := r.ReadFrame()
+			off := r.curOffset
+			frame, ferr := r.ReadFrame()
 			if ferr != nil {
 				if !isReaderSentinel(ferr) {
 					t.Errorf("ReadFrame error = %v, want ErrCorrupt/ErrUnsupported/io.EOF", ferr)
 				}
 				break
+			}
+			if !bytes.Equal(frame, data[off:off+int64(len(frame))]) {
+				t.Fatalf("frame at offset %d differs from the input bytes", off)
 			}
 		}
 

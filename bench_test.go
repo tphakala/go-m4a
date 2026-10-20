@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/tphakala/go-m4a/internal/testutil"
@@ -117,6 +119,7 @@ func BenchmarkReadFrame(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	warmFrameWindow(b, rd)
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()
 	for b.Loop() {
@@ -150,13 +153,8 @@ func BenchmarkReadFrameInto(b *testing.B) {
 
 	// Size the reused buffer to the largest frame so ReadFrameInto never returns
 	// io.ErrShortBuffer in the measured loop.
-	var maxSize int
-	for _, f := range frames {
-		if len(f) > maxSize {
-			maxSize = len(f)
-		}
-	}
-	dst := make([]byte, maxSize)
+	dst := make([]byte, maxFrameLen(frames))
+	warmFrameWindow(b, rd)
 
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()
@@ -170,6 +168,63 @@ func BenchmarkReadFrameInto(b *testing.B) {
 			if rerr != nil {
 				b.Fatal(rerr)
 			}
+		}
+	}
+}
+
+// maxFrameLen returns the length of the largest frame, the buffer size that lets
+// ReadFrameInto read every frame.
+func maxFrameLen(frames [][]byte) int {
+	n := 0
+	for _, f := range frames {
+		n = max(n, len(f))
+	}
+	return n
+}
+
+// warmFrameWindow reads one frame so the Reader's one-time read-ahead window is
+// allocated before the measured loop, which resets the cursor on entry.
+func warmFrameWindow(b *testing.B, rd *Reader) {
+	b.Helper()
+	if _, err := rd.ReadFrame(); err != nil {
+		b.Fatal(err)
+	}
+}
+
+// BenchmarkReadFrameIntoFile opens the bench file from disk and drains it with
+// ReadFrameInto each iteration. Unlike the in-memory benchmarks it pays a
+// syscall for every Seek and Read that reaches the *os.File, so it shows what
+// the read-ahead window saves on a forward decode.
+func BenchmarkReadFrameIntoFile(b *testing.B) {
+	frames := benchFrames()
+	path := filepath.Join(b.TempDir(), "bench.m4a")
+	if err := os.WriteFile(path, buildBenchFile(b, frames), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	dst := make([]byte, maxFrameLen(frames))
+
+	b.SetBytes(benchTotalPayload(frames))
+	b.ReportAllocs()
+	for b.Loop() {
+		f, err := os.Open(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rd, err := NewReader(f)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for {
+			_, rerr := rd.ReadFrameInto(dst)
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			if rerr != nil {
+				b.Fatal(rerr)
+			}
+		}
+		if err := f.Close(); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

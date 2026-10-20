@@ -40,13 +40,7 @@ func TestReadFrameIntoRoundTrip(t *testing.T) {
 	}
 
 	// Size the reused buffer to the largest frame.
-	maxSize := 0
-	for _, f := range want {
-		if len(f) > maxSize {
-			maxSize = len(f)
-		}
-	}
-	dst := make([]byte, maxSize)
+	dst := make([]byte, maxFrameLen(want))
 
 	rd, err := NewReader(bytes.NewReader(data))
 	if err != nil {
