@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -335,7 +337,10 @@ func openOutcome(src io.ReadSeeker, opts ...ReaderOption) string {
 // TestOpenOutcomeIndependentOfWindow pins that the open window changes how
 // NewReader reads, never what it decides: for any cut of the stream and any
 // window size the error (text and wrapped sentinels) or the resulting geometry
-// equals what unbuffered reads (window size 1) give.
+// equals what unbuffered reads (window size 1) give. The same holds for a source
+// whose Read fails after n bytes each time, a fault keyed to the stream and to the
+// bytes per Read; a source that fails on its Nth call sees a different call
+// sequence at each window size, so its outcome is not pinned.
 func TestOpenOutcomeIndependentOfWindow(t *testing.T) {
 	frames := synthFrames(13)
 	afconvert, err := os.ReadFile(filepath.Join("testdata", "interop", "afconvert_mono48k.m4a"))
@@ -368,6 +373,22 @@ func TestOpenOutcomeIndependentOfWindow(t *testing.T) {
 				for _, w := range []int{0, 64, 40, 33} {
 					if got := open(w); got != want {
 						t.Fatalf("cut at %d, window %d: got %s, want %s", k, w, got, want)
+					}
+				}
+			}
+			// A Read that returns n bytes together with an I/O error: a refill that
+			// reads ahead meets the error after it has the bytes it needs, and must
+			// drop it as an unbuffered read would, so only an error inside the needed
+			// bytes surfaces. n = 16 is one box header.
+			eio := &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO}
+			for _, n := range []int{16, 24, 100, 1000} {
+				open := func(w int) string {
+					return openOutcome(&failingReadSeeker{ReadSeeker: bytes.NewReader(fx.data), n: n, err: eio}, openWindow(w))
+				}
+				want := open(1)
+				for _, w := range []int{0, 64} {
+					if got := open(w); got != want {
+						t.Fatalf("Read failing after %d bytes, window %d: got %s, want %s", n, w, got, want)
 					}
 				}
 			}
