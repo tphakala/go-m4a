@@ -1045,7 +1045,10 @@ func (rd *Reader) ASC() []byte {
 
 // ReadFrame returns the next access unit in decode order and advances the
 // cursor. It returns io.EOF after the last access unit. A frame whose computed
-// extent falls outside the stream, or a short read, is a wrapped ErrCorrupt.
+// extent falls outside the stream is a wrapped ErrCorrupt. A failure of the
+// underlying reader is returned wrapped with its cause, and a stream that ends
+// before the frame does (shorter than it was at open) is a wrapped
+// io.ErrUnexpectedEOF; neither matches io.EOF.
 func (rd *Reader) ReadFrame() ([]byte, error) {
 	size, err := rd.nextFrameSize()
 	if err != nil {
@@ -1063,8 +1066,8 @@ func (rd *Reader) ReadFrame() ([]byte, error) {
 // that reuse a buffer across frames. If dst is too small to hold the frame,
 // ReadFrameInto reads nothing, does not advance, and returns the required length
 // with io.ErrShortBuffer, so the caller can grow dst and call again. It returns
-// io.EOF after the last access unit, and a wrapped ErrCorrupt for a frame whose
-// extent falls outside the stream or a short read.
+// io.EOF after the last access unit, and the same errors as ReadFrame for a
+// frame that cannot be read.
 func (rd *Reader) ReadFrameInto(dst []byte) (int, error) {
 	size, err := rd.nextFrameSize()
 	if err != nil {
@@ -1106,20 +1109,27 @@ func (rd *Reader) nextFrameSize() (uint32, error) {
 }
 
 // readFrameInto seeks to the current frame, reads exactly size bytes into
-// dst[:size], and advances the cursor. dst must have length at least size (the
-// caller sizes it from nextFrameSize). Splitting the read from allocation lets
-// RawStream reuse one buffer across frames instead of allocating per frame.
+// dst[:size], and on success advances the cursor. dst must have length at least
+// size (the caller sizes it from nextFrameSize). Splitting the read from
+// allocation lets RawStream reuse one buffer across frames instead of
+// allocating per frame.
 func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
 	off := rd.curOffset
 	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
 		return fmt.Errorf("go-m4a: seek frame %d: %w", rd.nextSample, err)
 	}
 	if _, err := io.ReadFull(rd.r, dst[:size]); err != nil {
-		// Bounds were checked in nextFrameSize, so a short read here is a
-		// truncated or misbehaving stream. Fold in the message as text rather
-		// than wrapping the error, so a stray io.EOF cannot masquerade as a
-		// clean end of frames.
-		return fmt.Errorf("go-m4a: read frame %d: %s: %w", rd.nextSample, err.Error(), ErrCorrupt)
+		// nextFrameSize bounded the extent against streamLen, so running out of
+		// bytes here means the stream is shorter than it reported at open. Report
+		// that as io.ErrUnexpectedEOF whatever form the EOF took (io.ReadFull
+		// passes a reader's wrapped io.EOF through unchanged), so a failed read
+		// never matches io.EOF, the clean end of frames. Any other error is the
+		// underlying reader's own failure and keeps its cause without ErrCorrupt:
+		// the container is not at fault.
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("go-m4a: read frame %d: %w", rd.nextSample, io.ErrUnexpectedEOF)
+		}
+		return fmt.Errorf("go-m4a: read frame %d: %w", rd.nextSample, err)
 	}
 	rd.advance(size)
 	return nil
@@ -1147,7 +1157,8 @@ func (rd *Reader) advance(size uint32) {
 // big-endian length prefix followed by the access-unit bytes, exactly the
 // framing go-aac's pcm.WithRawStream consumes. It shares the Reader's cursor
 // with ReadFrame and reports ErrUnsupported if any access unit exceeds 65535
-// bytes (impossible for AAC-LC, guarded regardless).
+// bytes (impossible for AAC-LC, guarded regardless). A frame that cannot be read
+// ends the stream with the error ReadFrame would return, never io.EOF.
 func (rd *Reader) RawStream() io.Reader {
 	return &rawReader{rd: rd}
 }
