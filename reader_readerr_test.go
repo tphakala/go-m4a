@@ -15,7 +15,7 @@ import (
 // failingReadSeeker passes reads and seeks through while err and seekErr are
 // nil. Once err is set, each Read copies up to n bytes and then returns err;
 // once seekErr is set, each Seek returns it. A test sets them after NewReader
-// succeeds, so only the first frame read fails.
+// succeeds, so only frame reads meet them.
 type failingReadSeeker struct {
 	io.ReadSeeker
 
@@ -120,138 +120,86 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 	}
 }
 
-// shrinkingReadSeeker serves a stream that ends at cut once cut is set, as a
-// file truncated after NewReader would.
-type shrinkingReadSeeker struct {
-	*bytes.Reader
-
-	cut int64
-}
-
-func (s *shrinkingReadSeeker) Read(p []byte) (int, error) {
-	if s.cut > 0 {
-		pos, err := s.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return 0, err
-		}
-		if pos >= s.cut {
-			return 0, io.EOF
-		}
-		p = p[:min(int64(len(p)), s.cut-pos)]
-	}
-	return s.Reader.Read(p)
-}
-
 // TestFrameRefillFailure pins a source failure that meets the read-ahead
-// window. A 60-byte window holds frames 0 to 2, so after the fault frames 1 and
-// 2 still come from the window and frame 3 is the first read that needs the
-// source. It must report the failure with the frame-read classification, and
-// once the fault clears, rereading from the start must return the stream's
-// bytes: a failed refill may have overwritten the window's buffer and must not
-// leave the window claiming its old range. Frame 5 (72 bytes) is larger than the
-// window, so a fault injected after frame 4 meets the direct read instead.
+// window. A 120-byte window holds frames 0 to 3, so after a fault injected
+// after frame 0, frames 1 to 3 still come from the window and frame 4 is the
+// first read that needs the source. It must report the failure with the
+// frame-read classification, and once the fault clears, rereading from the start
+// must return the stream's bytes: a failed refill may have overwritten the
+// window and must not leave it claiming its old range. Frame 5 (72 bytes) is
+// larger than half the window, so it is read directly, and a fault injected after
+// frame 4 meets that read instead.
 func TestFrameRefillFailure(t *testing.T) {
-	frames := synthFrames(10) // 7, 20, 33, 46, ... bytes
+	frames := synthFrames(10) // 7, 20, 33, 46, 59, 72, ... bytes
 	data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, frames)
-	const window = 60 // frames 0 to 2
+	const window = 120
+	probe := mustReader(t, data)
+	if err := probe.SeekSample(4); err != nil {
+		t.Fatal(err)
+	}
+	off4 := probe.curOffset
 
+	eio := &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO}
 	cases := []struct {
 		name string
-		// fault builds the source for frame 3 at off3 and returns it with a
-		// func that breaks it and one that repairs it.
-		fault func(data []byte, off3 int64) (io.ReadSeeker, func(), func())
-		// breakAfter is the frame after whose read the fault is injected.
-		breakAfter int
+		// The fault: Reads return n bytes and then err, or the stream ends cut
+		// bytes past frame 4's offset (0 leaves it whole).
+		n          int
+		err        error
+		cut        int64
+		breakAfter int // frame after whose read the fault starts
 		failAt     int
 		want       error
-		pathError  bool
 	}{
-		{
-			name: "io error after a partial refill", failAt: 3, want: syscall.EIO, pathError: true,
-			fault: func(data []byte, _ int64) (io.ReadSeeker, func(), func()) {
-				src := &failingReadSeeker{ReadSeeker: bytes.NewReader(data), n: 5}
-				return src,
-					func() { src.err = &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO} },
-					func() { src.err = nil }
-			},
-		},
-		{
-			name: "EOF at refill", failAt: 3, want: io.ErrUnexpectedEOF,
-			fault: func(data []byte, _ int64) (io.ReadSeeker, func(), func()) {
-				src := &failingReadSeeker{ReadSeeker: bytes.NewReader(data)}
-				return src, func() { src.err = io.EOF }, func() { src.err = nil }
-			},
-		},
-		{
-			name: "stream cut inside frame 3", failAt: 3, want: io.ErrUnexpectedEOF,
-			fault: func(data []byte, off3 int64) (io.ReadSeeker, func(), func()) {
-				src := &shrinkingReadSeeker{Reader: bytes.NewReader(data)}
-				return src, func() { src.cut = off3 + 10 }, func() { src.cut = 0 }
-			},
-		},
-		{
-			// The refill needs only frame 3's bytes to succeed, not a full window.
-			name: "stream cut at frame 3's end", failAt: 4, want: io.ErrUnexpectedEOF,
-			fault: func(data []byte, off3 int64) (io.ReadSeeker, func(), func()) {
-				src := &shrinkingReadSeeker{Reader: bytes.NewReader(data)}
-				return src, func() { src.cut = off3 + int64(len(frames[3])) }, func() { src.cut = 0 }
-			},
-		},
-		{
-			name: "io error on a frame larger than the window", breakAfter: 4, failAt: 5,
-			want: syscall.EIO, pathError: true,
-			fault: func(data []byte, _ int64) (io.ReadSeeker, func(), func()) {
-				src := &failingReadSeeker{ReadSeeker: bytes.NewReader(data), n: 5}
-				return src,
-					func() { src.err = &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO} },
-					func() { src.err = nil }
-			},
-		},
+		{name: "io error after a partial refill", n: 5, err: eio, failAt: 4, want: syscall.EIO},
+		{name: "EOF at refill", err: io.EOF, failAt: 4, want: io.ErrUnexpectedEOF},
+		{name: "stream cut inside frame 4", cut: 10, failAt: 4, want: io.ErrUnexpectedEOF},
+		// The refill needs only frame 4's bytes to succeed, not a full window.
+		{name: "stream cut at frame 4's end", cut: int64(len(frames[4])), failAt: 5, want: io.ErrUnexpectedEOF},
+		{name: "io error on a direct read", n: 5, err: eio, breakAfter: 4, failAt: 5, want: syscall.EIO},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			probe := mustReader(t, data)
-			if err := probe.SeekSample(3); err != nil {
-				t.Fatal(err)
-			}
-			src, breakSrc, fixSrc := tc.fault(data, probe.curOffset)
+			src := &failingReadSeeker{ReadSeeker: bytes.NewReader(data), n: tc.n}
 			rd, err := NewReader(src)
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
-			rd.winBuf = make([]byte, window)
+			rd.win = make([]byte, 0, window)
 
-			for i := range tc.failAt + 1 {
-				_, err := rd.ReadFrame()
+			for i := range tc.failAt {
+				if _, err := rd.ReadFrame(); err != nil {
+					t.Fatalf("frame %d: %v, want it served before the failure", i, err)
+				}
 				if i == tc.breakAfter {
-					breakSrc()
-				}
-				if i < tc.failAt {
-					if err != nil {
-						t.Fatalf("frame %d: %v, want it served before the failure", i, err)
+					src.err = tc.err
+					if tc.cut > 0 {
+						src.ReadSeeker = bytes.NewReader(data[:off4+tc.cut])
 					}
-					continue
 				}
-				if err == nil {
-					t.Fatalf("frame %d read succeeded, want an error", i)
-				}
-				if errors.Is(err, io.EOF) || errors.Is(err, ErrCorrupt) {
-					t.Errorf("frame %d error %q matches io.EOF or ErrCorrupt", i, err)
-				}
-				if !errors.Is(err, tc.want) {
-					t.Errorf("frame %d error %q does not match %v", i, err, tc.want)
-				}
-				if _, ok := errors.AsType[*fs.PathError](err); tc.pathError && !ok {
-					t.Errorf("frame %d error %q lost the *fs.PathError cause", i, err)
+			}
+			_, err = rd.ReadFrame()
+			if err == nil {
+				t.Fatalf("frame %d read succeeded, want an error", tc.failAt)
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, ErrCorrupt) {
+				t.Errorf("frame %d error %q matches io.EOF or ErrCorrupt", tc.failAt, err)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Errorf("frame %d error %q does not match %v", tc.failAt, err, tc.want)
+			}
+			if _, injected := errors.AsType[*fs.PathError](tc.err); injected {
+				if _, ok := errors.AsType[*fs.PathError](err); !ok {
+					t.Errorf("frame %d error %q lost the *fs.PathError cause", tc.failAt, err)
 				}
 			}
 
-			fixSrc()
+			src.err, src.ReadSeeker = nil, bytes.NewReader(data)
 			if err := rd.SeekSample(0); err != nil {
 				t.Fatal(err)
 			}
-			drainMatchesStream(t, rd, data)
+			drainMatchesStream(t, rd, data, nil)
 		})
 	}
 }

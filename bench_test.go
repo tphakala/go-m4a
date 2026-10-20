@@ -153,13 +153,7 @@ func BenchmarkReadFrameInto(b *testing.B) {
 
 	// Size the reused buffer to the largest frame so ReadFrameInto never returns
 	// io.ErrShortBuffer in the measured loop.
-	var maxSize int
-	for _, f := range frames {
-		if len(f) > maxSize {
-			maxSize = len(f)
-		}
-	}
-	dst := make([]byte, maxSize)
+	dst := make([]byte, maxFrameLen(frames))
 	warmFrameWindow(b, rd)
 
 	b.SetBytes(benchTotalPayload(frames))
@@ -176,6 +170,16 @@ func BenchmarkReadFrameInto(b *testing.B) {
 			}
 		}
 	}
+}
+
+// maxFrameLen returns the length of the largest frame, the buffer size that lets
+// ReadFrameInto read every frame.
+func maxFrameLen(frames [][]byte) int {
+	n := 0
+	for _, f := range frames {
+		n = max(n, len(f))
+	}
+	return n
 }
 
 // warmFrameWindow reads one frame so the Reader's one-time read-ahead window is
@@ -197,7 +201,7 @@ func BenchmarkReadFrameIntoFile(b *testing.B) {
 	if err := os.WriteFile(path, buildBenchFile(b, frames), 0o600); err != nil {
 		b.Fatal(err)
 	}
-	dst := make([]byte, 1024) // benchFrames tops out at 800 bytes
+	dst := make([]byte, maxFrameLen(frames))
 
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()

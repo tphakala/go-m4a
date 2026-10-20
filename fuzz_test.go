@@ -136,7 +136,7 @@ func FuzzReader(f *testing.F) {
 		// A window of len(data)%128 bytes (the default when that is 0) makes the
 		// fuzzer vary the window against the frame layout.
 		if w := len(data) % 128; w > 0 {
-			r.winBuf = make([]byte, w)
+			r.win = make([]byte, 0, w)
 		}
 
 		n := r.Info().FrameCount

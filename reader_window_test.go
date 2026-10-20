@@ -11,14 +11,15 @@ import (
 	"testing"
 )
 
-// countingReadSeeker counts the Seek and Read calls that reach the source. A
-// positive maxRead caps the bytes each Read returns, as a network source that
+// countingReadSeeker counts the Seek and Read calls that reach the source and
+// the bytes the Reads return. A positive maxRead caps the bytes each Read returns, as a network source that
 // delivers one chunk per Read would.
 type countingReadSeeker struct {
 	io.ReadSeeker
 
 	maxRead      int
 	seeks, reads int
+	read         int64
 }
 
 func (c *countingReadSeeker) Seek(off int64, whence int) (int64, error) {
@@ -31,14 +32,17 @@ func (c *countingReadSeeker) Read(p []byte) (int, error) {
 	if c.maxRead > 0 && len(p) > c.maxRead {
 		p = p[:c.maxRead]
 	}
-	return c.ReadSeeker.Read(p)
+	n, err := c.ReadSeeker.Read(p)
+	c.read += int64(n)
+	return n, err
 }
 
 // drainMatchesStream reads every remaining frame of rd and checks each against
 // the input bytes at the offset the cursor named, then a clean io.EOF. The input
 // is the ground truth: comparing against frames read through the same Reader
-// would let a consistent window bug cancel out.
-func drainMatchesStream(t *testing.T, rd *Reader, data []byte) {
+// would let a consistent window bug cancel out. A non-nil between runs after
+// each frame.
+func drainMatchesStream(t *testing.T, rd *Reader, data []byte, between func()) {
 	t.Helper()
 	for {
 		off := rd.curOffset
@@ -53,14 +57,17 @@ func drainMatchesStream(t *testing.T, rd *Reader, data []byte) {
 		if !bytes.Equal(frame, data[off:off+int64(len(frame))]) {
 			t.Fatalf("frame %d at offset %d differs from the stream bytes", sample, off)
 		}
+		if between != nil {
+			between()
+		}
 	}
 }
 
 // TestFrameReadsMatchStreamBytes sweeps the read-ahead window size against
 // fixtures with one chunk, several fragments (chunk jumps over moof headers) and
 // several stsc chunks, starting at every seek target. Small windows force
-// straddling frames, frames larger than the window, and backward seeks into or
-// out of the window; every frame must still be the stream's bytes at its offset.
+// straddling frames, frames read directly, and backward seeks into or out of
+// the window; every frame must still be the stream's bytes at its offset.
 func TestFrameReadsMatchStreamBytes(t *testing.T) {
 	frames := synthFrames(13)
 	fixtures := map[string][]byte{
@@ -84,13 +91,13 @@ func TestFrameReadsMatchStreamBytes(t *testing.T) {
 			for w := range 401 {
 				rd := mustReader(t, data)
 				if w > 0 {
-					rd.winBuf = make([]byte, w)
+					rd.win = make([]byte, 0, w)
 				}
-				for _, start := range append([]int{0}, seekTargets(rd)...) {
+				for _, start := range seekTargets(rd) {
 					if err := rd.SeekSample(start); err != nil {
 						t.Fatalf("window %d: SeekSample(%d): %v", w, start, err)
 					}
-					drainMatchesStream(t, rd, data)
+					drainMatchesStream(t, rd, data, nil)
 				}
 			}
 		})
@@ -101,12 +108,9 @@ func TestFrameReadsMatchStreamBytes(t *testing.T) {
 // forward decode seeks and reads the source once per window, not once per
 // access unit, and refills reuse the window without allocating.
 func TestForwardDecodeReadsInWindows(t *testing.T) {
-	frames := make([][]byte, 300)
-	for i := range frames {
-		frames[i] = bytes.Repeat([]byte{byte(i)}, 500+(i*37)%200) // about 600 B, like AAC-LC
-	}
+	frames := benchFrames()[:300]
 	data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, frames)
-	dst := make([]byte, 1024)
+	dst := make([]byte, maxFrameLen(frames))
 
 	drain := func(t *testing.T, rd *Reader) {
 		t.Helper()
@@ -147,14 +151,15 @@ func TestForwardDecodeReadsInWindows(t *testing.T) {
 			if src.seeks > limit {
 				t.Errorf("forward decode of %d frames made %d Seek calls, want at most %d", len(frames), src.seeks, limit)
 			}
-			if tc.maxRead == 0 && src.reads > limit {
+			if tc.maxRead > 0 {
+				return
+			}
+			if src.reads > limit {
 				t.Errorf("forward decode of %d frames made %d Read calls, want at most %d", len(frames), src.reads, limit)
 			}
-			if tc.maxRead == 0 {
-				// Each drain refills the window several times; none may allocate.
-				if allocs := testing.AllocsPerRun(5, func() { drain(t, rd) }); allocs != 0 {
-					t.Errorf("forward decode allocated %.0f times per run after warm-up, want 0", allocs)
-				}
+			// Each drain refills the window several times; none may allocate.
+			if allocs := testing.AllocsPerRun(5, func() { drain(t, rd) }); allocs != 0 {
+				t.Errorf("forward decode allocated %.0f times per run after warm-up, want 0", allocs)
 			}
 		})
 	}
@@ -177,26 +182,37 @@ func TestFrameReadIgnoresStreamPosition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd.winBuf = make([]byte, 64)
+	rd.win = make([]byte, 0, 64)
 	var scratch [16]byte
-	for {
-		off := rd.curOffset
-		sample := rd.nextSample
-		frame, err := rd.ReadFrame()
-		if errors.Is(err, io.EOF) {
-			return
-		}
-		if err != nil {
-			t.Fatalf("frame %d: %v", sample, err)
-		}
-		if !bytes.Equal(frame, data[off:off+int64(len(frame))]) {
-			t.Fatalf("frame %d at offset %d differs from the stream bytes", sample, off)
-		}
+	drainMatchesStream(t, rd, data, func() {
 		if _, err := src.Seek(0, io.SeekStart); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := io.ReadFull(src, scratch[:]); err != nil {
 			t.Fatal(err)
 		}
+	})
+}
+
+// TestLargeFramesReadDirectly pins that a frame larger than half the window is
+// read straight into the caller's buffer. Refilling for it would read a whole
+// window to serve at most one more frame, so the source would return more bytes
+// than the frames hold.
+func TestLargeFramesReadDirectly(t *testing.T) {
+	frames := make([][]byte, 20)
+	for i := range frames {
+		frames[i] = bytes.Repeat([]byte{byte(i + 1)}, 40)
+	}
+	data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, frames)
+	src := &countingReadSeeker{ReadSeeker: bytes.NewReader(data)}
+	rd, err := NewReader(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd.win = make([]byte, 0, 64)
+	src.read = 0
+	drainMatchesStream(t, rd, data, nil)
+	if want := int64(len(frames) * 40); src.read != want {
+		t.Errorf("reading %d frames of 40 bytes through a 64-byte window read %d bytes from the source, want %d", len(frames), src.read, want)
 	}
 }
