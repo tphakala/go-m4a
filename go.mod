@@ -1,6 +1,6 @@
 module github.com/tphakala/go-m4a
 
-go 1.27.0
+go 1.27
 
 require (
 	// Ruleguard DSL backs the custom gocritic ruleguard matchers in rules/*.go.
