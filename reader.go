@@ -1116,6 +1116,10 @@ func (rd *Reader) nextFrameSize() (uint32, error) {
 func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
 	off := rd.curOffset
 	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
+		// A Seek that reports EOF is the same shrunk stream as the read below.
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return fmt.Errorf("go-m4a: seek frame %d: %w", rd.nextSample, err)
 	}
 	if _, err := io.ReadFull(rd.r, dst[:size]); err != nil {

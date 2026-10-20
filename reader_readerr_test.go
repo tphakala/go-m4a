@@ -12,14 +12,23 @@ import (
 	"testing"
 )
 
-// failingReadSeeker passes reads through while err is nil. Once err is set, each
-// Read copies up to n bytes and then returns err, so a test can let NewReader
-// succeed and fail the first frame read.
+// failingReadSeeker passes reads and seeks through while err and seekErr are
+// nil. Once err is set, each Read copies up to n bytes and then returns err;
+// once seekErr is set, each Seek returns it. A test sets them after NewReader
+// succeeds, so only the first frame read fails.
 type failingReadSeeker struct {
 	io.ReadSeeker
 
-	n   int
-	err error
+	n       int
+	err     error
+	seekErr error
+}
+
+func (f *failingReadSeeker) Seek(off int64, whence int) (int64, error) {
+	if f.seekErr != nil {
+		return 0, f.seekErr
+	}
+	return f.ReadSeeker.Seek(off, whence)
 }
 
 func (f *failingReadSeeker) Read(p []byte) (int, error) {
@@ -36,16 +45,18 @@ func (f *failingReadSeeker) Read(p []byte) (int, error) {
 // TestReadFrameErrorKeepsCause pins how a frame read that fails after NewReader
 // accepted the file is reported, through every public frame path. An error from
 // the underlying reader keeps its cause and is not ErrCorrupt; any end of file
-// (bare, wrapped, or after a partial read) is io.ErrUnexpectedEOF. No failure may
-// match io.EOF, which every consumer takes as the clean end of frames.
+// (bare, wrapped, after a partial read, or from the frame Seek) is
+// io.ErrUnexpectedEOF. No failure may match io.EOF, which every consumer takes
+// as the clean end of frames.
 func TestReadFrameErrorKeepsCause(t *testing.T) {
 	data := writeM4A(t, WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}, synthFrames(3))
 
 	faults := []struct {
-		name string
-		n    int
-		err  error
-		want error
+		name    string
+		n       int
+		err     error
+		seekErr error
+		want    error
 	}{
 		{name: "io error", err: &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO}, want: syscall.EIO},
 		{name: "bare EOF", err: io.EOF, want: io.ErrUnexpectedEOF},
@@ -54,6 +65,7 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 		// io.EOF is a partial read that io.ReadFull reports as
 		// io.ErrUnexpectedEOF.
 		{name: "short read", n: 1, err: io.EOF, want: io.ErrUnexpectedEOF},
+		{name: "seek EOF", seekErr: fmt.Errorf("source: %w", io.EOF), want: io.ErrUnexpectedEOF},
 	}
 	apis := []struct {
 		name string
@@ -83,7 +95,7 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 				if err != nil {
 					t.Fatalf("NewReader: %v", err)
 				}
-				src.err = fc.err
+				src.err, src.seekErr = fc.err, fc.seekErr
 
 				err = api.read(rd)
 				if err == nil {
