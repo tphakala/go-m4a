@@ -9,11 +9,11 @@ require (
 	// considers every build tag.
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/tphakala/go-aac v0.7.1
-	github.com/tphakala/go-flac v1.3.0
+	github.com/tphakala/go-flac v1.4.0
 	github.com/tphakala/go-opus v1.2.1
 )
 
 require (
-	github.com/tphakala/simd v1.13.0 // indirect
+	github.com/tphakala/simd v1.14.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )
