@@ -278,8 +278,30 @@ func TestOpenReadsThroughWindow(t *testing.T) {
 		if limit := 2*segments + 1; src.reads > limit {
 			t.Errorf("opening %d segments made %d Read calls, want at most %d", segments, src.reads, limit)
 		}
-		if src.maxReq > openWindowSize {
-			t.Errorf("opening a %d-byte stream offered a Read %d bytes, want at most the %d-byte open window", len(data), src.maxReq, openWindowSize)
+		if src.maxReq > 4<<10 {
+			t.Errorf("opening a %d-byte stream offered a Read %d bytes, want at most 4096", len(data), src.maxReq)
+		}
+	})
+
+	// Each segment here is under 200 bytes, so one refill serves the moof bodies of
+	// many segments: the geometry pass costs a few Seek and Read calls, where a
+	// moof read that bypassed the window would cost one of each per segment.
+	t.Run("short segments", func(t *testing.T) {
+		const segments = 60
+		segs := make([][]fragAU, segments)
+		for i := range segs {
+			segs[i] = uniformSegment([][]byte{bytes.Repeat([]byte{byte(i + 1)}, 20)})
+		}
+		data := buildFragmentedStream(t, aacFragmentConfig(), segs)
+
+		src := &countingReadSeeker{ReadSeeker: bytes.NewReader(data)}
+		if _, err := NewReader(src); err != nil {
+			t.Fatal(err)
+		}
+		// The 9512-byte stream opens with 7 Seek and 6 Read calls; bypassing the
+		// window for the moof bodies adds one of each per segment.
+		if src.seeks > 12 || src.reads > 12 {
+			t.Errorf("opening %d short segments made %d Seek and %d Read calls, want at most 12 of each", segments, src.seeks, src.reads)
 		}
 	})
 
