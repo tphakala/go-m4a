@@ -122,7 +122,15 @@ func FuzzReader(f *testing.F) {
 			}
 		}()
 
-		r, err := NewReader(bytes.NewReader(data))
+		// An open window of len(data)%61 bytes (the default when that is 0) varies
+		// the open-time reads against the box layout independently of the frame
+		// window below.
+		r, err := NewReader(bytes.NewReader(data), openWindow(len(data)%61))
+		// Window size 1 reads every box on its own, so the windowed open must decide
+		// exactly as that unbuffered open does.
+		if got, want := openOutcome(bytes.NewReader(data), openWindow(len(data)%61)), openOutcome(bytes.NewReader(data), openWindow(1)); got != want {
+			t.Fatalf("windowed open = %s, unbuffered open = %s", got, want)
+		}
 		if err != nil {
 			// A rejected input is a valid outcome, but the rejection must carry a
 			// typed sentinel, exactly as the ReadFrame/RawStream errors below are
@@ -136,7 +144,7 @@ func FuzzReader(f *testing.F) {
 		// A window of len(data)%128 bytes (the default when that is 0) makes the
 		// fuzzer vary the window against the frame layout.
 		if w := len(data) % 128; w > 0 {
-			r.win = make([]byte, 0, w)
+			r.win.buf = make([]byte, 0, w)
 		}
 
 		n := r.Info().FrameCount

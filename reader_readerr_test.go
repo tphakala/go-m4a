@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"syscall"
 	"testing"
 )
 
 // failingReadSeeker passes reads and seeks through while err and seekErr are
 // nil. Once err is set, each Read copies up to n bytes and then returns err;
-// once seekErr is set, each Seek returns it. A test sets them after NewReader
-// succeeds, so only frame reads meet them.
+// once seekErr is set, each Seek returns it. A test that sets them after
+// NewReader succeeds makes only frame reads meet them; one that sets them at
+// construction makes the open-time reads meet them too.
 type failingReadSeeker struct {
 	io.ReadSeeker
 
@@ -40,6 +42,82 @@ func (f *failingReadSeeker) Read(p []byte) (int, error) {
 		return n, err
 	}
 	return n, f.err
+}
+
+// shortSource reports a stream length its data does not back: a Seek from the
+// end lands relative to claim, so NewReader sees a stream of claim bytes while a
+// Read past the data returns io.EOF, as a file that shrank or was cut short.
+type shortSource struct {
+	*bytes.Reader
+
+	claim int64
+}
+
+func (s *shortSource) Seek(off int64, whence int) (int64, error) {
+	if whence == io.SeekEnd {
+		return s.Reader.Seek(s.claim+off, io.SeekStart)
+	}
+	return s.Reader.Seek(off, whence)
+}
+
+// seekFailer passes the Seek from the end that NewReader uses to measure the
+// stream and fails every other Seek with err, so the failure meets the open
+// window's first refill.
+type seekFailer struct {
+	io.ReadSeeker
+
+	err error
+}
+
+func (s *seekFailer) Seek(off int64, whence int) (int64, error) {
+	if whence != io.SeekEnd {
+		return 0, s.err
+	}
+	return s.ReadSeeker.Seek(off, whence)
+}
+
+// TestOpenErrorKeepsCause pins how NewReader reports a source that fails while it
+// reads the first box header: the cause stays in the chain, the failure is not
+// ErrCorrupt, and the message names the header read, for a Seek failure and for a
+// Read failure alike.
+func TestOpenErrorKeepsCause(t *testing.T) {
+	eio := &fs.PathError{Op: "read", Path: "clip.m4a", Err: syscall.EIO}
+	fixtures := map[string][]byte{
+		"plain": plainFixture(t),
+		"fragmented": buildFragmentedStream(t, aacFragmentConfig(), [][]fragAU{
+			uniformSegment(synthFrames(3)),
+		}),
+	}
+	sources := map[string]func(data []byte) io.ReadSeeker{
+		"seek fails": func(data []byte) io.ReadSeeker {
+			return &seekFailer{ReadSeeker: bytes.NewReader(data), err: eio}
+		},
+		"read fails": func(data []byte) io.ReadSeeker {
+			return &failingReadSeeker{ReadSeeker: bytes.NewReader(data), err: eio}
+		},
+	}
+	for fname, data := range fixtures {
+		for sname, source := range sources {
+			t.Run(fname+"/"+sname, func(t *testing.T) {
+				_, err := NewReader(source(data))
+				if err == nil {
+					t.Fatal("NewReader succeeded, want an error")
+				}
+				if !errors.Is(err, syscall.EIO) {
+					t.Errorf("error %q does not match %v", err, syscall.EIO)
+				}
+				if _, ok := errors.AsType[*fs.PathError](err); !ok {
+					t.Errorf("error %q lost the *fs.PathError cause", err)
+				}
+				if errors.Is(err, ErrCorrupt) {
+					t.Errorf("error %q matches ErrCorrupt, but the container is not at fault", err)
+				}
+				if want := "go-m4a: read box header at 0: "; !strings.HasPrefix(err.Error(), want) {
+					t.Errorf("error %q does not start with %q", err, want)
+				}
+			})
+		}
+	}
 }
 
 // TestReadFrameErrorKeepsCause pins how a frame read that fails after NewReader
@@ -166,7 +244,7 @@ func TestFrameRefillFailure(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
-			rd.win = make([]byte, 0, window)
+			rd.win.buf = make([]byte, 0, window)
 
 			for i := range tc.failAt {
 				if _, err := rd.ReadFrame(); err != nil {

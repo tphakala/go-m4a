@@ -86,9 +86,10 @@ type Info struct {
 // its computed (offset, size). Frames are read through a read-ahead window of up
 // to 64 KiB, so a forward read seeks and reads once per window rather than once
 // per access unit (a frame larger than half the window is read on its own), and
-// the stream's bytes must not change after NewReader. The reader is not safe for
-// concurrent use, and ReadFrame, RawStream, and their shared cursor advance
-// together.
+// the stream's bytes must not change after NewReader. NewReader itself reads box
+// headers and small box bodies through a smaller window (openWindowSize) that it
+// drops on return. The reader is not safe for concurrent use, and ReadFrame,
+// RawStream, and their shared cursor advance together.
 type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
@@ -117,13 +118,9 @@ type Reader struct {
 	sampleInChunk int64
 	curOffset     int64
 
-	// Frame read-ahead window, keyed by absolute stream offset: win holds the
-	// stream bytes [winStart, winStart+len(win)), and its capacity is the window
-	// size, allocated on the first refill (tests preset a smaller capacity). A
-	// refill empties win before overwriting it, so a failed read never leaves win
-	// claiming bytes it no longer holds.
-	win      []byte
-	winStart int64
+	// Frame read-ahead window (see window), allocated on the first frame read
+	// (tests preset a smaller one).
+	win window
 
 	// Sample timing for SeekTime, built at open by setPresentation. timeRuns is
 	// run-length (one 8-byte run per stretch of equal durations, never a per-sample
@@ -188,12 +185,16 @@ const DefaultMaxBoxBuffer = 256 << 20
 // several FLAC frames, and the cost per Reader stays bounded. A network source
 // pays up to 64 KiB of transfer for the first read after a jump, or one frame
 // when it is larger than half the window. The size is a constant, capped only by
-// the stream length, never by a claim in the file.
+// the stream length, never by a claim in the file. NewReader's own reads use the
+// smaller openWindowSize.
 const frameWindowSize = 64 << 10
 
 // readerConfig holds the resolved NewReader options.
 type readerConfig struct {
 	maxBoxBuffer int64
+	// openWindow is the size of NewReader's open-time window: openWindowSize unless
+	// a test overrides it.
+	openWindow int
 }
 
 // ReaderOption configures a Reader at construction. Pass options to NewReader.
@@ -229,7 +230,7 @@ func NewReader(r io.ReadSeeker, opts ...ReaderOption) (*Reader, error) {
 	if r == nil {
 		return nil, errors.New("go-m4a: nil reader")
 	}
-	cfg := readerConfig{maxBoxBuffer: DefaultMaxBoxBuffer}
+	cfg := readerConfig{maxBoxBuffer: DefaultMaxBoxBuffer, openWindow: openWindowSize}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -241,7 +242,8 @@ func NewReader(r io.ReadSeeker, opts ...ReaderOption) (*Reader, error) {
 		return nil, fmt.Errorf("go-m4a: negative stream length %d: %w", streamLen, ErrCorrupt)
 	}
 
-	brand, moovPayload, moofs, err := scanTopLevel(r, streamLen, cfg.maxBoxBuffer)
+	src := &openReader{r: r, end: streamLen, win: newWindow(cfg.openWindow, streamLen)}
+	brand, moovPayload, moofs, err := scanTopLevel(src, cfg.maxBoxBuffer)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +251,7 @@ func NewReader(r io.ReadSeeker, opts ...ReaderOption) (*Reader, error) {
 	rd := &Reader{r: r, streamLen: streamLen, maxBoxBuffer: cfg.maxBoxBuffer}
 	rd.info.Brand = brand
 	if len(moofs) > 0 {
-		if err := rd.parseFragmented(moovPayload, moofs); err != nil {
+		if err := rd.parseFragmented(moovPayload, moofs, src); err != nil {
 			return nil, err
 		}
 	} else if err := rd.parseMoov(moovPayload); err != nil {
@@ -269,19 +271,21 @@ type moofExtent struct {
 	bodyLen   int64 // moof body length
 }
 
-// scanTopLevel walks the top-level boxes of r, returning the ftyp major brand,
+// scanTopLevel walks the top-level boxes of src, returning the ftyp major brand,
 // the moov box body, and the extent of every top-level moof box. A non-empty
 // moofs slice marks fragmented (CMAF) input, which NewReader demuxes through the
 // movie fragments rather than the moov sample tables. styp, sidx, and mfra are
 // skipped; a missing moov is ErrCorrupt.
-func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
+func scanTopLevel(src *openReader, maxBoxBuffer int64) (brand string, moovPayload []byte, moofs []moofExtent, err error) {
+	streamLen := src.end
 	var moov []byte
 	// One buffer reused for every top-level box header instead of a fresh allocation
 	// per box: box.ParseHeader copies the fields it keeps and does not retain its
 	// argument, so the bytes are free to be overwritten on the next box. The buffer
-	// escapes to the heap once (io.ReadFull takes it through the reader interface), but
-	// that is a single allocation amortized over every box rather than one per box. A
-	// full header is 16 bytes; trailing bytes shorter than that read into the prefix.
+	// escapes to the heap once (the window's read can pass it to io.ReadFull through
+	// the reader interface), but that is a single allocation amortized over every box
+	// rather than one per box. A full header is 16 bytes; trailing bytes shorter than
+	// that read into the prefix.
 	var hdrBuf [16]byte
 	for off := int64(0); off < streamLen; {
 		remaining := streamLen - off
@@ -292,11 +296,8 @@ func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string,
 		if remaining < 16 {
 			hdrLen = remaining
 		}
-		if _, rerr := r.Seek(off, io.SeekStart); rerr != nil {
-			return "", nil, nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
-		}
 		head := hdrBuf[:hdrLen]
-		if _, rerr := io.ReadFull(r, head); rerr != nil {
+		if rerr := src.read(off, head); rerr != nil {
 			return "", nil, nil, fmt.Errorf("go-m4a: read box header at %d: %w", off, rerr)
 		}
 		h, perr := box.ParseHeader(head)
@@ -315,7 +316,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string,
 		case fourccMoof:
 			moofs = append(moofs, moofExtent{offset: off, bodyStart: off + h.HeaderLen, bodyLen: total - h.HeaderLen})
 		case fourccFtyp:
-			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
+			body, berr := readSection(src, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
 			if berr != nil {
 				return "", nil, nil, fmt.Errorf("go-m4a: read ftyp: %w", berr)
 			}
@@ -323,7 +324,7 @@ func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string,
 				brand = string(body[:4])
 			}
 		case fourccMoov:
-			body, berr := readSection(r, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
+			body, berr := readSection(src, off+h.HeaderLen, total-h.HeaderLen, maxBoxBuffer)
 			if berr != nil {
 				return "", nil, nil, fmt.Errorf("go-m4a: read moov: %w", berr)
 			}
@@ -337,14 +338,14 @@ func scanTopLevel(r io.ReadSeeker, streamLen, maxBoxBuffer int64) (brand string,
 	return brand, moov, moofs, nil
 }
 
-// readSection seeks to off and reads exactly n bytes. n is a header size or a box
+// readSection reads exactly n bytes at off. n is a header size or a box
 // length the caller has already bounded against streamLen, so it never exceeds the
 // logical file size, but that is not a physical bound: a sparse file reports a
 // large streamLen while backing almost none of it. limit, when positive, caps n
 // as a memory guard, rejecting a body above it with a wrapped ErrBoxTooLarge before
 // the allocation rather than letting a declared-but-unbacked length drive a large
 // make.
-func readSection(r io.ReadSeeker, off, n, limit int64) ([]byte, error) {
+func readSection(src *openReader, off, n, limit int64) ([]byte, error) {
 	if n < 0 {
 		return nil, fmt.Errorf("negative length %d: %w", n, ErrCorrupt)
 	}
@@ -362,11 +363,8 @@ func readSection(r io.ReadSeeker, off, n, limit int64) ([]byte, error) {
 		// classifying with errors.Is catches it like any other malformation.
 		return nil, fmt.Errorf("section length %d exceeds addressable memory: %w", n, ErrCorrupt)
 	}
-	if _, err := r.Seek(off, io.SeekStart); err != nil {
-		return nil, err
-	}
 	buf := make([]byte, n)
-	if _, err := io.ReadFull(r, buf); err != nil {
+	if err := src.read(off, buf); err != nil {
 		return nil, err
 	}
 	return buf, nil
@@ -1136,50 +1134,21 @@ func (rd *Reader) nextFrameSize() (uint32, error) {
 // readFrameInto copies the current frame's size bytes into dst[:size] and on
 // success advances the cursor. dst must have length at least size (the caller
 // sizes it from nextFrameSize). A frame that lies wholly inside the read-ahead
-// window is copied from it; otherwise fillFrame reads it from the stream.
+// window is copied from it; otherwise the window reads it from the stream.
 // Splitting the read from allocation lets RawStream reuse one buffer across
 // frames instead of allocating per frame.
 func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
-	off := rd.curOffset
-	if off >= rd.winStart && off+int64(size) <= rd.winStart+int64(len(rd.win)) {
-		copy(dst[:size], rd.win[off-rd.winStart:])
-	} else if err := rd.fillFrame(off, dst[:size]); err != nil {
-		return err
+	dst = dst[:size]
+	if !rd.win.lookup(rd.curOffset, dst) {
+		if cap(rd.win.buf) == 0 {
+			rd.win = newWindow(frameWindowSize, rd.streamLen)
+		}
+		// nextFrameSize keeps the frame's extent within streamLen.
+		if op, err := rd.win.read(rd.r, rd.curOffset, rd.streamLen, dst); err != nil {
+			return rd.frameReadErr(op, err)
+		}
 	}
 	rd.advance(size)
-	return nil
-}
-
-// fillFrame seeks to off and reads the frame dst holds. A frame up to half the
-// window refills the window from off, reading until the window is full or the
-// stream stops returning bytes, so a source whose Read returns a little at a
-// time (a network chunk) still costs one Seek per window. A larger frame is read
-// straight into dst and leaves the window as it was, since a refill would fetch
-// a whole window to serve one or two frames.
-func (rd *Reader) fillFrame(off int64, dst []byte) error {
-	if cap(rd.win) == 0 {
-		rd.win = make([]byte, 0, int(min(int64(frameWindowSize), rd.streamLen)))
-	}
-	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
-		return rd.frameReadErr("seek", err)
-	}
-	if len(dst) > cap(rd.win)/2 {
-		if _, err := io.ReadFull(rd.r, dst); err != nil {
-			return rd.frameReadErr("read", err)
-		}
-		return nil
-	}
-	// nextFrameSize keeps off+len(dst) within streamLen, so want >= len(dst). An
-	// error after the frame's bytes arrived is dropped; the next refill meets it
-	// again.
-	want := int(min(int64(cap(rd.win)), rd.streamLen-off))
-	rd.win = rd.win[:0]
-	got, err := io.ReadFull(rd.r, rd.win[:want])
-	if got < len(dst) {
-		return rd.frameReadErr("read", err)
-	}
-	rd.win, rd.winStart = rd.win[:got], off
-	copy(dst, rd.win)
 	return nil
 }
 
