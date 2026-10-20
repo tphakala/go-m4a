@@ -44,6 +44,10 @@ const (
 // an error matching aacpcm.ErrCorruptStream and m4a.ErrCorrupt, where
 // NewDecoder's decoder silently emits nothing for it.
 //
+// Their errors also differ when the stream ends before a frame the sample table
+// places inside it: Read returns a wrapped io.ErrUnexpectedEOF, where
+// NewDecoder's decoder reports aacpcm.ErrCorruptStream wrapping it.
+//
 // The output is not edit-list aware: it holds every decoded sample, priming and
 // final-frame padding included, as NewDecoder's does. After SeekSample(i) the
 // next byte is the one at sample i*1024 of that output. After SeekTime(t) it is

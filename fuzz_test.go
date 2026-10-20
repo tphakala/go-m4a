@@ -17,7 +17,8 @@ import (
 )
 
 // isReaderSentinel reports whether err is one of the errors the Reader is allowed
-// to return: a wrapped ErrCorrupt or ErrUnsupported for rejected input, a wrapped
+// to return over in-memory input, where the underlying reader cannot fail: a
+// wrapped ErrCorrupt or ErrUnsupported for rejected input, a wrapped
 // ErrBoxTooLarge for a box body over the buffer limit, or io.EOF at the clean end
 // of the frames. Any other error from a Reader that NewReader accepted is a
 // contract violation the fuzzer must surface.
