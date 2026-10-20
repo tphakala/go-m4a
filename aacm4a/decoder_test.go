@@ -384,6 +384,61 @@ func TestSeekableDecoderErrorLatchAndRecovery(t *testing.T) {
 	}
 }
 
+// TestDecodersStreamCutAfterOpen pins the error shape of both constructors when
+// the stream ends at an access unit boundary after the decoder was built: the
+// Reader reports a wrapped io.ErrUnexpectedEOF, which NewDecoder's decoder wraps
+// in aacpcm.ErrCorruptStream and NewSeekableDecoder's Decoder returns as is.
+// Neither may end as if the stream were complete (io.ReadAll returns nil on a
+// clean io.EOF), and neither carries m4a.ErrCorrupt, since the container is
+// intact. The cut sits on a unit boundary so the refill reads no byte: without
+// the Reader's mapping that is a bare io.EOF, the clean end go-aac's raw stream
+// reader looks for. Neither constructor reads a frame, so the source swap is
+// first seen by the frame read.
+func TestDecodersStreamCutAfterOpen(t *testing.T) {
+	f := exactFixture(t, 44100, 1)
+	ranges := auRanges(t, f.data)
+	cutAt := ranges[len(ranges)/2][0]
+
+	constructors := []struct {
+		name        string
+		open        func(io.ReadSeeker) (io.Reader, error)
+		wantCorrupt bool // errors.Is(err, aacpcm.ErrCorruptStream)
+	}{
+		{name: "NewDecoder", wantCorrupt: true, open: func(r io.ReadSeeker) (io.Reader, error) {
+			d, _, err := NewDecoder(r)
+			return d, err
+		}},
+		{name: "NewSeekableDecoder", open: func(r io.ReadSeeker) (io.Reader, error) {
+			d, _, err := NewSeekableDecoder(r)
+			return d, err
+		}},
+	}
+	for _, c := range constructors {
+		t.Run(c.name, func(t *testing.T) {
+			src := &struct{ io.ReadSeeker }{bytes.NewReader(f.data)}
+			d, err := c.open(src)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			src.ReadSeeker = bytes.NewReader(f.data[:cutAt])
+
+			_, err = io.ReadAll(d)
+			if err == nil {
+				t.Fatal("ReadAll succeeded, want an error for a stream cut short")
+			}
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("error %q does not match io.ErrUnexpectedEOF", err)
+			}
+			if errors.Is(err, m4a.ErrCorrupt) {
+				t.Errorf("error %q matches m4a.ErrCorrupt, but the container is not at fault", err)
+			}
+			if got := errors.Is(err, aacpcm.ErrCorruptStream); got != c.wantCorrupt {
+				t.Errorf("error %q matches aacpcm.ErrCorruptStream = %t, want %t", err, got, c.wantCorrupt)
+			}
+		})
+	}
+}
+
 func TestSeekableDecoderFragmented(t *testing.T) {
 	f := exactFixture(t, 48000, 2)
 	stream, segments := fragmentedStream(t, f.aus, f.wcfg)

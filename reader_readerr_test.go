@@ -4,6 +4,7 @@ package m4a
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -120,6 +121,44 @@ func TestOpenErrorKeepsCause(t *testing.T) {
 	}
 }
 
+// TestOpenShortStreamIsUnexpectedEOF pins that a stream shorter than the length
+// its Seek from the end reported fails NewReader with io.ErrUnexpectedEOF, never
+// io.EOF, whichever read meets the end: the file is smaller than measured, which
+// is not a clean end. The plain fixture is cut at every length. The cuts reach
+// the box header read and both readSection callers (ftyp, moov), and the test
+// requires each, so it cannot quietly stop covering one. A prefix cut never fails
+// at a moof body read: the scan meets the cut at the next top-level header first.
+func TestOpenShortStreamIsUnexpectedEOF(t *testing.T) {
+	data := plainFixture(t)
+	prefixes := []string{"go-m4a: read box header at ", "go-m4a: read ftyp: ", "go-m4a: read moov: "}
+	seen := make([]int, len(prefixes))
+	for k := range data {
+		_, err := NewReader(&shortSource{Reader: bytes.NewReader(data[:k]), claim: int64(len(data))})
+		if err == nil {
+			t.Fatalf("cut at %d: NewReader succeeded, want an error", k)
+		}
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("cut at %d: error %q matches io.EOF, which reads as a clean end", k, err)
+		}
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("cut at %d: error %q does not match io.ErrUnexpectedEOF", k, err)
+		}
+		if errors.Is(err, ErrCorrupt) {
+			t.Fatalf("cut at %d: error %q matches ErrCorrupt, but the container is not at fault", k, err)
+		}
+		for i, p := range prefixes {
+			if strings.HasPrefix(err.Error(), p) {
+				seen[i]++
+			}
+		}
+	}
+	for i, p := range prefixes {
+		if seen[i] == 0 {
+			t.Errorf("no cut failed with an error starting %q", p)
+		}
+	}
+}
+
 // TestReadFrameErrorKeepsCause pins how a frame read that fails after NewReader
 // accepted the file is reported, through every public frame path. An error from
 // the underlying reader keeps its cause and is not ErrCorrupt; any end of file
@@ -144,6 +183,7 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 		// io.ErrUnexpectedEOF.
 		{name: "short read", n: 1, err: io.EOF, want: io.ErrUnexpectedEOF},
 		{name: "seek EOF", seekErr: fmt.Errorf("source: %w", io.EOF), want: io.ErrUnexpectedEOF},
+		{name: "seek io error", seekErr: &fs.PathError{Op: "seek", Path: "clip.m4a", Err: syscall.EIO}, want: syscall.EIO},
 	}
 	apis := []struct {
 		name string
@@ -188,7 +228,7 @@ func TestReadFrameErrorKeepsCause(t *testing.T) {
 				if !errors.Is(err, fc.want) {
 					t.Errorf("error %q does not match %v", err, fc.want)
 				}
-				if _, injected := errors.AsType[*fs.PathError](fc.err); injected {
+				if _, injected := errors.AsType[*fs.PathError](cmp.Or(fc.err, fc.seekErr)); injected {
 					if _, ok := errors.AsType[*fs.PathError](err); !ok {
 						t.Errorf("error %q lost the *fs.PathError cause", err)
 					}

@@ -222,6 +222,9 @@ func WithMaxBoxBuffer(n int64) ReaderOption {
 // movie fragments carry. It returns a wrapped ErrCorrupt for malformed input and a
 // wrapped ErrUnsupported for well-formed input outside scope (no supported audio
 // track, an unsupported codec, or an AAC object type that is not MPEG-4 Audio).
+// A failure of the underlying reader is returned wrapped with its cause, and a
+// stream that ends before the length its Seek from the end reported (a file cut
+// short after that Seek) is a wrapped io.ErrUnexpectedEOF, not io.EOF.
 //
 // Options tune the reader; WithMaxBoxBuffer sets how large a single box body may
 // be before NewReader refuses it with a wrapped ErrBoxTooLarge, guarding against a
@@ -1154,15 +1157,11 @@ func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
 
 // frameReadErr wraps a failed frame Seek or Read. nextFrameSize bounded the
 // extent against streamLen, so running out of bytes means the stream shrank
-// since open. Any EOF (io.ReadFull passes a reader's wrapped io.EOF through
-// unchanged, and a Seek may report one) becomes
-// io.ErrUnexpectedEOF so it never reads as the clean end of frames. Other errors
-// keep their cause without ErrCorrupt: the container is not at fault.
+// since open, and unexpectedEOF keeps that from reading as the clean end of
+// frames. Other errors keep their cause without ErrCorrupt: the container is not
+// at fault.
 func (rd *Reader) frameReadErr(op string, err error) error {
-	if errors.Is(err, io.EOF) {
-		err = io.ErrUnexpectedEOF
-	}
-	return fmt.Errorf("go-m4a: %s frame %d: %w", op, rd.nextSample, err)
+	return fmt.Errorf("go-m4a: %s frame %d: %w", op, rd.nextSample, unexpectedEOF(err))
 }
 
 // advance moves the running cursor past the just-read sample, stepping to the
