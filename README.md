@@ -198,6 +198,12 @@ without the `io.Reader` framing, `Reader.ReadFrameInto(dst)` fills a reused
 buffer instead of allocating one per frame like `ReadFrame` does (it returns the
 required length with `io.ErrShortBuffer` if `dst` is too small).
 
+Frames are read through a 64 KiB read-ahead window, so a forward decode makes a
+seek and a large read per window rather than per access unit, and a plain
+`*os.File` needs no extra buffering. Every refill seeks first, so the reader does
+not rely on where the stream was left, but the file must not change after
+`NewReader`.
+
 `Reader.SeekSample(n)` moves the cursor to access unit `n` (0-based, below
 `Info().FrameCount`) so the next read returns it, computing the position from the
 sample tables instead of reading the units in between. Take a fresh `RawStream`

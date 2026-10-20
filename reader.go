@@ -82,9 +82,15 @@ type Info struct {
 // handling both a plain file (ftyp/moov/mdat) and a fragmented (CMAF) stream (an
 // init segment followed by moof/mdat media segments). NewReader parses the moov
 // metadata up front, and for a fragmented stream also lays out the samples the
-// movie fragments carry; ReadFrame then returns each access unit in order by
-// seeking to its computed (offset, size). The reader is not safe for concurrent
-// use, and ReadFrame, RawStream, and their shared cursor advance together.
+// movie fragments carry; ReadFrame then returns each access unit in order from
+// its computed (offset, size). Frames are read through a read-ahead window of up
+// to 64 KiB, so a forward read seeks and reads once per window refill rather
+// than once per access unit; a frame larger than the window is read directly.
+// Every refill seeks first, so the Reader does not depend on where earlier reads
+// left the stream, but it does assume the stream's bytes do not change after
+// NewReader. A failure of the underlying reader surfaces at the read that needs
+// bytes from it. The reader is not safe for concurrent use, and ReadFrame,
+// RawStream, and their shared cursor advance together.
 type Reader struct {
 	r         io.ReadSeeker
 	streamLen int64
@@ -112,6 +118,15 @@ type Reader struct {
 	curChunk      int
 	sampleInChunk int64
 	curOffset     int64
+
+	// Frame read-ahead window, keyed by absolute stream offset: win holds the
+	// stream bytes [winStart, winStart+len(win)) and is a prefix of winBuf, which
+	// is allocated on the first refill (frameWindowSize, or less for a short
+	// stream). A refill clears win before it overwrites winBuf, so a failed read
+	// never leaves win claiming bytes it no longer holds.
+	winBuf   []byte
+	win      []byte
+	winStart int64
 
 	// Sample timing for SeekTime, built at open by setPresentation. timeRuns is
 	// run-length (one 8-byte run per stretch of equal durations, never a per-sample
@@ -167,6 +182,16 @@ var (
 // of megabytes) while keeping a hostile allocation bounded. Override it per reader
 // with WithMaxBoxBuffer, including WithMaxBoxBuffer(0) to lift the cap entirely.
 const DefaultMaxBoxBuffer = 256 << 20
+
+// frameWindowSize is the size, in bytes, of the read-ahead window frames are
+// read through. Reading one access unit at a time cost a Seek and a Read per
+// unit, two syscalls each on an *os.File: about 2830 for an 846 KiB AAC clip,
+// measured at 8 to 20 ms per cold decode on a Raspberry Pi 5 SD card (issue
+// #80). With 64 KiB the same clip takes about 14 refills, the window holds
+// several FLAC frames, and the cost per Reader stays bounded. A network source
+// pays up to 64 KiB of transfer for the first read after a jump. The size is
+// fixed and never derived from the file.
+const frameWindowSize = 64 << 10
 
 // readerConfig holds the resolved NewReader options.
 type readerConfig struct {
@@ -966,9 +991,9 @@ func (rd *Reader) sizeOf(i int) uint32 {
 // returns that unit. It does no I/O: the position is computed from the sample
 // tables already in memory, walking the chunk table to the chunk that holds the
 // sample and summing the sizes before it within that chunk. Skipping ahead this
-// way costs one seek on the next read, where calling ReadFrame per skipped unit
-// costs one seek and one read each (an HTTP range request apiece when the
-// io.ReadSeeker is backed by a network source). An index outside
+// way costs at most one seek and one window refill on the next read, and none
+// when the target already lies in the read-ahead window, where reading through
+// the skipped units transfers every byte in between. An index outside
 // [0, Info().FrameCount) returns an error wrapping ErrOutOfRange and leaves the
 // cursor unchanged.
 //
@@ -1062,8 +1087,10 @@ func (rd *Reader) ReadFrame() ([]byte, error) {
 }
 
 // ReadFrameInto reads the next access unit into dst and returns its length,
-// advancing the cursor. It is the zero-allocation form of ReadFrame for callers
-// that reuse a buffer across frames. If dst is too small to hold the frame,
+// advancing the cursor. It is the form of ReadFrame for callers that reuse a
+// buffer across frames: it allocates nothing per frame, and the Reader's
+// read-ahead window is allocated once, on the first frame read through any of
+// the frame APIs. If dst is too small to hold the frame,
 // ReadFrameInto reads nothing, does not advance, and returns the required length
 // with io.ErrShortBuffer, so the caller can grow dst and call again. It returns
 // io.EOF after the last access unit, and the same errors as ReadFrame for a
@@ -1108,33 +1135,83 @@ func (rd *Reader) nextFrameSize() (uint32, error) {
 	return size, nil
 }
 
-// readFrameInto seeks to the current frame, reads exactly size bytes into
-// dst[:size], and on success advances the cursor. dst must have length at least
-// size (the caller sizes it from nextFrameSize). Splitting the read from
-// allocation lets RawStream reuse one buffer across frames instead of
-// allocating per frame.
+// readFrameInto copies the current frame's size bytes into dst[:size] and on
+// success advances the cursor. dst must have length at least size (the caller
+// sizes it from nextFrameSize). A frame that lies wholly inside the read-ahead
+// window is copied from it; otherwise fillFrame reads it from the stream.
+// Splitting the read from allocation lets RawStream reuse one buffer across
+// frames instead of allocating per frame.
 func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
 	off := rd.curOffset
-	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
-		// A Seek that reports EOF is the same shrunk stream as the read below.
-		if errors.Is(err, io.EOF) {
-			err = io.ErrUnexpectedEOF
-		}
-		return fmt.Errorf("go-m4a: seek frame %d: %w", rd.nextSample, err)
-	}
-	if _, err := io.ReadFull(rd.r, dst[:size]); err != nil {
-		// nextFrameSize bounded the extent against streamLen, so running out of
-		// bytes means the stream shrank since open. Map any EOF (io.ReadFull
-		// passes a reader's wrapped io.EOF through unchanged) to
-		// io.ErrUnexpectedEOF so it never reads as the clean end of frames. Other
-		// errors keep their cause without ErrCorrupt: the container is not at fault.
-		if errors.Is(err, io.EOF) {
-			err = io.ErrUnexpectedEOF
-		}
-		return fmt.Errorf("go-m4a: read frame %d: %w", rd.nextSample, err)
+	if off >= rd.winStart && off+int64(size) <= rd.winStart+int64(len(rd.win)) {
+		copy(dst[:size], rd.win[off-rd.winStart:])
+	} else if err := rd.fillFrame(off, dst[:size]); err != nil {
+		return err
 	}
 	rd.advance(size)
 	return nil
+}
+
+// fillFrame seeks to off and reads the frame dst holds. A frame that fits the
+// window refills it from off, reading at least the frame and then as much more
+// of the window as the stream returns, so a source whose Read returns a little
+// at a time (a network chunk) still costs one Seek per window. A frame larger
+// than the window is read straight into dst and leaves the window as it was.
+func (rd *Reader) fillFrame(off int64, dst []byte) error {
+	if rd.winBuf == nil {
+		rd.winBuf = make([]byte, int(min(int64(frameWindowSize), rd.streamLen)))
+	}
+	if _, err := rd.r.Seek(off, io.SeekStart); err != nil {
+		return rd.frameReadErr("seek", err)
+	}
+	want := int(min(int64(len(rd.winBuf)), rd.streamLen-off))
+	if len(dst) > want {
+		if _, err := io.ReadFull(rd.r, dst); err != nil {
+			return rd.frameReadErr("read", err)
+		}
+		return nil
+	}
+	rd.win = nil
+	// nextFrameSize keeps off+len(dst) within streamLen, so want >= len(dst) and
+	// io.ReadAtLeast cannot report io.ErrShortBuffer. Like io.ReadFull for the
+	// frame bytes, it succeeds once they have arrived and drops a later error,
+	// which the next refill meets again.
+	got, err := io.ReadAtLeast(rd.r, rd.winBuf[:want], len(dst))
+	if err != nil {
+		return rd.frameReadErr("read", err)
+	}
+	got += readMore(rd.r, rd.winBuf[got:want])
+	rd.win, rd.winStart = rd.winBuf[:got], off
+	copy(dst, rd.win)
+	return nil
+}
+
+// readMore reads into buf until it is full or a Read returns an error or no
+// bytes, and returns how many bytes it read. The error is dropped: the caller
+// already holds the bytes it needs, and the next refill meets the error again.
+func readMore(r io.Reader, buf []byte) int {
+	n := 0
+	for n < len(buf) {
+		m, err := r.Read(buf[n:])
+		n += m
+		if err != nil || m == 0 {
+			break
+		}
+	}
+	return n
+}
+
+// frameReadErr wraps a failed frame Seek or Read. nextFrameSize bounded the
+// extent against streamLen, so running out of bytes means the stream shrank
+// since open. Any EOF (io.ReadFull and io.ReadAtLeast pass a reader's wrapped
+// io.EOF through unchanged, and a Seek may report one) becomes
+// io.ErrUnexpectedEOF so it never reads as the clean end of frames. Other errors
+// keep their cause without ErrCorrupt: the container is not at fault.
+func (rd *Reader) frameReadErr(op string, err error) error {
+	if errors.Is(err, io.EOF) {
+		err = io.ErrUnexpectedEOF
+	}
+	return fmt.Errorf("go-m4a: %s frame %d: %w", op, rd.nextSample, err)
 }
 
 // advance moves the running cursor past the just-read sample, stepping to the

@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/tphakala/go-m4a/internal/testutil"
@@ -117,6 +119,7 @@ func BenchmarkReadFrame(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	warmFrameWindow(b, rd)
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()
 	for b.Loop() {
@@ -157,6 +160,7 @@ func BenchmarkReadFrameInto(b *testing.B) {
 		}
 	}
 	dst := make([]byte, maxSize)
+	warmFrameWindow(b, rd)
 
 	b.SetBytes(benchTotalPayload(frames))
 	b.ReportAllocs()
@@ -170,6 +174,53 @@ func BenchmarkReadFrameInto(b *testing.B) {
 			if rerr != nil {
 				b.Fatal(rerr)
 			}
+		}
+	}
+}
+
+// warmFrameWindow reads one frame so the Reader's one-time read-ahead window is
+// allocated before the measured loop, which resets the cursor on entry.
+func warmFrameWindow(b *testing.B, rd *Reader) {
+	b.Helper()
+	if _, err := rd.ReadFrame(); err != nil {
+		b.Fatal(err)
+	}
+}
+
+// BenchmarkReadFrameIntoFile opens the bench file from disk and drains it with
+// ReadFrameInto each iteration. Unlike the in-memory benchmarks it pays a
+// syscall for every Seek and Read that reaches the *os.File, so it shows what
+// the read-ahead window saves on a forward decode.
+func BenchmarkReadFrameIntoFile(b *testing.B) {
+	frames := benchFrames()
+	path := filepath.Join(b.TempDir(), "bench.m4a")
+	if err := os.WriteFile(path, buildBenchFile(b, frames), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	dst := make([]byte, 1024) // benchFrames tops out at 800 bytes
+
+	b.SetBytes(benchTotalPayload(frames))
+	b.ReportAllocs()
+	for b.Loop() {
+		f, err := os.Open(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rd, err := NewReader(f)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for {
+			_, rerr := rd.ReadFrameInto(dst)
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			if rerr != nil {
+				b.Fatal(rerr)
+			}
+		}
+		if err := f.Close(); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
