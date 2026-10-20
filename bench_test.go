@@ -306,8 +306,11 @@ func benchFragSegments(frames [][]byte, framesPerSeg int) [][]fragAU {
 // sample geometry. The stream is built once outside the timer; each iteration
 // runs NewReader over it. This is the baseline a size-only trun fast path
 // (tracked in #44) would have to beat, so it is measured with ReportAllocs. No
-// SetBytes: the demux setup reads only the box headers and moof bodies, never
-// the mdat media payload, so a bytes-per-second figure would misreport it.
+// SetBytes: the demux setup reads box headers and moof bodies through a 4 KiB
+// window, not the mdat media payload as a whole, so a bytes-per-second figure
+// would misreport it. It runs in memory, so it shows the cost of the window's
+// copies, not the syscalls the window saves; BenchmarkOpenFragmentedFile shows
+// those.
 func BenchmarkOpenFragmented(b *testing.B) {
 	frames := benchFrames()
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
@@ -316,6 +319,32 @@ func BenchmarkOpenFragmented(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := NewReader(bytes.NewReader(data)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkOpenFragmentedFile is BenchmarkOpenFragmented over a file on disk,
+// where every Seek and Read that reaches the *os.File is a syscall. It shows what
+// reading the boxes through the open window saves on a local source. The file is
+// opened once; each iteration runs NewReader over it.
+func BenchmarkOpenFragmentedFile(b *testing.B) {
+	frames := benchFrames()
+	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k}
+	data := buildFragmentedStream(b, cfg, benchFragSegments(frames, 50))
+	path := filepath.Join(b.TempDir(), "open.m4a")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = f.Close() })
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := NewReader(f); err != nil {
 			b.Fatal(err)
 		}
 	}
