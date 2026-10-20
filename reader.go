@@ -1120,14 +1120,12 @@ func (rd *Reader) readFrameInto(dst []byte, size uint32) error {
 	}
 	if _, err := io.ReadFull(rd.r, dst[:size]); err != nil {
 		// nextFrameSize bounded the extent against streamLen, so running out of
-		// bytes here means the stream is shorter than it reported at open. Report
-		// that as io.ErrUnexpectedEOF whatever form the EOF took (io.ReadFull
-		// passes a reader's wrapped io.EOF through unchanged), so a failed read
-		// never matches io.EOF, the clean end of frames. Any other error is the
-		// underlying reader's own failure and keeps its cause without ErrCorrupt:
-		// the container is not at fault.
+		// bytes means the stream shrank since open. Map any EOF (io.ReadFull
+		// passes a reader's wrapped io.EOF through unchanged) to
+		// io.ErrUnexpectedEOF so it never reads as the clean end of frames. Other
+		// errors keep their cause without ErrCorrupt: the container is not at fault.
 		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("go-m4a: read frame %d: %w", rd.nextSample, io.ErrUnexpectedEOF)
+			err = io.ErrUnexpectedEOF
 		}
 		return fmt.Errorf("go-m4a: read frame %d: %w", rd.nextSample, err)
 	}
