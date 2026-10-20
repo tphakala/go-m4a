@@ -151,6 +151,11 @@ func TestForwardDecodeReadsInWindows(t *testing.T) {
 			if src.seeks > limit {
 				t.Errorf("forward decode of %d frames made %d Seek calls, want at most %d", len(frames), src.seeks, limit)
 			}
+			// The stream is longer than the window, so the window takes its full
+			// documented size, never one derived from the stream.
+			if got := cap(rd.win); got != 64<<10 {
+				t.Errorf("read-ahead window holds %d bytes over a %d-byte stream, want 65536", got, rd.streamLen)
+			}
 			if tc.maxRead > 0 {
 				return
 			}
