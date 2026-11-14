@@ -627,6 +627,9 @@ func TestTicksToSamples(t *testing.T) {
 		{"rounds down", 101, 32000, 16000, 50},
 		{"scales up", 100, 16000, 48000, 300},
 		{"saturates", math.MaxUint64, 1, 48000, math.MaxUint64},
+		// 2^40 * 2^30 is 2^70, a product that needs the high word (64).
+		{"wide product that fits", 1 << 40, 65, 1 << 30, 18162948011037096975},
+		{"quotient of exactly 2^64 saturates", 1 << 40, 64, 1 << 30, math.MaxUint64},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
