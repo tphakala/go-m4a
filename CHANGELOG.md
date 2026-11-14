@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- The bridges now build against go-aac v0.7.2 and go-opus v1.4.0. Encoded output is unchanged.
+
 ## [0.8.0] - 2026-10-20
 
 ### Changed
