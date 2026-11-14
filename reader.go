@@ -50,11 +50,16 @@ type Info struct {
 	// FrameCount is the number of access units (MP4 "samples") in the track.
 	FrameCount int
 
-	// EncoderDelay is the media tick presented first: the media_time of the first
-	// non-empty edit in the edit list, else the Opus dOps PreSkip, else 0. Leading
-	// empty edits (media_time -1) do not zero it; they are StartOffset. It is the
-	// number of leading decoded samples per channel to skip when the media
-	// timescale equals the sample rate.
+	// EncoderDelay is the number of leading decoded samples per channel, at
+	// SampleRate, to skip: the media_time of the first non-empty edit in the edit
+	// list, else the Opus dOps PreSkip, else 0. An edit-list value is clamped to
+	// the media length and, when the media timescale differs from SampleRate,
+	// rescaled and rounded down (the same rounding as SeekTime's skip). The media
+	// length is what the file declares, so the value is still untrusted input for
+	// arithmetic. An edit-list value reads 0 when the sample durations sum to zero
+	// and the mdhd duration is zero, since the file then declares no media length;
+	// the Opus pre-skip is unaffected. Leading empty edits (media_time -1) do not
+	// zero it; they are StartOffset.
 	EncoderDelay int64
 
 	// Duration is the presented media length from the edit list window, excluding

@@ -18,12 +18,13 @@ import (
 // timing table built at open (stts for a plain file, the trun durations for a
 // fragmented stream) and the cursor move is SeekSample's.
 //
-// Presentation time 0 is the first presented sample: media tick
+// Presentation time 0 is the first presented sample: decoded sample
 // Info().EncoderDelay, the priming the edit list skips, after any leading empty
 // edits (whose length is Info().StartOffset and is not part of the time axis). A
 // seek to 0 selects the first sample a gapless player presents and SeekTime(d)
 // selects the same sample as decoding from the start and dropping EncoderDelay
-// plus d's worth of samples. d is rounded to the nearest media tick (halves up),
+// plus d's worth of samples (exactly so when the media timescale equals the
+// sample rate; otherwise tick-to-sample rounding can make the two differ). d is rounded to the nearest media tick (halves up),
 // so a time derived from a tick through a float or a truncated nanosecond count
 // still lands on that tick's unit.
 //
@@ -73,12 +74,24 @@ func (rd *Reader) SeekTime(d time.Duration) (sample int, skip int64, err error) 
 	if err := rd.SeekSample(int(idx)); err != nil {
 		return 0, 0, err
 	}
-	// off is below one unit's uint32 delta and the rate below 2^32, so the product
-	// fits uint64.
-	if rate := uint64(rd.info.SampleRate); rate > 0 && rate != uint64(rd.timescale) {
-		off = off * rate / uint64(rd.timescale)
+	// off is below one unit's uint32 delta, so the sample count fits int64.
+	return int(idx), int64(ticksToSamples(off, rd.timescale, rd.info.SampleRate)), nil
+}
+
+// ticksToSamples converts ticks at a media timescale to decoded samples at rate,
+// rounding down in integer arithmetic, and saturates at MaxUint64. It returns
+// ticks unchanged when the timescale or rate is unusable (zero or negative) or the
+// two are equal, which holds for every file this package writes.
+func ticksToSamples(ticks uint64, timescale uint32, rate int) uint64 {
+	if timescale == 0 || rate <= 0 || uint64(rate) == uint64(timescale) {
+		return ticks
 	}
-	return int(idx), int64(off), nil
+	hi, lo := bits.Mul64(ticks, uint64(rate))
+	if hi >= uint64(timescale) {
+		return math.MaxUint64 // the quotient does not fit uint64; Div64 would panic
+	}
+	q, _ := bits.Div64(hi, lo, uint64(timescale))
+	return q
 }
 
 // appendTimeRun appends count samples of the given duration to runs, dropping an

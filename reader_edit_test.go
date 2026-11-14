@@ -16,7 +16,8 @@ import (
 )
 
 // setEditList rewrites the version-0 edit list of data (this package's own plain
-// or fragmented output) to entries and fixes the edts, trak and moov sizes. Plain
+// or fragmented output) to entries and fixes the edts, trak and moov sizes. It
+// writes version 1 (64-bit fields) when an entry does not fit version 0. Plain
 // output has moov after mdat, so the resize leaves the chunk offsets alone; a
 // fragmented init segment uses default-base-is-moof, so its offsets are relative.
 // It fails the test on a plain file whose moov precedes its mdat.
@@ -35,16 +36,29 @@ func setEditList(tb testing.TB, data []byte, entries []box.ElstEntry) []byte {
 	}
 	oldSize := int(binary.BigEndian.Uint32(body[edts:]))
 
-	elstSize := 8 + 8 + 12*len(entries)
+	v1 := false
+	for _, e := range entries {
+		v1 = v1 || e.SegmentDuration > math.MaxUint32 || e.MediaTime > math.MaxInt32 || e.MediaTime < math.MinInt32
+	}
+	entrySize, version := 12, byte(0)
+	if v1 {
+		entrySize, version = 20, 1
+	}
+	elstSize := 8 + 8 + entrySize*len(entries)
 	repl := binary.BigEndian.AppendUint32(nil, uint32(8+elstSize))
 	repl = append(repl, "edts"...)
 	repl = binary.BigEndian.AppendUint32(repl, uint32(elstSize))
 	repl = append(repl, "elst"...)
-	repl = append(repl, 0, 0, 0, 0)
+	repl = append(repl, version, 0, 0, 0)
 	repl = binary.BigEndian.AppendUint32(repl, uint32(len(entries)))
 	for _, e := range entries {
-		repl = binary.BigEndian.AppendUint32(repl, uint32(e.SegmentDuration))
-		repl = binary.BigEndian.AppendUint32(repl, uint32(int32(e.MediaTime)))
+		if v1 {
+			repl = binary.BigEndian.AppendUint64(repl, e.SegmentDuration)
+			repl = binary.BigEndian.AppendUint64(repl, uint64(e.MediaTime))
+		} else {
+			repl = binary.BigEndian.AppendUint32(repl, uint32(e.SegmentDuration))
+			repl = binary.BigEndian.AppendUint32(repl, uint32(int32(e.MediaTime)))
+		}
 		repl = binary.BigEndian.AppendUint32(repl, uint32(e.MediaRate))
 	}
 
@@ -149,8 +163,14 @@ func TestPresentationWindow(t *testing.T) {
 		{
 			"media_time past the media",
 			[]box.ElstEntry{edit(seg, total+100)},
-			windowWant{total + 100, 0, 0, seekOutOfRange},
-			windowWant{total + 100, 0, 0, seekOutOfRange},
+			windowWant{total, 0, 0, seekOutOfRange},
+			windowWant{total, 0, 0, seekOutOfRange},
+		},
+		{
+			"media_time MaxInt64 (version 1)",
+			[]box.ElstEntry{edit(seg, math.MaxInt64)},
+			windowWant{total, 0, 0, seekOutOfRange},
+			windowWant{total, 0, 0, seekOutOfRange},
 		},
 		{
 			"two non-empty edits",
@@ -233,6 +253,47 @@ func TestOpusShorterThanPreSkip(t *testing.T) {
 	if _, _, err := r.SeekTime(0); !errors.Is(err, ErrOutOfRange) {
 		t.Errorf("SeekTime(0) err = %v, want ErrOutOfRange", err)
 	}
+}
+
+// setMediaTimescale patches the mdhd timescale of a version-0 mdhd in data.
+func setMediaTimescale(tb testing.TB, data []byte, ts uint32) {
+	tb.Helper()
+	moov := topLevelBoxOffset(tb, data, "moov")
+	mdhd := bytes.Index(data[moov:], []byte("mdhd"))
+	if mdhd < 0 {
+		tb.Fatal("setMediaTimescale: no mdhd in moov")
+	}
+	// mdhd version 0: type(4) version/flags(4) creation(4) modification(4) timescale(4).
+	binary.BigEndian.PutUint32(data[moov+mdhd+16:], ts)
+}
+
+// TestEncoderDelayIsInSamples pins that Info.EncoderDelay counts decoded samples
+// at Info.SampleRate when the media timescale differs from it: an edit-list
+// media_time is rescaled, rounding down like SeekTime's skip, and the Opus PreSkip
+// (already in 48 kHz samples) is not.
+func TestEncoderDelayIsInSamples(t *testing.T) {
+	t.Run("edit list rescaled", func(t *testing.T) {
+		// 16 kHz samples at a 32 kHz media timescale: media_time 101 ticks is 50.5
+		// samples.
+		cfg := WriterConfig{SampleRate: 16000, Channels: 1, ASC: ascMono16k, EncoderDelay: 101}
+		data := writeTimed(t, cfg, []uint32{2048, 2048, 2048, 2048})
+		setMediaTimescale(t, data, 32000)
+		r := mustReader(t, data)
+		if got := r.Info().EncoderDelay; got != 50 {
+			t.Errorf("EncoderDelay = %d, want 50", got)
+		}
+		if s, skip, err := r.SeekTime(0); err != nil || s != 0 || skip != 50 {
+			t.Errorf("SeekTime(0) = (%d, %d, %v), want (0, 50, nil)", s, skip, err)
+		}
+	})
+	t.Run("opus pre-skip not rescaled", func(t *testing.T) {
+		cfg := WriterConfig{Codec: CodecOpus, SampleRate: 48000, Channels: 1, OpusPreSkip: 312, EncoderDelay: NoEdit}
+		data := writeTimed(t, cfg, []uint32{960, 960, 960})
+		setMediaTimescale(t, data, 24000)
+		if got := mustReader(t, data).Info().EncoderDelay; got != 312 {
+			t.Errorf("EncoderDelay = %d, want 312", got)
+		}
+	})
 }
 
 func TestOpusWithoutEditListExcludesPreSkip(t *testing.T) {
@@ -371,6 +432,40 @@ func TestResolvePresentationSaturates(t *testing.T) {
 	}
 	if !errors.Is(w.seekErr, ErrUnsupported) {
 		t.Errorf("seekErr = %v, want ErrUnsupported", w.seekErr)
+	}
+}
+
+// TestResolvePresentationClampsToMediaEnd pins the clamp at its boundaries: a file
+// with no timing at all has a media end of 0, so an edit's media_time clamps to 0.
+func TestResolvePresentationClampsToMediaEnd(t *testing.T) {
+	tr := &track{edits: []box.ElstEntry{edit(100, 1024)}}
+	if w := resolvePresentation(tr, 1000, nil, false); w.start != 0 {
+		t.Errorf("start = %d, want 0", w.start)
+	}
+	// The bound is the summed sample durations, else the mdhd duration.
+	bound := []struct {
+		name  string
+		runs  []box.SttsRun
+		mdhd  uint64
+		media int64
+		want  uint64
+	}{
+		{"mdhd duration bound", nil, 500, 10000, 500},
+		{"summed durations win over mdhd duration", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 10000, 300},
+		{"one below the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 299, 299},
+		{"at the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 300, 300},
+		{"past the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 301, 300},
+	}
+	for _, b := range bound {
+		bt := &track{mdhdTS: 1000, mdhdDur: b.mdhd, edits: []box.ElstEntry{edit(100, b.media)}}
+		if w := resolvePresentation(bt, 1000, b.runs, false); w.start != b.want {
+			t.Errorf("%s: start = %d, want %d", b.name, w.start, b.want)
+		}
+	}
+	// The edit's own start is clamped; the Opus fallback start is not.
+	opus := &track{codec: fourccOpus, opusPreSkip: 312, mdhdTS: 48000, mdhdDur: 100}
+	if w := resolvePresentation(opus, 1000, nil, false); w.start != 312 {
+		t.Errorf("fallback start = %d, want 312", w.start)
 	}
 }
 
