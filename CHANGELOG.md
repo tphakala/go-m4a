@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- `Info.EncoderDelay` is a count of decoded samples per channel at `Info.SampleRate`, as its documentation and the trim recipe already treated it. It is unchanged when the media timescale equals the sample rate, which holds for every file this package writes; otherwise an edit-list media_time is rescaled, rounding down like `SeekTime`'s skip. An edit-list media_time past the end of the media is now clamped to the media length instead of being reported as written (up to `math.MaxInt64`). The Opus pre-skip fallback is reported as written.
+- `Info.EncoderDelay` is a count of decoded samples per channel at `Info.SampleRate`, as its documentation and the trim recipe already treated it. It is unchanged when the media timescale equals the sample rate, which holds for every file this package writes; otherwise an edit-list media_time is rescaled, rounding down like `SeekTime`'s skip. An edit-list media_time past the end of the media is now clamped to the media length instead of being reported as written (up to `math.MaxInt64`). The Opus pre-skip fallback is reported as written. An edit-list media_time reads 0 when the file declares no media length (sample durations sum to zero and a zero mdhd duration).
 - The bridges now build against go-aac v0.7.2 and go-opus v1.4.0. Encoded output is unchanged.
 
 ## [0.8.0] - 2026-10-20

@@ -56,8 +56,10 @@ type Info struct {
 	// the media length and, when the media timescale differs from SampleRate,
 	// rescaled and rounded down (the same rounding as SeekTime's skip). The media
 	// length is what the file declares, so the value is still untrusted input for
-	// arithmetic. Leading empty edits (media_time -1) do not zero it; they are
-	// StartOffset.
+	// arithmetic. An edit-list value reads 0 when the sample durations sum to zero
+	// and the mdhd duration is zero, since the file then declares no media length;
+	// the Opus pre-skip is unaffected. Leading empty edits (media_time -1) do not
+	// zero it; they are StartOffset.
 	EncoderDelay int64
 
 	// Duration is the presented media length from the edit list window, excluding
