@@ -442,6 +442,26 @@ func TestResolvePresentationClampsToMediaEnd(t *testing.T) {
 	if w := resolvePresentation(tr, 1000, nil, false); w.start != 0 {
 		t.Errorf("start = %d, want 0", w.start)
 	}
+	// The bound is the summed sample durations, else the mdhd duration.
+	bound := []struct {
+		name  string
+		runs  []box.SttsRun
+		mdhd  uint64
+		media int64
+		want  uint64
+	}{
+		{"mdhd duration bound", nil, 500, 10000, 500},
+		{"summed durations win over mdhd duration", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 10000, 300},
+		{"one below the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 299, 299},
+		{"at the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 300, 300},
+		{"past the media end", []box.SttsRun{{Count: 3, Delta: 100}}, 500, 301, 300},
+	}
+	for _, b := range bound {
+		bt := &track{mdhdTS: 1000, mdhdDur: b.mdhd, edits: []box.ElstEntry{edit(100, b.media)}}
+		if w := resolvePresentation(bt, 1000, b.runs, false); w.start != b.want {
+			t.Errorf("%s: start = %d, want %d", b.name, w.start, b.want)
+		}
+	}
 	// The edit's own start is clamped; the Opus fallback start is not.
 	opus := &track{codec: fourccOpus, opusPreSkip: 312, mdhdTS: 48000, mdhdDur: 100}
 	if w := resolvePresentation(opus, 1000, nil, false); w.start != 312 {
