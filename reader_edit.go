@@ -167,11 +167,12 @@ func editLength(e box.ElstEntry, mediaEnd uint64, movieTS, mediaTS uint32, fragm
 
 // setPresentation resolves the edit list and stores the run-length timing table
 // and the window SeekTime and Info read, including Info.EncoderDelay converted
-// to samples at Info.SampleRate (so fillFormatInfo must have run). It is shared by the plain and fragmented
-// paths so they cannot drift. The retained timing state is at most one 8-byte run
-// per distinct stretch of equal durations: bounded by the stts entries (inside the
-// capped moov) on the plain path and by the sample count on the fragmented path,
-// never an array of cumulative ticks per sample.
+// to samples at Info.SampleRate (so fillFormatInfo must have run). It is shared
+// by the plain and fragmented paths so they cannot drift. The retained timing
+// state is at most one 8-byte run per distinct stretch of equal durations:
+// bounded by the stts entries (inside the capped moov) on the plain path and by
+// the sample count on the fragmented path, never an array of cumulative ticks
+// per sample.
 func (rd *Reader) setPresentation(tr *track, movieTS uint32, runs []box.SttsRun, fragmented bool) {
 	w := resolvePresentation(tr, movieTS, runs, fragmented)
 	rd.timeRuns = runs
