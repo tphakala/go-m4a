@@ -152,7 +152,7 @@ func TestWriterCloseSeekRetry(t *testing.T) {
 // frame (1024 media samples) and an EncoderDelay of 5000, the post-priming length
 // is negative and must clamp to a zero segment_duration rather than wrap the
 // unsigned elst field. The reparsed Duration is a sane zero and EncoderDelay is
-// the raw media_time.
+// the media_time clamped to the media (one 1024-sample unit).
 func TestWriterEditListClamp(t *testing.T) {
 	const delay = 5000
 	cfg := WriterConfig{SampleRate: 48000, Channels: 1, ASC: ascMono48k, EncoderDelay: delay}
@@ -174,8 +174,8 @@ func TestWriterEditListClamp(t *testing.T) {
 	if info.Duration != 0 {
 		t.Errorf("Duration = %v, want 0", info.Duration)
 	}
-	if info.EncoderDelay != delay {
-		t.Errorf("EncoderDelay = %d, want %d", info.EncoderDelay, delay)
+	if info.EncoderDelay != 1024 {
+		t.Errorf("EncoderDelay = %d, want 1024 (clamped to the media)", info.EncoderDelay)
 	}
 	// The presented window is empty, so there is nothing to seek to.
 	if _, _, err := r.SeekTime(0); !errors.Is(err, ErrOutOfRange) {

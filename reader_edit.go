@@ -16,16 +16,21 @@ const unitMediaRate = 0x00010000
 
 // presentation is the one window of the track's media that the edit list
 // presents, resolved once at open. Every value derived from the edit list comes
-// from it: Info.EncoderDelay is start, Info.Duration is presented converted to
-// time, Info.StartOffset is lead converted to time, and SeekTime accepts media
-// tick start+t exactly when start+t < end. For a window SeekTime supports,
-// presented == end-start. All values are media ticks except lead, which is in
-// the movie timescale.
+// from it: Info.EncoderDelay is start converted to samples, Info.Duration is
+// presented converted to time, Info.StartOffset is lead converted to time, and
+// SeekTime accepts media tick start+t exactly when start+t < end. For a window
+// SeekTime supports, presented == end-start. All values are media ticks except
+// lead, which is in the movie timescale.
 type presentation struct {
 	start     uint64
 	end       uint64
 	presented uint64
 	lead      uint64
+
+	// startFromEdit is true when start is an edit-list media_time (in media
+	// ticks, clamped to the media end) and false when it is the Opus PreSkip
+	// fallback, which is already a count of 48 kHz samples.
+	startFromEdit bool
 
 	// seekErr is the ErrUnsupported error SeekTime returns for a non-negative
 	// time, or nil when the track can be time-sought.
@@ -44,11 +49,12 @@ type presentation struct {
 //
 // Without an edit list the window starts at the Opus dOps PreSkip (0 for other
 // codecs). With one, leading empty edits (media_time -1) are summed into lead and
-// skipped, and the window is the first edit with a media_time >= 0. SeekTime
-// supports only that shape: leading empty edits followed by exactly one edit at
-// rate 1.0. For any other shape Duration is the sum of the presented lengths of
-// every edit with a media_time >= 0, and seekErr says why SeekTime cannot map
-// time to media.
+// skipped, and the window is the first edit with a media_time >= 0, whose
+// media_time is clamped to the media end (one declared by the file, so a bound
+// on meaning, not a size guarantee). SeekTime supports only that shape: leading
+// empty edits followed by exactly one edit at rate 1.0. For any other shape
+// Duration is the sum of the presented lengths of every edit with a media_time
+// >= 0, and seekErr says why SeekTime cannot map time to media.
 func resolvePresentation(tr *track, movieTS uint32, runs []box.SttsRun, fragmented bool) presentation {
 	var w presentation
 	mediaEnd := sumTicks(runs)
@@ -77,7 +83,9 @@ func resolvePresentation(tr *track, movieTS uint32, runs []box.SttsRun, fragment
 				continue
 			}
 			if !haveStart {
-				w.start, haveStart = uint64(e.MediaTime), true
+				// A media_time past the media presents nothing either way (editLength
+				// still sees the raw entry and returns 0), so clamping loses nothing.
+				w.start, w.startFromEdit, haveStart = min(uint64(e.MediaTime), mediaEnd), true, true
 			}
 			w.presented = satAdd(w.presented, editLength(e, mediaEnd, movieTS, tr.mdhdTS, fragmented))
 		}
@@ -158,7 +166,8 @@ func editLength(e box.ElstEntry, mediaEnd uint64, movieTS, mediaTS uint32, fragm
 }
 
 // setPresentation resolves the edit list and stores the run-length timing table
-// and the window SeekTime and Info read. It is shared by the plain and fragmented
+// and the window SeekTime and Info read, including Info.EncoderDelay converted
+// to samples at Info.SampleRate (so fillFormatInfo must have run). It is shared by the plain and fragmented
 // paths so they cannot drift. The retained timing state is at most one 8-byte run
 // per distinct stretch of equal durations: bounded by the stts entries (inside the
 // capped moov) on the plain path and by the sample count on the fragmented path,
@@ -168,7 +177,13 @@ func (rd *Reader) setPresentation(tr *track, movieTS uint32, runs []box.SttsRun,
 	rd.timeRuns = runs
 	rd.timescale = tr.mdhdTS
 	rd.window = w
-	rd.info.EncoderDelay = int64(min(w.start, math.MaxInt64))
+	// fillFormatInfo has set info.SampleRate by now on both paths. The Opus
+	// fallback start is already in samples; an edit's media_time is in ticks.
+	delay := w.start
+	if w.startFromEdit {
+		delay = ticksToSamples(w.start, tr.mdhdTS, rd.info.SampleRate)
+	}
+	rd.info.EncoderDelay = int64(min(delay, math.MaxInt64))
 	rd.info.Duration = ticksToDuration(w.presented, tr.mdhdTS)
 	rd.info.StartOffset = ticksToDuration(w.lead, movieTS)
 }

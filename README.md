@@ -222,7 +222,7 @@ number of decoded samples per channel to drop from that unit's output to land on
 sample, skip, err := rd.SeekTime(90 * time.Second)
 ```
 
-Time 0 is the first presented sample, media tick `Info().EncoderDelay`, the
+Time 0 is the first presented sample, decoded sample `Info().EncoderDelay`, the
 priming the edit list skips, so `SeekTime(d)` selects the same sample as decoding
 from the start and dropping `EncoderDelay` plus `d`'s worth of samples (see the
 trim recipe below). Leading empty edits are skipped: their length is
@@ -262,8 +262,10 @@ _, err = io.Copy(pcmOut, dec)
 
 The go-aac decoder is not edit-list aware: `NewDecoder` emits every decoded
 sample, including both the leading priming and the trailing final-frame padding.
-For sample-accurate output, skip `info.EncoderDelay` leading samples per channel,
-then keep only `info.Duration`-worth of samples (`Duration * SampleRate` per
+For sample-accurate output, skip `info.EncoderDelay` leading samples per channel
+(a sample count at `info.SampleRate`; an edit-list value is clamped to the media
+length and rescaled, rounding down, when the media timescale differs from the
+sample rate), then keep only `info.Duration`-worth of samples (`Duration * SampleRate` per
 channel) and discard the rest. Without an edit list `Duration` is the media
 length less `EncoderDelay` (so the Opus pre-skip is excluded), and for a
 fragmented stream it runs to the end of the fragments, less the priming. The

@@ -114,6 +114,11 @@ func FuzzReader(f *testing.F) {
 	if b, ok := writerSeed(); ok {
 		f.Add(setEditList(f, b, []box.ElstEntry{edit(500, -1), edit(2000, 1024)}))
 	}
+	// Seed with a version-1 edit whose media_time is far past the media, so the
+	// fuzzer starts from the clamp.
+	if b, ok := writerSeed(); ok {
+		f.Add(setEditList(f, b, []box.ElstEntry{edit(2000, math.MaxInt64)}))
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		defer func() {
@@ -180,8 +185,8 @@ func FuzzReader(f *testing.F) {
 		// window is not empty. The rounding argument needs a media timescale of at
 		// most 5e8 and a Duration that did not saturate.
 		info := r.Info()
-		if info.Duration < 0 || info.StartOffset < 0 {
-			t.Errorf("negative Duration %v or StartOffset %v", info.Duration, info.StartOffset)
+		if info.Duration < 0 || info.StartOffset < 0 || info.EncoderDelay < 0 {
+			t.Errorf("negative Duration %v, StartOffset %v or EncoderDelay %d", info.Duration, info.StartOffset, info.EncoderDelay)
 		}
 		if _, _, zerr := r.SeekTime(0); !errors.Is(zerr, ErrUnsupported) && r.timescale <= 5e8 && info.Duration < math.MaxInt64 {
 			if _, _, derr := r.SeekTime(info.Duration); !errors.Is(derr, ErrOutOfRange) {

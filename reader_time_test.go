@@ -613,6 +613,30 @@ func TestSeekTimeSkipRescalesToSampleRate(t *testing.T) {
 	}
 }
 
+func TestTicksToSamples(t *testing.T) {
+	tests := []struct {
+		name      string
+		ticks     uint64
+		timescale uint32
+		rate      int
+		want      uint64
+	}{
+		{"equal", 1234, 48000, 48000, 1234},
+		{"zero timescale", 1234, 0, 48000, 1234},
+		{"zero rate", 1234, 48000, 0, 1234},
+		{"rounds down", 101, 32000, 16000, 50},
+		{"scales up", 100, 16000, 48000, 300},
+		{"saturates", math.MaxUint64, 1, 48000, math.MaxUint64},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ticksToSamples(tc.ticks, tc.timescale, tc.rate); got != tc.want {
+				t.Errorf("ticksToSamples(%d, %d, %d) = %d, want %d", tc.ticks, tc.timescale, tc.rate, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestErrOutOfRangeMessage(t *testing.T) {
 	if got, want := ErrOutOfRange.Error(), "go-m4a: seek position out of range"; got != want {
 		t.Fatalf("ErrOutOfRange = %q, want %q", got, want)
