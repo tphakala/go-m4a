@@ -23,7 +23,8 @@ import (
 // edits (whose length is Info().StartOffset and is not part of the time axis). A
 // seek to 0 selects the first sample a gapless player presents and SeekTime(d)
 // selects the same sample as decoding from the start and dropping EncoderDelay
-// plus d's worth of samples. d is rounded to the nearest media tick (halves up),
+// plus d's worth of samples (exactly so when the media timescale equals the
+// sample rate; otherwise tick-to-sample rounding can make the two differ). d is rounded to the nearest media tick (halves up),
 // so a time derived from a tick through a float or a truncated nanosecond count
 // still lands on that tick's unit.
 //

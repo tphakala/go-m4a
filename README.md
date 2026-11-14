@@ -224,8 +224,9 @@ sample, skip, err := rd.SeekTime(90 * time.Second)
 
 Time 0 is the first presented sample, decoded sample `Info().EncoderDelay`, the
 priming the edit list skips, so `SeekTime(d)` selects the same sample as decoding
-from the start and dropping `EncoderDelay` plus `d`'s worth of samples (see the
-trim recipe below). Leading empty edits are skipped: their length is
+from the start and dropping `EncoderDelay` plus `d`'s worth of samples (exactly
+so when the media timescale equals the sample rate, which holds for every file
+this package writes; see the trim recipe below). Leading empty edits are skipped: their length is
 `Info().StartOffset` and is not part of this time axis. `d` rounds to the nearest
 media tick. The valid range is `[0, Info().Duration)`, the window the edit list
 presents, so trailing padding is excluded; a time within half a media tick of
