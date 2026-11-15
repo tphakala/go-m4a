@@ -6,10 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-15
+
 ### Changed
 
 - `Info.EncoderDelay` is a count of decoded samples per channel at `Info.SampleRate`, as its documentation and the trim recipe already treated it. It is unchanged when the media timescale equals the sample rate, which holds for every file this package writes; otherwise an edit-list media_time is rescaled, rounding down like `SeekTime`'s skip. An edit-list media_time past the end of the media is now clamped to the media length instead of being reported as written (up to `math.MaxInt64`). The Opus pre-skip fallback is reported as written. An edit-list media_time reads 0 when the file declares no media length (sample durations sum to zero and a zero mdhd duration).
-- The bridges now build against go-aac v0.7.2 and go-opus v1.4.0. Encoded output is unchanged.
+- The bridges now build against go-aac v0.7.2 and go-opus v1.4.0, and `github.com/tphakala/simd` moves to v1.16.0. Encoded output is unchanged.
 
 ## [0.8.0] - 2026-10-20
 
@@ -50,7 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Releases up to and including v0.5.0 predate this file; see the [GitHub releases](https://github.com/tphakala/go-m4a/releases) and the git tags for their history.
 
-[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/tphakala/go-m4a/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/tphakala/go-m4a/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/tphakala/go-m4a/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/tphakala/go-m4a/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tphakala/go-m4a/compare/v0.5.0...v0.6.0
